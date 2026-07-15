@@ -1,0 +1,8 @@
+**/node_modules/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/package-lock.json
+.DS_Store
+Thumbs.db
+*.tar.gz
