@@ -88,11 +88,11 @@ jobs:
           # 这两个提交分别是仓库中可准确还原的 0.2.2 与 0.2.3 源码。
           create_release \
             "0.2.2" \
-            "f1b5772" \
+            "f1b5772251d8211672c238526a232809e2f53a5a" \
             "修复管理页标题对比度与试跑提示字段布局；运行记录改为稳定静态列表。"
           create_release \
             "0.2.3" \
-            "8771804" \
+            "87718042a4840379239f9bdb125dd7c89b499818" \
             "统一插件作者信息为 NNeiru，并更新作者主页。"
 
           current_version="$(jq -r '.TmdbRecognizeEnhancer.version' package.v2.json)"
