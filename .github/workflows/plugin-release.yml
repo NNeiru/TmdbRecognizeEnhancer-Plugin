@@ -11,6 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -25,6 +26,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Remove pre-sanitization workflow runs
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/29434486724" || true
+          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/29434961298" || true
 
       - name: Validate current version
         shell: bash
