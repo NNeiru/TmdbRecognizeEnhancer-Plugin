@@ -1,0 +1,100 @@
+name: Plugin Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - package.v2.json
+      - plugins.v2/tmdbrecognizeenhancer/**
+      - .github/workflows/plugin-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tmdbrecognizeenhancer-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate current version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(jq -r '.TmdbRecognizeEnhancer.version' package.v2.json)"
+          source_version="$(python - <<'PY'
+          import ast
+          from pathlib import Path
+
+          tree = ast.parse(Path('plugins.v2/tmdbrecognizeenhancer/__init__.py').read_text(encoding='utf-8'))
+          for class_node in (node for node in tree.body if isinstance(node, ast.ClassDef)):
+              for node in class_node.body:
+                  if isinstance(node, ast.Assign) and any(
+                      isinstance(target, ast.Name) and target.id == 'plugin_version'
+                      for target in node.targets
+                  ):
+                      print(ast.literal_eval(node.value))
+                      raise SystemExit
+          raise SystemExit('plugin_version not found')
+          PY
+          )"
+          test "$package_version" = "$source_version"
+
+      - name: Create installable releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          plugin_id="TmdbRecognizeEnhancer"
+          plugin_dir="plugins.v2/tmdbrecognizeenhancer"
+
+          create_release() {
+            local version="$1"
+            local commit="$2"
+            local notes="$3"
+            local tag="${plugin_id}_v${version}"
+            local asset="tmdbrecognizeenhancer_v${version}.zip"
+
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "Release $tag already exists, skipping"
+              return
+            fi
+
+            git cat-file -e "${commit}^{commit}"
+            rm -f "$asset"
+            git archive \
+              --format=zip \
+              --prefix=tmdbrecognizeenhancer/ \
+              --output="$asset" \
+              "${commit}:${plugin_dir}"
+
+            gh release create "$tag" "$asset" \
+              --target "$commit" \
+              --title "$tag" \
+              --notes "$notes"
+          }
+
+          # 这两个提交分别是仓库中可准确还原的 0.2.2 与 0.2.3 源码。
+          create_release \
+            "0.2.2" \
+            "f1b5772" \
+            "修复管理页标题对比度与试跑提示字段布局；运行记录改为稳定静态列表。"
+          create_release \
+            "0.2.3" \
+            "8771804" \
+            "统一插件作者信息为 NNeiru，并更新作者主页。"
+
+          current_version="$(jq -r '.TmdbRecognizeEnhancer.version' package.v2.json)"
+          current_notes="$(jq -r --arg version "v${current_version}" '.TmdbRecognizeEnhancer.history[$version] // "Automated plugin release"' package.v2.json)"
+          create_release "$current_version" "$GITHUB_SHA" "$current_notes"
