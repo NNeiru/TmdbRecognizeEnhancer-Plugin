@@ -28,9 +28,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "原生识别失败后降级搜索 TMDB，并以标题、年份、类型和季信息对候选进行受控评分。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.2.2"
-    plugin_author = "Tasu"
-    author_url = "https://github.com/jxxghp/MoviePilot"
+    plugin_version = "0.2.3"
+    plugin_author = "NNeiru"
+    author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
     plugin_order = 42
     auth_level = 1
