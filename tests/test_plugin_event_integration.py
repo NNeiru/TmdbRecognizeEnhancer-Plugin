@@ -162,40 +162,41 @@ def test_traditional_fixed_tmdb_id_is_never_researched_or_overwritten(monkeypatc
     assert runtime_meta.tmdbid == 123456
 
 
-def test_bangumi_quarter_import_reads_all_pages(monkeypatch):
+def test_anilist_quarter_import_reads_all_pages(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
-    offsets = []
+    pages = []
 
     class FakeResponse:
-        def __init__(self, offset):
-            self.offset = offset
+        def __init__(self, page):
+            self.page = page
 
         @staticmethod
         def raise_for_status():
             return None
 
         def json(self):
-            if self.offset == 0:
-                return {"data": [{"id": value} for value in range(100)], "total": 101}
-            return {"data": [{"id": 100}], "total": 101}
+            return {"data": {"Page": {
+                "pageInfo": {"hasNextPage": self.page == 1},
+                "media": [{"id": self.page}],
+            }}}
 
     class FakeRequest:
         def __init__(self, **kwargs):
             pass
 
         @staticmethod
-        def get_res(url):
-            offset = int(url.rsplit("offset=", 1)[1])
-            offsets.append(offset)
-            return FakeResponse(offset)
+        def post_res(url, json):
+            page = json["variables"]["page"]
+            pages.append(page)
+            return FakeResponse(page)
 
     monkeypatch.setattr(module, "RequestUtils", FakeRequest)
 
-    result = plugin._fetch_bangumi_quarter_month(2026, 7, {"User-Agent": "test"})
+    result = plugin._fetch_anilist_quarter(2026, 3, {"User-Agent": "test"})
 
-    assert len(result) == 101
-    assert offsets == [0, 100]
+    assert [item["id"] for item in result] == [1, 2]
+    assert pages == [1, 2]
 
 
 def test_catalog_helpers_classify_region_and_sequel(monkeypatch):
@@ -216,6 +217,98 @@ def test_catalog_helpers_classify_region_and_sequel(monkeypatch):
     assert item["region"] == "japan"
     assert item["is_multi_season"] is True
     assert module.TmdbRecognizeEnhancer._infer_title_season("示例动画 第十二季") == 12
+
+
+def test_anilist_catalog_has_filter_fields_before_tmdb_matching(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    media = {
+        "id": 88,
+        "idMal": 99,
+        "title": {"romaji": "Example 2nd Season", "english": "Example Season 2", "native": "例"},
+        "synonyms": ["Example II"],
+        "format": "TV",
+        "countryOfOrigin": "JP",
+        "episodes": 12,
+        "startDate": {"year": 2026, "month": 7, "day": 3},
+        "coverImage": {},
+        "relations": {"edges": [{"relationType": "PREQUEL", "node": {"type": "ANIME"}}]},
+    }
+
+    item = module.TmdbRecognizeEnhancer._normalize_anilist_media(media, "2026-Q3")
+
+    assert item["region"] == "japan"
+    assert item["platform"] == "TV"
+    assert item["is_multi_season"] is True
+    assert "tmdb_match" not in item
+
+
+def test_anibridge_mapping_prefills_tmdb_without_title_search(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    catalog = [{
+        "id": "anilist:88", "anilist_id": 88, "display_name": "Example",
+        "name": "Example", "date": "2026-07-03",
+    }]
+
+    class FakeResponse:
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {"anilist:88": {"tmdb_show:456:s2": {"1-12": "1-12"}}}
+
+    class FakeRequest:
+        def __init__(self, **kwargs):
+            pass
+
+        @staticmethod
+        def get_res(url):
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "RequestUtils", FakeRequest)
+    plugin._enrich_anibridge_mappings(catalog, {})
+
+    assert catalog[0]["tmdb_match"]["accepted"] is True
+    assert catalog[0]["tmdb_match"]["best"]["tmdb_id"] == 456
+    assert catalog[0]["tmdb_match"]["best"]["source"] == "anibridge"
+
+
+def test_catalog_fast_match_uses_structured_english_title(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+
+    class FakeTmdb:
+        def __init__(self, language=None):
+            assert language == "en-US"
+
+        @staticmethod
+        def search_multiis(title):
+            return [{
+                "id": 789,
+                "name": "The Example Anime",
+                "original_name": "例のアニメ",
+                "first_air_date": "2026-07-01",
+                "media_type": module.MediaType.TV,
+            }]
+
+        @staticmethod
+        def close():
+            return None
+
+    monkeypatch.setattr(module, "TmdbApi", FakeTmdb)
+    item = {
+        "search_titles": ["The Example Anime", "Rei no Anime"],
+        "aliases": ["The Example Anime", "Rei no Anime", "例のアニメ"],
+        "name": "Rei no Anime",
+    }
+
+    match = plugin._fast_catalog_tmdb_match(item)
+
+    assert match["accepted"] is True
+    assert match["best"]["tmdb_id"] == 789
+    assert match["best"]["score"] == 100.0
 
 
 def test_title_only_episode_preview_uses_saved_rule(monkeypatch):

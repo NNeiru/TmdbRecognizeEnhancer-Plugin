@@ -14,6 +14,7 @@ const error = ref('')
 const notice = ref('')
 const snackbar = ref(false)
 const rules = ref([])
+const rulesOpen = ref(true)
 const catalog = ref([])
 const catalogLoading = ref(false)
 const batchLoading = ref(false)
@@ -118,16 +119,18 @@ async function addCatalogItem(item, preference, tmdbId = '') {
       `${props.pluginBase}/episode-normalizer/catalog/add`,
       { id: item.id, quarter: quarterKey.value, preference, tmdb_id: tmdbId || undefined },
     )) || {}
+    const saved = (data.rules || []).some(rule => Number(rule.tmdb_id) === Number(data.tmdb_id))
+    if (!data.rule || !data.tmdb_id || !saved) throw new Error('后端未确认规则写入，未标记为已维护')
     rules.value = data.rules || rules.value
     Object.assign(item, data.item || {}, { maintained: true })
     failures.value = failures.value.filter(value => value.id !== item.id)
-    notice.value = data.message || `${item.name_cn || item.name} 已加入维护规则`
+    notice.value = data.message || `${item.display_name || item.name_cn || item.name} 已加入维护规则`
     snackbar.value = true
     if (data.needs_attention) openEditor(data.rule)
   } catch (err) {
     const failure = {
       id: item.id,
-      title: item.name_cn || item.name,
+      title: item.display_name || item.name_cn || item.name,
       reason: err?.message || '自动匹配 TMDB 失败',
       item,
       preference,
@@ -149,7 +152,10 @@ async function batchAdd() {
       { quarter: quarterKey.value, ids: selectedIds.value, preference: batchPreference.value },
     )) || {}
     rules.value = data.rules || rules.value
-    const addedIds = new Set((data.added || []).map(item => item.id))
+    const savedTmdbIds = new Set((data.rules || []).map(rule => Number(rule.tmdb_id)))
+    const addedIds = new Set((data.added || [])
+      .filter(item => item.tmdb_id && savedTmdbIds.has(Number(item.tmdb_id)))
+      .map(item => item.id))
     catalog.value = data.catalog || catalog.value
     catalog.value.forEach(item => { if (addedIds.has(item.id)) item.maintained = true })
     failures.value = (data.failed || []).map(value => ({
@@ -315,9 +321,41 @@ onMounted(async () => {
 
     <VCard variant="outlined" class="normalizer-card mb-4">
       <VCardItem>
+        <template #prepend><VAvatar color="success" variant="tonal"><VIcon icon="mdi-playlist-check" /></VAvatar></template>
+        <VCardTitle>已维护规则</VCardTitle>
+        <VCardSubtitle>{{ rules.length }} 个 TMDB 条目；规则固定显示在季度看板前</VCardSubtitle>
+        <template #append>
+          <VBtn
+            :icon="rulesOpen ? 'mdi-chevron-up' : 'mdi-chevron-down'" variant="text"
+            :title="rulesOpen ? '收起规则' : '展开规则'" @click="rulesOpen = !rulesOpen"
+          />
+        </template>
+      </VCardItem>
+      <VExpandTransition>
+        <div v-show="rulesOpen" class="rules-scroll">
+          <div class="rules-grid pa-4 pt-0">
+            <VCard v-for="rule in rules" :key="rule.tmdb_id" variant="tonal" class="rule-card">
+              <VCardText class="d-flex align-center ga-3">
+                <VAvatar :color="rule.enabled ? 'success' : 'default'" variant="tonal"><VIcon icon="mdi-animation-outline" /></VAvatar>
+                <div class="flex-grow-1 min-w-0">
+                  <div class="font-weight-bold text-truncate">{{ rule.title }}</div>
+                  <div class="text-caption text-medium-emphasis">TMDB {{ rule.tmdb_id }} · {{ rule.target_type === 'group' ? '剧集组' : '默认编集' }} · {{ rule.installments?.length || 0 }} 个季度片段</div>
+                </div>
+                <VBtn icon="mdi-pencil-outline" variant="text" @click="openEditor(rule)" />
+                <VBtn icon="mdi-delete-outline" variant="text" color="error" :loading="busyId === `rule-${rule.tmdb_id}`" @click="deleteRule(rule)" />
+              </VCardText>
+            </VCard>
+            <div v-if="!rules.length" class="empty-rules">从季度看板直接加入，或批量建立规则。</div>
+          </div>
+        </div>
+      </VExpandTransition>
+    </VCard>
+
+    <VCard variant="outlined" class="normalizer-card mb-4">
+      <VCardItem>
         <template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-view-dashboard-outline" /></VAvatar></template>
         <VCardTitle>季度番剧看板</VCardTitle>
-        <VCardSubtitle>切换季度自动加载；当前仅显示 {{ quarterKey }}，不会混入其它季度</VCardSubtitle>
+        <VCardSubtitle>AniList 季度目录 · AniBridge/TMDB 匹配；当前仅显示 {{ quarterKey }}</VCardSubtitle>
         <template #append><VBtn icon="mdi-refresh" variant="text" :loading="catalogLoading" @click="loadQuarter(true)" /></template>
       </VCardItem>
       <VCardText>
@@ -327,7 +365,7 @@ onMounted(async () => {
           <VTextField v-model="board.search" label="搜索番剧" prepend-inner-icon="mdi-magnify" clearable hide-details density="compact" />
           <VSelect
             v-model="board.region" label="地区" hide-details density="compact"
-            :items="[{title:'全部地区',value:'all'},{title:'日漫',value:'japan'},{title:'国漫',value:'china'},{title:'美漫/欧美',value:'western'},{title:'地区未知',value:'unknown'}]"
+            :items="[{title:'全部地区',value:'all'},{title:'日漫',value:'japan'},{title:'国漫',value:'china'},{title:'海外动画',value:'western'},{title:'地区未知',value:'unknown'}]"
           />
           <VSelect v-model="board.platform" :items="platforms" label="载体" hide-details density="compact" />
           <VSwitch v-model="board.multiOnly" label="仅续作/多季" color="secondary" hide-details density="compact" />
@@ -359,13 +397,13 @@ onMounted(async () => {
             <div class="select-corner"><VCheckbox v-model="selectedIds" :value="item.id" hide-details density="compact" /></div>
             <VImg v-if="item.poster" :src="item.poster" height="170" cover />
             <VCardItem>
-              <VCardTitle class="text-subtitle-1 text-wrap">{{ item.name_cn || item.name }}</VCardTitle>
+              <VCardTitle class="text-subtitle-1 text-wrap">{{ item.display_name || item.name_cn || item.name }}</VCardTitle>
               <VCardSubtitle>{{ item.date || '日期未知' }} · {{ item.episode_count || '?' }} 集</VCardSubtitle>
             </VCardItem>
             <VCardText class="pt-0">
               <div class="d-flex flex-wrap ga-1">
-                <VChip size="x-small" variant="tonal">{{ item.region_name }}</VChip>
-                <VChip size="x-small" variant="tonal">{{ item.platform }}</VChip>
+                <VChip v-if="item.region_name" size="x-small" variant="tonal">{{ item.region_name }}</VChip>
+                <VChip v-if="item.platform" size="x-small" variant="tonal">{{ item.platform }}</VChip>
                 <VChip v-if="item.is_multi_season" size="x-small" color="secondary" variant="tonal">续作/多季</VChip>
                 <VChip v-if="item.maintained" size="x-small" color="success" prepend-icon="mdi-check">已维护</VChip>
               </div>
@@ -394,28 +432,6 @@ onMounted(async () => {
           </div>
         </div>
       </VCardText>
-    </VCard>
-
-    <VCard variant="outlined" class="normalizer-card">
-      <VCardItem>
-        <template #prepend><VAvatar color="success" variant="tonal"><VIcon icon="mdi-playlist-check" /></VAvatar></template>
-        <VCardTitle>已维护规则</VCardTitle>
-        <VCardSubtitle>{{ rules.length }} 个 TMDB 条目；点击编辑时再展开完整编集设置</VCardSubtitle>
-      </VCardItem>
-      <div class="rules-grid pa-4 pt-0">
-        <VCard v-for="rule in rules" :key="rule.tmdb_id" variant="tonal" class="rule-card">
-          <VCardText class="d-flex align-center ga-3">
-            <VAvatar :color="rule.enabled ? 'success' : 'default'" variant="tonal"><VIcon icon="mdi-animation-outline" /></VAvatar>
-            <div class="flex-grow-1 min-w-0">
-              <div class="font-weight-bold text-truncate">{{ rule.title }}</div>
-              <div class="text-caption text-medium-emphasis">TMDB {{ rule.tmdb_id }} · {{ rule.target_type === 'group' ? '剧集组' : '默认编集' }} · {{ rule.installments?.length || 0 }} 个季度片段</div>
-            </div>
-            <VBtn icon="mdi-pencil-outline" variant="text" @click="openEditor(rule)" />
-            <VBtn icon="mdi-delete-outline" variant="text" color="error" :loading="busyId === `rule-${rule.tmdb_id}`" @click="deleteRule(rule)" />
-          </VCardText>
-        </VCard>
-        <div v-if="!rules.length" class="empty-rules">从季度看板直接加入，或批量建立规则。</div>
-      </div>
     </VCard>
 
     <VDialog v-model="editorOpen" max-width="820" scrollable>
@@ -498,6 +514,7 @@ onMounted(async () => {
 .catalog-card { position: relative; overflow: hidden; }
 .select-corner { position: absolute; z-index: 2; inset-block-start: 6px; inset-inline-start: 6px; border-radius: 10px; background: rgba(var(--v-theme-surface), .9); }
 .rules-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
+.rules-scroll { max-height: 330px; overflow-y: auto; }
 .rule-card { border: 1px solid rgba(var(--v-theme-success), .1); }
 .empty-catalog, .empty-rules { grid-column: 1 / -1; min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: rgba(var(--v-theme-on-surface), .55); }
 .manual-match { display: grid; grid-template-columns: 130px auto; gap: 8px; align-items: center; min-width: 290px; }

@@ -34,8 +34,16 @@ export function cloneConfig(config) {
 }
 
 export function unwrapResponse(response) {
-  if (response && Object.prototype.hasOwnProperty.call(response, 'data') && response.success !== undefined) {
-    return response.data
+  const payload = response?.data && response.data.success !== undefined
+    ? response.data
+    : response
+  if (payload?.success === false) {
+    const error = new Error(payload.message || '请求处理失败')
+    error.response = payload
+    throw error
+  }
+  if (payload && Object.prototype.hasOwnProperty.call(payload, 'data') && payload.success !== undefined) {
+    return payload.data
   }
   return response?.data ?? response
 }

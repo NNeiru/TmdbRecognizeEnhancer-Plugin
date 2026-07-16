@@ -1,44 +1,46 @@
 
-.normalizer-card[data-v-e1b2034d] { border-color: rgba(var(--v-theme-on-surface), .1);
+.normalizer-card[data-v-dc370c42] { border-color: rgba(var(--v-theme-on-surface), .1);
 }
-.preview-line[data-v-e1b2034d] { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center;
+.preview-line[data-v-dc370c42] { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center;
 }
-.board-controls[data-v-e1b2034d] { display: grid; grid-template-columns: 120px 110px minmax(220px, 1fr) 150px 150px auto; gap: 10px; align-items: center;
+.board-controls[data-v-dc370c42] { display: grid; grid-template-columns: 120px 110px minmax(220px, 1fr) 150px 150px auto; gap: 10px; align-items: center;
 }
-.batch-bar[data-v-e1b2034d] { display: flex; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .055);
+.batch-bar[data-v-dc370c42] { display: flex; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .055);
 }
-.batch-target[data-v-e1b2034d] { max-width: 280px;
+.batch-target[data-v-dc370c42] { max-width: 280px;
 }
-.catalog-grid[data-v-e1b2034d] { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 14px;
+.catalog-grid[data-v-dc370c42] { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 14px;
 }
-.catalog-card[data-v-e1b2034d] { position: relative; overflow: hidden;
+.catalog-card[data-v-dc370c42] { position: relative; overflow: hidden;
 }
-.select-corner[data-v-e1b2034d] { position: absolute; z-index: 2; inset-block-start: 6px; inset-inline-start: 6px; border-radius: 10px; background: rgba(var(--v-theme-surface), .9);
+.select-corner[data-v-dc370c42] { position: absolute; z-index: 2; inset-block-start: 6px; inset-inline-start: 6px; border-radius: 10px; background: rgba(var(--v-theme-surface), .9);
 }
-.rules-grid[data-v-e1b2034d] { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px;
+.rules-grid[data-v-dc370c42] { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px;
 }
-.rule-card[data-v-e1b2034d] { border: 1px solid rgba(var(--v-theme-success), .1);
+.rules-scroll[data-v-dc370c42] { max-height: 330px; overflow-y: auto;
 }
-.empty-catalog[data-v-e1b2034d], .empty-rules[data-v-e1b2034d] { grid-column: 1 / -1; min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: rgba(var(--v-theme-on-surface), .55);
+.rule-card[data-v-dc370c42] { border: 1px solid rgba(var(--v-theme-success), .1);
 }
-.manual-match[data-v-e1b2034d] { display: grid; grid-template-columns: 130px auto; gap: 8px; align-items: center; min-width: 290px;
+.empty-catalog[data-v-dc370c42], .empty-rules[data-v-dc370c42] { grid-column: 1 / -1; min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: rgba(var(--v-theme-on-surface), .55);
+}
+.manual-match[data-v-dc370c42] { display: grid; grid-template-columns: 130px auto; gap: 8px; align-items: center; min-width: 290px;
 }
 @media (max-width: 1000px) {
-.board-controls[data-v-e1b2034d] { grid-template-columns: repeat(2, minmax(0, 1fr));
+.board-controls[data-v-dc370c42] { grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 }
 @media (max-width: 700px) {
-.preview-line[data-v-e1b2034d] { grid-template-columns: 1fr;
+.preview-line[data-v-dc370c42] { grid-template-columns: 1fr;
 }
-.board-controls[data-v-e1b2034d] { grid-template-columns: 1fr;
+.board-controls[data-v-dc370c42] { grid-template-columns: 1fr;
 }
-.batch-bar[data-v-e1b2034d] { align-items: stretch; flex-direction: column;
+.batch-bar[data-v-dc370c42] { align-items: stretch; flex-direction: column;
 }
-.batch-target[data-v-e1b2034d] { max-width: none;
+.batch-target[data-v-dc370c42] { max-width: none;
 }
-.rules-grid[data-v-e1b2034d] { grid-template-columns: 1fr;
+.rules-grid[data-v-dc370c42] { grid-template-columns: 1fr;
 }
-.manual-match[data-v-e1b2034d] { grid-template-columns: 1fr; min-width: 160px;
+.manual-match[data-v-dc370c42] { grid-template-columns: 1fr; min-width: 160px;
 }
 }
 

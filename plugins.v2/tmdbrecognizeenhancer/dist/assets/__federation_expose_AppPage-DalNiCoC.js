@@ -1,8 +1,8 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { S as StrategySettings } from './StrategySettings-zjnxC5G-.js';
-import { _ as _export_sfc, u as unwrapResponse, c as cloneConfig, m as mediaTypeText, s as scoreColor } from './utils-mQOiSG-V.js';
+import { S as StrategySettings } from './StrategySettings-D3MqvjgH.js';
+import { _ as _export_sfc, u as unwrapResponse, c as cloneConfig, m as mediaTypeText, s as scoreColor } from './utils-DaBy4w3m.js';
 
-const {toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,createElementVNode:_createElementVNode$1,createElementBlock:_createElementBlock$1,createVNode:_createVNode$1,withKeys:_withKeys,unref:_unref$1,renderList:_renderList$1,Fragment:_Fragment$1,mergeProps:_mergeProps} = await importShared('vue');
+const {toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,createElementVNode:_createElementVNode$1,createElementBlock:_createElementBlock$1,createVNode:_createVNode$1,withKeys:_withKeys,renderList:_renderList$1,Fragment:_Fragment$1,vShow:_vShow$1,withDirectives:_withDirectives$1,unref:_unref$1,mergeProps:_mergeProps} = await importShared('vue');
 
 
 const _hoisted_1$1 = { class: "episode-normalizer" };
@@ -14,36 +14,37 @@ const _hoisted_6$1 = { key: 0 };
 const _hoisted_7$1 = { key: 0 };
 const _hoisted_8$1 = { key: 0 };
 const _hoisted_9$1 = { key: 1 };
-const _hoisted_10$1 = { class: "board-controls mb-3" };
-const _hoisted_11$1 = { class: "batch-bar mb-4" };
-const _hoisted_12$1 = { class: "text-caption text-medium-emphasis mb-3" };
-const _hoisted_13$1 = { key: 0 };
-const _hoisted_14$1 = { class: "catalog-grid" };
-const _hoisted_15$1 = { class: "select-corner" };
-const _hoisted_16$1 = { class: "d-flex flex-wrap ga-1" };
-const _hoisted_17$1 = {
-  key: 0,
-  class: "text-caption text-medium-emphasis mt-2"
-};
-const _hoisted_18$1 = {
-  key: 0,
-  class: "empty-catalog"
-};
-const _hoisted_19$1 = { class: "rules-grid pa-4 pt-0" };
-const _hoisted_20$1 = { class: "flex-grow-1 min-w-0" };
-const _hoisted_21$1 = { class: "font-weight-bold text-truncate" };
-const _hoisted_22$1 = { class: "text-caption text-medium-emphasis" };
-const _hoisted_23$1 = {
+const _hoisted_10$1 = { class: "rules-scroll" };
+const _hoisted_11$1 = { class: "rules-grid pa-4 pt-0" };
+const _hoisted_12$1 = { class: "flex-grow-1 min-w-0" };
+const _hoisted_13$1 = { class: "font-weight-bold text-truncate" };
+const _hoisted_14$1 = { class: "text-caption text-medium-emphasis" };
+const _hoisted_15$1 = {
   key: 0,
   class: "empty-rules"
 };
-const _hoisted_24$1 = { class: "d-flex align-center ga-3 mb-4" };
-const _hoisted_25$1 = {
+const _hoisted_16$1 = { class: "board-controls mb-3" };
+const _hoisted_17$1 = { class: "batch-bar mb-4" };
+const _hoisted_18$1 = { class: "text-caption text-medium-emphasis mb-3" };
+const _hoisted_19$1 = { key: 0 };
+const _hoisted_20$1 = { class: "catalog-grid" };
+const _hoisted_21$1 = { class: "select-corner" };
+const _hoisted_22$1 = { class: "d-flex flex-wrap ga-1" };
+const _hoisted_23$1 = {
+  key: 0,
+  class: "text-caption text-medium-emphasis mt-2"
+};
+const _hoisted_24$1 = {
+  key: 0,
+  class: "empty-catalog"
+};
+const _hoisted_25$1 = { class: "d-flex align-center ga-3 mb-4" };
+const _hoisted_26$1 = {
   key: 1,
   class: "text-caption text-medium-emphasis mb-4"
 };
-const _hoisted_26$1 = { class: "d-flex align-center mb-2" };
-const _hoisted_27$1 = { class: "manual-match" };
+const _hoisted_27$1 = { class: "d-flex align-center mb-2" };
+const _hoisted_28$1 = { class: "manual-match" };
 
 const {computed: computed$1,onMounted: onMounted$1,ref: ref$1,watch} = await importShared('vue');
 
@@ -65,6 +66,7 @@ const error = ref$1('');
 const notice = ref$1('');
 const snackbar = ref$1(false);
 const rules = ref$1([]);
+const rulesOpen = ref$1(true);
 const catalog = ref$1([]);
 const catalogLoading = ref$1(false);
 const batchLoading = ref$1(false);
@@ -169,16 +171,18 @@ async function addCatalogItem(item, preference, tmdbId = '') {
       `${props.pluginBase}/episode-normalizer/catalog/add`,
       { id: item.id, quarter: quarterKey.value, preference, tmdb_id: tmdbId || undefined },
     )) || {};
+    const saved = (data.rules || []).some(rule => Number(rule.tmdb_id) === Number(data.tmdb_id));
+    if (!data.rule || !data.tmdb_id || !saved) throw new Error('后端未确认规则写入，未标记为已维护')
     rules.value = data.rules || rules.value;
     Object.assign(item, data.item || {}, { maintained: true });
     failures.value = failures.value.filter(value => value.id !== item.id);
-    notice.value = data.message || `${item.name_cn || item.name} 已加入维护规则`;
+    notice.value = data.message || `${item.display_name || item.name_cn || item.name} 已加入维护规则`;
     snackbar.value = true;
     if (data.needs_attention) openEditor(data.rule);
   } catch (err) {
     const failure = {
       id: item.id,
-      title: item.name_cn || item.name,
+      title: item.display_name || item.name_cn || item.name,
       reason: err?.message || '自动匹配 TMDB 失败',
       item,
       preference,
@@ -200,7 +204,10 @@ async function batchAdd() {
       { quarter: quarterKey.value, ids: selectedIds.value, preference: batchPreference.value },
     )) || {};
     rules.value = data.rules || rules.value;
-    const addedIds = new Set((data.added || []).map(item => item.id));
+    const savedTmdbIds = new Set((data.rules || []).map(rule => Number(rule.tmdb_id)));
+    const addedIds = new Set((data.added || [])
+      .filter(item => item.tmdb_id && savedTmdbIds.has(Number(item.tmdb_id)))
+      .map(item => item.id));
     catalog.value = data.catalog || catalog.value;
     catalog.value.forEach(item => { if (addedIds.has(item.id)) item.maintained = true; });
     failures.value = (data.failed || []).map(value => ({
@@ -333,6 +340,7 @@ return (_ctx, _cache) => {
   const _component_VBtn = _resolveComponent$1("VBtn");
   const _component_VCardText = _resolveComponent$1("VCardText");
   const _component_VCard = _resolveComponent$1("VCard");
+  const _component_VExpandTransition = _resolveComponent$1("VExpandTransition");
   const _component_VSelect = _resolveComponent$1("VSelect");
   const _component_VSwitch = _resolveComponent$1("VSwitch");
   const _component_VCheckbox = _resolveComponent$1("VCheckbox");
@@ -381,7 +389,7 @@ return (_ctx, _cache) => {
           class: "mb-4"
         }, {
           default: _withCtx$1(() => [
-            _cache[20] || (_cache[20] = _createElementVNode$1("div", { class: "font-weight-bold" }, "归一化暂不能接管实际整理", -1)),
+            _cache[21] || (_cache[21] = _createElementVNode$1("div", { class: "font-weight-bold" }, "归一化暂不能接管实际整理", -1)),
             (!__props.runtimeStatus.runtime_compatible)
               ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_2$1, _toDisplayString$1(__props.runtimeStatus.runtime_message), 1))
               : _createCommentVNode$1("", true),
@@ -411,13 +419,13 @@ return (_ctx, _cache) => {
           ]),
           default: _withCtx$1(() => [
             _createVNode$1(_component_VCardTitle, null, {
-              default: _withCtx$1(() => [...(_cache[21] || (_cache[21] = [
+              default: _withCtx$1(() => [...(_cache[22] || (_cache[22] = [
                 _createTextVNode$1("标题试跑", -1)
               ]))]),
               _: 1
             }),
             _createVNode$1(_component_VCardSubtitle, null, {
-              default: _withCtx$1(() => [...(_cache[22] || (_cache[22] = [
+              default: _withCtx$1(() => [...(_cache[23] || (_cache[23] = [
                 _createTextVNode$1("粘贴原标题，自动解析季集、匹配 TMDB 并检查维护规则", -1)
               ]))]),
               _: 1
@@ -442,7 +450,7 @@ return (_ctx, _cache) => {
                 loading: previewLoading.value,
                 onClick: runPreview
               }, {
-                default: _withCtx$1(() => [...(_cache[23] || (_cache[23] = [
+                default: _withCtx$1(() => [...(_cache[24] || (_cache[24] = [
                   _createTextVNode$1("开始试跑", -1)
                 ]))]),
                 _: 1
@@ -489,6 +497,105 @@ return (_ctx, _cache) => {
         _createVNode$1(_component_VCardItem, null, {
           prepend: _withCtx$1(() => [
             _createVNode$1(_component_VAvatar, {
+              color: "success",
+              variant: "tonal"
+            }, {
+              default: _withCtx$1(() => [
+                _createVNode$1(_component_VIcon, { icon: "mdi-playlist-check" })
+              ]),
+              _: 1
+            })
+          ]),
+          append: _withCtx$1(() => [
+            _createVNode$1(_component_VBtn, {
+              icon: rulesOpen.value ? 'mdi-chevron-up' : 'mdi-chevron-down',
+              variant: "text",
+              title: rulesOpen.value ? '收起规则' : '展开规则',
+              onClick: _cache[2] || (_cache[2] = $event => (rulesOpen.value = !rulesOpen.value))
+            }, null, 8, ["icon", "title"])
+          ]),
+          default: _withCtx$1(() => [
+            _createVNode$1(_component_VCardTitle, null, {
+              default: _withCtx$1(() => [...(_cache[25] || (_cache[25] = [
+                _createTextVNode$1("已维护规则", -1)
+              ]))]),
+              _: 1
+            }),
+            _createVNode$1(_component_VCardSubtitle, null, {
+              default: _withCtx$1(() => [
+                _createTextVNode$1(_toDisplayString$1(rules.value.length) + " 个 TMDB 条目；规则固定显示在季度看板前", 1)
+              ]),
+              _: 1
+            })
+          ]),
+          _: 1
+        }),
+        _createVNode$1(_component_VExpandTransition, null, {
+          default: _withCtx$1(() => [
+            _withDirectives$1(_createElementVNode$1("div", _hoisted_10$1, [
+              _createElementVNode$1("div", _hoisted_11$1, [
+                (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(rules.value, (rule) => {
+                  return (_openBlock$1(), _createBlock$1(_component_VCard, {
+                    key: rule.tmdb_id,
+                    variant: "tonal",
+                    class: "rule-card"
+                  }, {
+                    default: _withCtx$1(() => [
+                      _createVNode$1(_component_VCardText, { class: "d-flex align-center ga-3" }, {
+                        default: _withCtx$1(() => [
+                          _createVNode$1(_component_VAvatar, {
+                            color: rule.enabled ? 'success' : 'default',
+                            variant: "tonal"
+                          }, {
+                            default: _withCtx$1(() => [
+                              _createVNode$1(_component_VIcon, { icon: "mdi-animation-outline" })
+                            ]),
+                            _: 1
+                          }, 8, ["color"]),
+                          _createElementVNode$1("div", _hoisted_12$1, [
+                            _createElementVNode$1("div", _hoisted_13$1, _toDisplayString$1(rule.title), 1),
+                            _createElementVNode$1("div", _hoisted_14$1, "TMDB " + _toDisplayString$1(rule.tmdb_id) + " · " + _toDisplayString$1(rule.target_type === 'group' ? '剧集组' : '默认编集') + " · " + _toDisplayString$1(rule.installments?.length || 0) + " 个季度片段", 1)
+                          ]),
+                          _createVNode$1(_component_VBtn, {
+                            icon: "mdi-pencil-outline",
+                            variant: "text",
+                            onClick: $event => (openEditor(rule))
+                          }, null, 8, ["onClick"]),
+                          _createVNode$1(_component_VBtn, {
+                            icon: "mdi-delete-outline",
+                            variant: "text",
+                            color: "error",
+                            loading: busyId.value === `rule-${rule.tmdb_id}`,
+                            onClick: $event => (deleteRule(rule))
+                          }, null, 8, ["loading", "onClick"])
+                        ]),
+                        _: 2
+                      }, 1024)
+                    ]),
+                    _: 2
+                  }, 1024))
+                }), 128)),
+                (!rules.value.length)
+                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_15$1, "从季度看板直接加入，或批量建立规则。"))
+                  : _createCommentVNode$1("", true)
+              ])
+            ], 512), [
+              [_vShow$1, rulesOpen.value]
+            ])
+          ]),
+          _: 1
+        })
+      ]),
+      _: 1
+    }),
+    _createVNode$1(_component_VCard, {
+      variant: "outlined",
+      class: "normalizer-card mb-4"
+    }, {
+      default: _withCtx$1(() => [
+        _createVNode$1(_component_VCardItem, null, {
+          prepend: _withCtx$1(() => [
+            _createVNode$1(_component_VAvatar, {
               color: "secondary",
               variant: "tonal"
             }, {
@@ -503,19 +610,19 @@ return (_ctx, _cache) => {
               icon: "mdi-refresh",
               variant: "text",
               loading: catalogLoading.value,
-              onClick: _cache[2] || (_cache[2] = $event => (loadQuarter(true)))
+              onClick: _cache[3] || (_cache[3] = $event => (loadQuarter(true)))
             }, null, 8, ["loading"])
           ]),
           default: _withCtx$1(() => [
             _createVNode$1(_component_VCardTitle, null, {
-              default: _withCtx$1(() => [...(_cache[24] || (_cache[24] = [
+              default: _withCtx$1(() => [...(_cache[26] || (_cache[26] = [
                 _createTextVNode$1("季度番剧看板", -1)
               ]))]),
               _: 1
             }),
             _createVNode$1(_component_VCardSubtitle, null, {
               default: _withCtx$1(() => [
-                _createTextVNode$1("切换季度自动加载；当前仅显示 " + _toDisplayString$1(quarterKey.value) + "，不会混入其它季度", 1)
+                _createTextVNode$1("AniList 季度目录 · AniBridge/TMDB 匹配；当前仅显示 " + _toDisplayString$1(quarterKey.value), 1)
               ]),
               _: 1
             })
@@ -524,10 +631,10 @@ return (_ctx, _cache) => {
         }),
         _createVNode$1(_component_VCardText, null, {
           default: _withCtx$1(() => [
-            _createElementVNode$1("div", _hoisted_10$1, [
+            _createElementVNode$1("div", _hoisted_16$1, [
               _createVNode$1(_component_VSelect, {
                 modelValue: board.value.year,
-                "onUpdate:modelValue": _cache[3] || (_cache[3] = $event => ((board.value.year) = $event)),
+                "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((board.value.year) = $event)),
                 items: _unref$1(years),
                 label: "年份",
                 "hide-details": "",
@@ -535,7 +642,7 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue", "items"]),
               _createVNode$1(_component_VSelect, {
                 modelValue: board.value.quarter,
-                "onUpdate:modelValue": _cache[4] || (_cache[4] = $event => ((board.value.quarter) = $event)),
+                "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((board.value.quarter) = $event)),
                 items: [1,2,3,4].map(value => ({ title: `Q${value}`, value })),
                 label: "季度",
                 "hide-details": "",
@@ -543,7 +650,7 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue", "items"]),
               _createVNode$1(_component_VTextField, {
                 modelValue: board.value.search,
-                "onUpdate:modelValue": _cache[5] || (_cache[5] = $event => ((board.value.search) = $event)),
+                "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((board.value.search) = $event)),
                 label: "搜索番剧",
                 "prepend-inner-icon": "mdi-magnify",
                 clearable: "",
@@ -552,15 +659,15 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue"]),
               _createVNode$1(_component_VSelect, {
                 modelValue: board.value.region,
-                "onUpdate:modelValue": _cache[6] || (_cache[6] = $event => ((board.value.region) = $event)),
+                "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((board.value.region) = $event)),
                 label: "地区",
                 "hide-details": "",
                 density: "compact",
-                items: [{title:'全部地区',value:'all'},{title:'日漫',value:'japan'},{title:'国漫',value:'china'},{title:'美漫/欧美',value:'western'},{title:'地区未知',value:'unknown'}]
+                items: [{title:'全部地区',value:'all'},{title:'日漫',value:'japan'},{title:'国漫',value:'china'},{title:'海外动画',value:'western'},{title:'地区未知',value:'unknown'}]
               }, null, 8, ["modelValue"]),
               _createVNode$1(_component_VSelect, {
                 modelValue: board.value.platform,
-                "onUpdate:modelValue": _cache[7] || (_cache[7] = $event => ((board.value.platform) = $event)),
+                "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((board.value.platform) = $event)),
                 items: platforms.value,
                 label: "载体",
                 "hide-details": "",
@@ -568,14 +675,14 @@ return (_ctx, _cache) => {
               }, null, 8, ["modelValue", "items"]),
               _createVNode$1(_component_VSwitch, {
                 modelValue: board.value.multiOnly,
-                "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((board.value.multiOnly) = $event)),
+                "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((board.value.multiOnly) = $event)),
                 label: "仅续作/多季",
                 color: "secondary",
                 "hide-details": "",
                 density: "compact"
               }, null, 8, ["modelValue"])
             ]),
-            _createElementVNode$1("div", _hoisted_11$1, [
+            _createElementVNode$1("div", _hoisted_17$1, [
               _createVNode$1(_component_VCheckbox, {
                 "model-value": allFilteredSelected.value,
                 indeterminate: selectedIds.value.length > 0 && !allFilteredSelected.value,
@@ -587,7 +694,7 @@ return (_ctx, _cache) => {
               _createVNode$1(_component_VSpacer),
               _createVNode$1(_component_VSelect, {
                 modelValue: batchPreference.value,
-                "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((batchPreference).value = $event)),
+                "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((batchPreference).value = $event)),
                 class: "batch-target",
                 "hide-details": "",
                 density: "compact",
@@ -614,13 +721,13 @@ return (_ctx, _cache) => {
                   class: "mb-4"
                 }))
               : _createCommentVNode$1("", true),
-            _createElementVNode$1("div", _hoisted_12$1, [
+            _createElementVNode$1("div", _hoisted_18$1, [
               _createTextVNode$1(" 当前 " + _toDisplayString$1(filteredCatalog.value.length) + " / " + _toDisplayString$1(catalog.value.length) + " 条 ", 1),
               (catalogMeta.value.updated_at)
-                ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_13$1, " · 更新于 " + _toDisplayString$1(catalogMeta.value.updated_at), 1))
+                ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_19$1, " · 更新于 " + _toDisplayString$1(catalogMeta.value.updated_at), 1))
                 : _createCommentVNode$1("", true)
             ]),
-            _createElementVNode$1("div", _hoisted_14$1, [
+            _createElementVNode$1("div", _hoisted_20$1, [
               (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(filteredCatalog.value, (item) => {
                 return (_openBlock$1(), _createBlock$1(_component_VCard, {
                   key: item.id,
@@ -628,10 +735,10 @@ return (_ctx, _cache) => {
                   class: "catalog-card"
                 }, {
                   default: _withCtx$1(() => [
-                    _createElementVNode$1("div", _hoisted_15$1, [
+                    _createElementVNode$1("div", _hoisted_21$1, [
                       _createVNode$1(_component_VCheckbox, {
                         modelValue: selectedIds.value,
-                        "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((selectedIds).value = $event)),
+                        "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((selectedIds).value = $event)),
                         value: item.id,
                         "hide-details": "",
                         density: "compact"
@@ -649,7 +756,7 @@ return (_ctx, _cache) => {
                       default: _withCtx$1(() => [
                         _createVNode$1(_component_VCardTitle, { class: "text-subtitle-1 text-wrap" }, {
                           default: _withCtx$1(() => [
-                            _createTextVNode$1(_toDisplayString$1(item.name_cn || item.name), 1)
+                            _createTextVNode$1(_toDisplayString$1(item.display_name || item.name_cn || item.name), 1)
                           ]),
                           _: 2
                         }, 1024),
@@ -664,33 +771,39 @@ return (_ctx, _cache) => {
                     }, 1024),
                     _createVNode$1(_component_VCardText, { class: "pt-0" }, {
                       default: _withCtx$1(() => [
-                        _createElementVNode$1("div", _hoisted_16$1, [
-                          _createVNode$1(_component_VChip, {
-                            size: "x-small",
-                            variant: "tonal"
-                          }, {
-                            default: _withCtx$1(() => [
-                              _createTextVNode$1(_toDisplayString$1(item.region_name), 1)
-                            ]),
-                            _: 2
-                          }, 1024),
-                          _createVNode$1(_component_VChip, {
-                            size: "x-small",
-                            variant: "tonal"
-                          }, {
-                            default: _withCtx$1(() => [
-                              _createTextVNode$1(_toDisplayString$1(item.platform), 1)
-                            ]),
-                            _: 2
-                          }, 1024),
-                          (item.is_multi_season)
+                        _createElementVNode$1("div", _hoisted_22$1, [
+                          (item.region_name)
                             ? (_openBlock$1(), _createBlock$1(_component_VChip, {
                                 key: 0,
+                                size: "x-small",
+                                variant: "tonal"
+                              }, {
+                                default: _withCtx$1(() => [
+                                  _createTextVNode$1(_toDisplayString$1(item.region_name), 1)
+                                ]),
+                                _: 2
+                              }, 1024))
+                            : _createCommentVNode$1("", true),
+                          (item.platform)
+                            ? (_openBlock$1(), _createBlock$1(_component_VChip, {
+                                key: 1,
+                                size: "x-small",
+                                variant: "tonal"
+                              }, {
+                                default: _withCtx$1(() => [
+                                  _createTextVNode$1(_toDisplayString$1(item.platform), 1)
+                                ]),
+                                _: 2
+                              }, 1024))
+                            : _createCommentVNode$1("", true),
+                          (item.is_multi_season)
+                            ? (_openBlock$1(), _createBlock$1(_component_VChip, {
+                                key: 2,
                                 size: "x-small",
                                 color: "secondary",
                                 variant: "tonal"
                               }, {
-                                default: _withCtx$1(() => [...(_cache[25] || (_cache[25] = [
+                                default: _withCtx$1(() => [...(_cache[27] || (_cache[27] = [
                                   _createTextVNode$1("续作/多季", -1)
                                 ]))]),
                                 _: 1
@@ -698,12 +811,12 @@ return (_ctx, _cache) => {
                             : _createCommentVNode$1("", true),
                           (item.maintained)
                             ? (_openBlock$1(), _createBlock$1(_component_VChip, {
-                                key: 1,
+                                key: 3,
                                 size: "x-small",
                                 color: "success",
                                 "prepend-icon": "mdi-check"
                               }, {
-                                default: _withCtx$1(() => [...(_cache[26] || (_cache[26] = [
+                                default: _withCtx$1(() => [...(_cache[28] || (_cache[28] = [
                                   _createTextVNode$1("已维护", -1)
                                 ]))]),
                                 _: 1
@@ -711,7 +824,7 @@ return (_ctx, _cache) => {
                             : _createCommentVNode$1("", true)
                         ]),
                         (item.tmdb_match?.best)
-                          ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_17$1, " TMDB " + _toDisplayString$1(item.tmdb_match.best.tmdb_id) + " · " + _toDisplayString$1(item.tmdb_match.best.name), 1))
+                          ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_23$1, " TMDB " + _toDisplayString$1(item.tmdb_match.best.tmdb_id) + " · " + _toDisplayString$1(item.tmdb_match.best.name), 1))
                           : _createCommentVNode$1("", true)
                       ]),
                       _: 2
@@ -727,7 +840,7 @@ return (_ctx, _cache) => {
                                   "append-icon": "mdi-menu-down",
                                   loading: busyId.value === item.id
                                 }), {
-                                  default: _withCtx$1(() => [...(_cache[27] || (_cache[27] = [
+                                  default: _withCtx$1(() => [...(_cache[29] || (_cache[29] = [
                                     _createTextVNode$1("加入规则", -1)
                                   ]))]),
                                   _: 1
@@ -758,7 +871,7 @@ return (_ctx, _cache) => {
                               "prepend-icon": "mdi-pencil-outline",
                               onClick: $event => (openEditor(rules.value.find(rule => Number(rule.tmdb_id) === Number(item.tmdb_match?.best?.tmdb_id))))
                             }, {
-                              default: _withCtx$1(() => [...(_cache[28] || (_cache[28] = [
+                              default: _withCtx$1(() => [...(_cache[30] || (_cache[30] = [
                                 _createTextVNode$1("编辑规则", -1)
                               ]))]),
                               _: 1
@@ -771,12 +884,12 @@ return (_ctx, _cache) => {
                 }, 1024))
               }), 128)),
               (!catalogLoading.value && !filteredCatalog.value.length)
-                ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_18$1, [
+                ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_24$1, [
                     _createVNode$1(_component_VIcon, {
                       icon: "mdi-calendar-search",
                       size: "48"
                     }),
-                    _cache[29] || (_cache[29] = _createElementVNode$1("div", null, "当前筛选条件没有番剧", -1))
+                    _cache[31] || (_cache[31] = _createElementVNode$1("div", null, "当前筛选条件没有番剧", -1))
                   ]))
                 : _createCommentVNode$1("", true)
             ])
@@ -786,91 +899,9 @@ return (_ctx, _cache) => {
       ]),
       _: 1
     }),
-    _createVNode$1(_component_VCard, {
-      variant: "outlined",
-      class: "normalizer-card"
-    }, {
-      default: _withCtx$1(() => [
-        _createVNode$1(_component_VCardItem, null, {
-          prepend: _withCtx$1(() => [
-            _createVNode$1(_component_VAvatar, {
-              color: "success",
-              variant: "tonal"
-            }, {
-              default: _withCtx$1(() => [
-                _createVNode$1(_component_VIcon, { icon: "mdi-playlist-check" })
-              ]),
-              _: 1
-            })
-          ]),
-          default: _withCtx$1(() => [
-            _createVNode$1(_component_VCardTitle, null, {
-              default: _withCtx$1(() => [...(_cache[30] || (_cache[30] = [
-                _createTextVNode$1("已维护规则", -1)
-              ]))]),
-              _: 1
-            }),
-            _createVNode$1(_component_VCardSubtitle, null, {
-              default: _withCtx$1(() => [
-                _createTextVNode$1(_toDisplayString$1(rules.value.length) + " 个 TMDB 条目；点击编辑时再展开完整编集设置", 1)
-              ]),
-              _: 1
-            })
-          ]),
-          _: 1
-        }),
-        _createElementVNode$1("div", _hoisted_19$1, [
-          (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(rules.value, (rule) => {
-            return (_openBlock$1(), _createBlock$1(_component_VCard, {
-              key: rule.tmdb_id,
-              variant: "tonal",
-              class: "rule-card"
-            }, {
-              default: _withCtx$1(() => [
-                _createVNode$1(_component_VCardText, { class: "d-flex align-center ga-3" }, {
-                  default: _withCtx$1(() => [
-                    _createVNode$1(_component_VAvatar, {
-                      color: rule.enabled ? 'success' : 'default',
-                      variant: "tonal"
-                    }, {
-                      default: _withCtx$1(() => [
-                        _createVNode$1(_component_VIcon, { icon: "mdi-animation-outline" })
-                      ]),
-                      _: 1
-                    }, 8, ["color"]),
-                    _createElementVNode$1("div", _hoisted_20$1, [
-                      _createElementVNode$1("div", _hoisted_21$1, _toDisplayString$1(rule.title), 1),
-                      _createElementVNode$1("div", _hoisted_22$1, "TMDB " + _toDisplayString$1(rule.tmdb_id) + " · " + _toDisplayString$1(rule.target_type === 'group' ? '剧集组' : '默认编集') + " · " + _toDisplayString$1(rule.installments?.length || 0) + " 个季度片段", 1)
-                    ]),
-                    _createVNode$1(_component_VBtn, {
-                      icon: "mdi-pencil-outline",
-                      variant: "text",
-                      onClick: $event => (openEditor(rule))
-                    }, null, 8, ["onClick"]),
-                    _createVNode$1(_component_VBtn, {
-                      icon: "mdi-delete-outline",
-                      variant: "text",
-                      color: "error",
-                      loading: busyId.value === `rule-${rule.tmdb_id}`,
-                      onClick: $event => (deleteRule(rule))
-                    }, null, 8, ["loading", "onClick"])
-                  ]),
-                  _: 2
-                }, 1024)
-              ]),
-              _: 2
-            }, 1024))
-          }), 128)),
-          (!rules.value.length)
-            ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_23$1, "从季度看板直接加入，或批量建立规则。"))
-            : _createCommentVNode$1("", true)
-        ])
-      ]),
-      _: 1
-    }),
     _createVNode$1(_component_VDialog, {
       modelValue: editorOpen.value,
-      "onUpdate:modelValue": _cache[16] || (_cache[16] = $event => ((editorOpen).value = $event)),
+      "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((editorOpen).value = $event)),
       "max-width": "820",
       scrollable: ""
     }, {
@@ -883,12 +914,12 @@ return (_ctx, _cache) => {
                     _createVNode$1(_component_VBtn, {
                       icon: "mdi-close",
                       variant: "text",
-                      onClick: _cache[11] || (_cache[11] = $event => (editorOpen.value = false))
+                      onClick: _cache[12] || (_cache[12] = $event => (editorOpen.value = false))
                     })
                   ]),
                   default: _withCtx$1(() => [
                     _createVNode$1(_component_VCardTitle, null, {
-                      default: _withCtx$1(() => [...(_cache[31] || (_cache[31] = [
+                      default: _withCtx$1(() => [...(_cache[32] || (_cache[32] = [
                         _createTextVNode$1("编辑维护规则", -1)
                       ]))]),
                       _: 1
@@ -905,10 +936,10 @@ return (_ctx, _cache) => {
                 _createVNode$1(_component_VDivider),
                 _createVNode$1(_component_VCardText, null, {
                   default: _withCtx$1(() => [
-                    _createElementVNode$1("div", _hoisted_24$1, [
+                    _createElementVNode$1("div", _hoisted_25$1, [
                       _createVNode$1(_component_VSwitch, {
                         modelValue: editForm.value.enabled,
-                        "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((editForm.value.enabled) = $event)),
+                        "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((editForm.value.enabled) = $event)),
                         label: "启用规则",
                         color: "success",
                         "hide-details": ""
@@ -920,7 +951,7 @@ return (_ctx, _cache) => {
                         loading: editorLoading.value,
                         onClick: inspectTarget
                       }, {
-                        default: _withCtx$1(() => [...(_cache[32] || (_cache[32] = [
+                        default: _withCtx$1(() => [...(_cache[33] || (_cache[33] = [
                           _createTextVNode$1("刷新编集", -1)
                         ]))]),
                         _: 1
@@ -928,7 +959,7 @@ return (_ctx, _cache) => {
                     ]),
                     _createVNode$1(_component_VRadioGroup, {
                       modelValue: editForm.value.target_type,
-                      "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((editForm.value.target_type) = $event)),
+                      "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((editForm.value.target_type) = $event)),
                       "hide-details": ""
                     }, {
                       default: _withCtx$1(() => [
@@ -947,14 +978,14 @@ return (_ctx, _cache) => {
                       ? (_openBlock$1(), _createBlock$1(_component_VSelect, {
                           key: 0,
                           modelValue: editForm.value.episode_group_id,
-                          "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((editForm.value.episode_group_id) = $event)),
+                          "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((editForm.value.episode_group_id) = $event)),
                           class: "mt-3",
                           items: (inspection.value?.groups || []).map(group => ({ title: `${group.name} · ${groupType(group.type)} · ${group.episode_count} 集`, value: group.id })),
                           label: "目标剧集组"
                         }, null, 8, ["modelValue", "items"]))
                       : _createCommentVNode$1("", true),
                     (selectedGroup.value)
-                      ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_25$1, [
+                      ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_26$1, [
                           (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(selectedGroup.value.seasons || [], (season) => {
                             return (_openBlock$1(), _createElementBlock$1("span", {
                               key: season.season,
@@ -963,8 +994,8 @@ return (_ctx, _cache) => {
                           }), 128))
                         ]))
                       : _createCommentVNode$1("", true),
-                    _createElementVNode$1("div", _hoisted_26$1, [
-                      _cache[34] || (_cache[34] = _createElementVNode$1("strong", null, "季度片段", -1)),
+                    _createElementVNode$1("div", _hoisted_27$1, [
+                      _cache[35] || (_cache[35] = _createElementVNode$1("strong", null, "季度片段", -1)),
                       _createVNode$1(_component_VSpacer),
                       _createVNode$1(_component_VBtn, {
                         size: "small",
@@ -972,7 +1003,7 @@ return (_ctx, _cache) => {
                         "prepend-icon": "mdi-plus",
                         onClick: addInstallment
                       }, {
-                        default: _withCtx$1(() => [...(_cache[33] || (_cache[33] = [
+                        default: _withCtx$1(() => [...(_cache[34] || (_cache[34] = [
                           _createTextVNode$1("添加", -1)
                         ]))]),
                         _: 1
@@ -1078,7 +1109,7 @@ return (_ctx, _cache) => {
                                     "prepend-icon": "mdi-delete-outline",
                                     onClick: $event => (editForm.value.installments.splice(index, 1))
                                   }, {
-                                    default: _withCtx$1(() => [...(_cache[35] || (_cache[35] = [
+                                    default: _withCtx$1(() => [...(_cache[36] || (_cache[36] = [
                                       _createTextVNode$1("删除片段", -1)
                                     ]))]),
                                     _: 1
@@ -1102,9 +1133,9 @@ return (_ctx, _cache) => {
                     _createVNode$1(_component_VSpacer),
                     _createVNode$1(_component_VBtn, {
                       variant: "text",
-                      onClick: _cache[15] || (_cache[15] = $event => (editorOpen.value = false))
+                      onClick: _cache[16] || (_cache[16] = $event => (editorOpen.value = false))
                     }, {
-                      default: _withCtx$1(() => [...(_cache[36] || (_cache[36] = [
+                      default: _withCtx$1(() => [...(_cache[37] || (_cache[37] = [
                         _createTextVNode$1("取消", -1)
                       ]))]),
                       _: 1
@@ -1114,7 +1145,7 @@ return (_ctx, _cache) => {
                       loading: editorLoading.value,
                       onClick: saveRule
                     }, {
-                      default: _withCtx$1(() => [...(_cache[37] || (_cache[37] = [
+                      default: _withCtx$1(() => [...(_cache[38] || (_cache[38] = [
                         _createTextVNode$1("保存规则", -1)
                       ]))]),
                       _: 1
@@ -1131,7 +1162,7 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode$1(_component_VDialog, {
       modelValue: failureDialog.value,
-      "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((failureDialog).value = $event)),
+      "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((failureDialog).value = $event)),
       "max-width": "720"
     }, {
       default: _withCtx$1(() => [
@@ -1140,13 +1171,13 @@ return (_ctx, _cache) => {
             _createVNode$1(_component_VCardItem, null, {
               default: _withCtx$1(() => [
                 _createVNode$1(_component_VCardTitle, null, {
-                  default: _withCtx$1(() => [...(_cache[38] || (_cache[38] = [
+                  default: _withCtx$1(() => [...(_cache[39] || (_cache[39] = [
                     _createTextVNode$1("这些番剧未能自动匹配", -1)
                   ]))]),
                   _: 1
                 }),
                 _createVNode$1(_component_VCardSubtitle, null, {
-                  default: _withCtx$1(() => [...(_cache[39] || (_cache[39] = [
+                  default: _withCtx$1(() => [...(_cache[40] || (_cache[40] = [
                     _createTextVNode$1("补充正确 TMDBID 后重试，或直接放弃该条目", -1)
                   ]))]),
                   _: 1
@@ -1164,7 +1195,7 @@ return (_ctx, _cache) => {
                     subtitle: failure.reason
                   }, {
                     append: _withCtx$1(() => [
-                      _createElementVNode$1("div", _hoisted_27$1, [
+                      _createElementVNode$1("div", _hoisted_28$1, [
                         _createVNode$1(_component_VTextField, {
                           modelValue: manualTmdb.value[failure.id],
                           "onUpdate:modelValue": $event => ((manualTmdb.value[failure.id]) = $event),
@@ -1179,7 +1210,7 @@ return (_ctx, _cache) => {
                           loading: busyId.value === failure.id,
                           onClick: $event => (retryFailure(failure))
                         }, {
-                          default: _withCtx$1(() => [...(_cache[40] || (_cache[40] = [
+                          default: _withCtx$1(() => [...(_cache[41] || (_cache[41] = [
                             _createTextVNode$1("补充并加入", -1)
                           ]))]),
                           _: 1
@@ -1196,9 +1227,9 @@ return (_ctx, _cache) => {
               default: _withCtx$1(() => [
                 _createVNode$1(_component_VSpacer),
                 _createVNode$1(_component_VBtn, {
-                  onClick: _cache[17] || (_cache[17] = $event => (failureDialog.value = false))
+                  onClick: _cache[18] || (_cache[18] = $event => (failureDialog.value = false))
                 }, {
-                  default: _withCtx$1(() => [...(_cache[41] || (_cache[41] = [
+                  default: _withCtx$1(() => [...(_cache[42] || (_cache[42] = [
                     _createTextVNode$1("关闭", -1)
                   ]))]),
                   _: 1
@@ -1214,7 +1245,7 @@ return (_ctx, _cache) => {
     }, 8, ["modelValue"]),
     _createVNode$1(_component_VSnackbar, {
       modelValue: snackbar.value,
-      "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((snackbar).value = $event)),
+      "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((snackbar).value = $event)),
       color: "success",
       timeout: "3500"
     }, {
@@ -1228,7 +1259,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const EpisodeNormalizer = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-e1b2034d"]]);
+const EpisodeNormalizer = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-dc370c42"]]);
 
 const {createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createBlock:_createBlock,renderList:_renderList,Fragment:_Fragment,vShow:_vShow,withDirectives:_withDirectives,unref:_unref,normalizeClass:_normalizeClass} = await importShared('vue');
 

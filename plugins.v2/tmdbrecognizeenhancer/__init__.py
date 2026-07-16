@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import threading
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -33,7 +34,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选识别，并将动漫季集归一化到默认编集或选定剧集组。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.3.1"
+    plugin_version = "0.3.2"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -450,13 +451,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         )
 
     def query_season_catalog_api(self, payload: dict = Body(...)) -> schemas.Response:
-        """选择季度即返回对应看板，后台自动读取并缓存最近季度。"""
+        """选择季度即返回 AniList 看板，并用 AniBridge 预填已知 TMDB 映射。"""
         payload = payload or {}
         year = self._safe_int(payload.get("year"), datetime.now().year)
         quarter = self._safe_int(payload.get("quarter"), 1)
         if year < 1900 or year > 2099 or quarter not in (1, 2, 3, 4):
             return schemas.Response(success=False, message="年份或季度无效")
-        month = 1 + (quarter - 1) * 3
         headers = {
             "User-Agent": (
                 "NNeiru/TmdbRecognizeEnhancer-Plugin "
@@ -468,32 +468,33 @@ class TmdbRecognizeEnhancer(_PluginBase):
         cache = self._read_season_catalog_cache()
         cached = cache.get(quarter_key) or {}
         catalog = cached.get("items") if isinstance(cached, dict) else None
-        refreshed = bool(payload.get("refresh")) or not isinstance(catalog, list)
+        source_outdated = bool(catalog) and any(
+            str(item.get("source") or "") != "anilist"
+            for item in catalog if isinstance(item, dict)
+        )
+        refreshed = bool(payload.get("refresh")) or not isinstance(catalog, list) or source_outdated
         if refreshed:
             try:
-                raw_index: Dict[int, Dict[str, Any]] = {}
-                for current_month in range(month, month + 3):
-                    for raw_item in self._fetch_bangumi_quarter_month(year, current_month, headers):
-                        subject_id = self._safe_int(raw_item.get("id"), 0)
-                        if subject_id:
-                            raw_index[subject_id] = raw_item
-                raw_items = list(raw_index.values())
+                raw_items = self._fetch_anilist_quarter(year, quarter, headers)
             except Exception as err:
-                logger.error(f"[TMDB识别增强] 查询 {quarter_key} Bangumi 看板失败：{err}")
+                logger.error(f"[TMDB识别增强] 查询 {quarter_key} AniList 看板失败：{err}")
                 return schemas.Response(success=False, message=f"季度看板加载失败：{err}")
-            previous = {
-                str(item.get("id")): item for item in (catalog or [])
-                if isinstance(item, dict) and item.get("id")
-            }
             catalog = []
             for raw_item in raw_items:
-                item = self._normalize_bangumi_subject(raw_item, quarter_key)
+                item = self._normalize_anilist_media(raw_item, quarter_key)
                 if not item:
                     continue
-                old = previous.get(item["id"]) or {}
-                item["tmdb_match"] = old.get("tmdb_match")
                 catalog.append(item)
-            catalog.sort(key=lambda item: (str(item.get("date") or ""), str(item.get("name") or "")), reverse=True)
+            try:
+                self._enrich_anibridge_mappings(catalog, headers)
+            except Exception as err:
+                logger.warning(f"[TMDB识别增强] AniBridge 映射加载失败，将在加入时搜索 TMDB：{err}")
+            catalog.sort(
+                key=lambda item: (
+                    str(item.get("date") or "9999-99-99"),
+                    self._safe_int(item.get("popularity"), 0),
+                ),
+            )
             self._save_season_catalog_quarter(quarter_key, catalog)
 
         rules = {self._safe_int(item.get("tmdb_id"), 0): item for item in self._read_episode_rules()}
@@ -513,37 +514,46 @@ class TmdbRecognizeEnhancer(_PluginBase):
             },
         )
 
-    def _fetch_bangumi_quarter_month(
-            self, year: int, month: int, headers: Dict[str, str]
+    def _fetch_anilist_quarter(
+            self, year: int, quarter: int, headers: Dict[str, str]
     ) -> List[Dict[str, Any]]:
-        """分页读取季度首月条目，避免 Bangumi 单页 100 条造成静默缺失。"""
-        page_size = 100
-        offset = 0
-        total: Optional[int] = None
+        """分页读取 AniList 季度目录；地区、载体和续作关系均来自同一响应。"""
+        season = {1: "WINTER", 2: "SPRING", 3: "SUMMER", 4: "FALL"}[quarter]
+        query = """
+        query($page:Int,$season:MediaSeason,$year:Int){
+          Page(page:$page,perPage:50){
+            pageInfo{hasNextPage}
+            media(type:ANIME,season:$season,seasonYear:$year,sort:[START_DATE,POPULARITY_DESC],isAdult:false){
+              id idMal title{romaji english native} synonyms format countryOfOrigin episodes popularity
+              startDate{year month day} coverImage{large medium} siteUrl
+              relations{edges{relationType node{id type format}}}
+            }
+          }
+        }
+        """
         items: List[Dict[str, Any]] = []
         request = RequestUtils(
             headers=headers,
             proxies=self._valid_proxies(getattr(settings, "PROXY", None)),
-            timeout=20,
+            timeout=30,
         )
-        while total is None or offset < total:
-            url = (
-                "https://api.bgm.tv/v0/subjects"
-                f"?type=2&sort=date&year={year}&month={month}"
-                f"&limit={page_size}&offset={offset}"
+        for page in range(1, 6):
+            response = request.post_res(
+                "https://graphql.anilist.co",
+                json={"query": query, "variables": {"page": page, "season": season, "year": year}},
             )
-            response = request.get_res(url)
             if not response:
-                raise RuntimeError(f"Bangumi API 第 {offset // page_size + 1} 页未返回响应")
+                raise RuntimeError(f"AniList API 第 {page} 页未返回响应")
             response.raise_for_status()
             raw = response.json()
-            page = raw.get("data") if isinstance(raw, dict) else raw
-            if not isinstance(page, list):
-                raise RuntimeError("Bangumi API 返回了无法识别的数据结构")
-            items.extend(item for item in page if isinstance(item, dict))
-            total = self._safe_int(raw.get("total"), len(items)) if isinstance(raw, dict) else len(items)
-            offset += len(page)
-            if not page or len(items) >= 500:
+            if raw.get("errors"):
+                raise RuntimeError(str(raw["errors"][0].get("message") or "AniList GraphQL 查询失败"))
+            page_data = ((raw.get("data") or {}).get("Page") or {})
+            media = page_data.get("media") or []
+            if not isinstance(media, list):
+                raise RuntimeError("AniList API 返回了无法识别的数据结构")
+            items.extend(item for item in media if isinstance(item, dict))
+            if not (page_data.get("pageInfo") or {}).get("hasNextPage"):
                 break
         return items
 
@@ -586,6 +596,28 @@ class TmdbRecognizeEnhancer(_PluginBase):
         rules = self._read_episode_rules()
         added, failed, needs_attention = [], [], []
         preference = str(payload.get("preference") or "default")
+        selected_items = [index[item_id] for item_id in item_ids if item_id in index]
+        pending = [
+            item for item in selected_items
+            if not ((item.get("tmdb_match") or {}).get("accepted"))
+        ]
+        if pending:
+            worker_count = min(6, len(pending))
+            with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="tmdb-catalog") as executor:
+                futures = {executor.submit(self._fast_catalog_tmdb_match, item): item for item in pending}
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except ValueError:
+                        pass
+                    except Exception as err:
+                        item = futures[future]
+                        item["tmdb_match"] = {
+                            "accepted": False,
+                            "attempted": True,
+                            "reason": f"快速匹配异常：{err}",
+                            "best": None,
+                        }
         for item_id in item_ids:
             item = index.get(item_id)
             if not item:
@@ -599,7 +631,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             except ValueError as err:
                 failed.append({
                     "id": item_id,
-                    "title": item.get("name_cn") or item.get("name") or item_id,
+                    "title": item.get("display_name") or item.get("name_cn") or item.get("name") or item_id,
                     "reason": str(err),
                 })
         self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
@@ -1667,33 +1699,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     and self._normalize_media_type(cached_best.get("media_type")) == MediaType.TV
             ):
                 match = cached
+            elif cached.get("attempted"):
+                reason = cached.get("reason") or "没有可信的 TMDB 候选"
+                raise ValueError(f"自动匹配 TMDB 失败：{reason}；请补充 TMDBID 或放弃该条目")
             else:
-                year = str(item.get("date") or "")[:4]
-                hints = {"year": year, "media_type": MediaType.TV, "season": 0, "episode": 0}
-                results = []
-                for title in dict.fromkeys([item.get("name"), item.get("name_cn"), *(item.get("aliases") or [])]):
-                    title = self._clean_title(title)
-                    if not title:
-                        continue
-                    try:
-                        results.append(self._recognize_title(title, hints=hints, include_candidates=False))
-                    except Exception as err:
-                        logger.debug(f"[TMDB识别增强] 季度条目 {title} 匹配失败：{err}")
-                accepted = [result for result in results if result.get("accepted") and result.get("best")]
-                accepted.sort(
-                    key=lambda result: (result["best"].get("score") or 0, result.get("margin") or 0),
-                    reverse=True,
-                )
-                match = accepted[0] if accepted else (results[0] if results else None)
-                if not match or not match.get("accepted") or not match.get("best"):
-                    reason = match.get("reason") if match else "没有可用标题"
-                    item["tmdb_match"] = {
-                        "accepted": False,
-                        "reason": reason,
-                        "best": match.get("best") if match else None,
-                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    }
-                    raise ValueError(f"自动匹配 TMDB 失败：{reason}；请补充 TMDBID 或放弃该条目")
+                match = self._fast_catalog_tmdb_match(item)
 
         best = match.get("best") or {}
         if self._normalize_media_type(best.get("media_type")) != MediaType.TV:
@@ -1713,6 +1723,108 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         return item["tmdb_match"]
+
+    def _fast_catalog_tmdb_match(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """使用结构化英文/罗马音标题进行有限 TMDB 查询，供单条和并发批量复用。"""
+        titles = list(dict.fromkeys(
+            self._clean_title(value)
+            for value in [*(item.get("search_titles") or []), *(item.get("aliases") or []), item.get("name")]
+            if self._clean_title(value)
+        ))[:4]
+        if not titles:
+            raise ValueError("没有可用于搜索的标题")
+        api = TmdbApi(language="en-US")
+        collected: Dict[int, Dict[str, Any]] = {}
+        try:
+            for query_index, title in enumerate(titles):
+                results = api.search_multiis(title) or []
+                tv_results = [
+                    value for value in results
+                    if self._normalize_media_type(value.get("media_type")) == MediaType.TV
+                    and self._safe_int(value.get("id"), 0)
+                ][:6]
+                for rank, raw in enumerate(tv_results):
+                    tmdb_id = self._safe_int(raw.get("id"), 0)
+                    candidate = collected.setdefault(tmdb_id, dict(raw))
+                    hit = candidate.setdefault("_catalog_hits", [])
+                    hit.append({"query": title, "query_index": query_index, "rank": rank, "count": len(tv_results)})
+                if query_index == 0 and tv_results:
+                    first_names = self._candidate_aliases(tv_results[0])
+                    if any(self._normalize_text(title) == self._normalize_text(name) for name in first_names):
+                        break
+        finally:
+            try:
+                api.close()
+            except Exception:
+                pass
+
+        scored: List[Dict[str, Any]] = []
+        for candidate in collected.values():
+            aliases = self._candidate_aliases(candidate)
+            comparisons = [
+                self._title_components(title, alias)
+                for title in titles for alias in aliases
+            ]
+            best_similarity = max((value["similarity"] for value in comparisons), default=0.0)
+            best_token = max((value["token"] for value in comparisons), default=0.0)
+            exact = any(
+                self._normalize_text(title) == self._normalize_text(alias)
+                for title in titles for alias in aliases
+            )
+            hit = min(candidate.get("_catalog_hits") or [{}], key=lambda value: (value.get("query_index", 99), value.get("rank", 99)))
+            rank = self._safe_int(hit.get("rank"), 99)
+            query_index = self._safe_int(hit.get("query_index"), 99)
+            score = 100.0 if exact else min(
+                99.0,
+                best_similarity * 0.55 + best_token * 0.25
+                + max(0.0, 18.0 - rank * 6.0) + (6.0 if query_index == 0 else 0.0),
+            )
+            scored.append({
+                "raw": candidate,
+                "tmdb_id": self._safe_int(candidate.get("id"), 0),
+                "score": round(score, 2),
+                "exact": exact,
+                "similarity": best_similarity,
+                "rank": rank,
+                "query_index": query_index,
+            })
+        scored.sort(
+            key=lambda value: (value["exact"], value["score"], -value["query_index"], -value["rank"]),
+            reverse=True,
+        )
+        best = scored[0] if scored else None
+        accepted = bool(best and (
+            best["exact"]
+            or best["score"] >= 78.0
+            or (best["query_index"] == 0 and best["rank"] == 0 and best["similarity"] >= 60.0)
+            or (len(scored) == 1 and best["similarity"] >= 50.0)
+        ))
+        if not accepted:
+            reason = "TMDB 未返回可信的电视剧候选"
+            item["tmdb_match"] = {
+                "accepted": False, "attempted": True, "reason": reason,
+                "best": None, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            raise ValueError(reason)
+        raw = best["raw"]
+        runner_score = scored[1]["score"] if len(scored) > 1 else 0.0
+        match = {
+            "accepted": True,
+            "attempted": True,
+            "reason": "AniList 结构化标题快速匹配 TMDB",
+            "best": {
+                "tmdb_id": best["tmdb_id"],
+                "name": self._candidate_name(raw),
+                "year": self._candidate_year(raw),
+                "media_type": MediaType.TV.value,
+                "score": best["score"],
+                "source": "tmdb-fast",
+            },
+            "margin": round(best["score"] - runner_score, 2),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        item["tmdb_match"] = match
+        return match
 
     def _add_catalog_item_to_rules(
             self,
@@ -1762,7 +1874,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if suggestion:
             installments.append({
                 "id": segment_id,
-                "title": item.get("name_cn") or item.get("name") or "",
+                "title": item.get("display_name") or item.get("name_cn") or item.get("name") or "",
                 "quarter": item.get("quarter") or "",
                 "aliases": item.get("aliases") or [],
                 "source_season": season_hint or 1,
@@ -1772,7 +1884,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
         rule = self._normalize_episode_rule({
             "tmdb_id": tmdb_id,
-            "title": (existing or {}).get("title") or best.get("name") or item.get("name_cn") or item.get("name"),
+            "title": (existing or {}).get("title") or best.get("name") or item.get("display_name") or item.get("name_cn") or item.get("name"),
             "enabled": (existing or {}).get("enabled", True),
             "target_type": target_type,
             "episode_group_id": group_id,
@@ -1785,7 +1897,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         rules.sort(key=lambda value: (str(value.get("title") or ""), value.get("tmdb_id") or 0))
         return {
             "id": item.get("id"),
-            "title": item.get("name_cn") or item.get("name") or rule["title"],
+            "title": item.get("display_name") or item.get("name_cn") or item.get("name") or rule["title"],
             "tmdb_id": tmdb_id,
             "rule": rule,
             "target": "剧集组" if target_type == "group" else "TMDB 默认",
@@ -1861,6 +1973,136 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "installments": installments,
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+    @classmethod
+    def _normalize_anilist_media(
+            cls, media: Dict[str, Any], quarter: str
+    ) -> Optional[Dict[str, Any]]:
+        """把 AniList Media 转为看板字段，筛选信息在加载阶段一次成形。"""
+        media_id = cls._safe_int(media.get("id"), 0)
+        titles = media.get("title") or {}
+        romaji = cls._clean_title(titles.get("romaji"))
+        english = cls._clean_title(titles.get("english"))
+        native = cls._clean_title(titles.get("native"))
+        if not media_id or not (romaji or english or native):
+            return None
+        aliases = list(dict.fromkeys(
+            value for value in [english, romaji, native, *(media.get("synonyms") or [])]
+            if cls._clean_title(value)
+        ))
+        aliases = [cls._clean_title(value) for value in aliases]
+        start = media.get("startDate") or {}
+        year = cls._safe_int(start.get("year"), 0)
+        month = cls._safe_int(start.get("month"), 0)
+        day = cls._safe_int(start.get("day"), 0)
+        date = "-".join((
+            f"{year:04d}" if year else "0000",
+            f"{month:02d}" if month else "00",
+            f"{day:02d}" if day else "00",
+        ))
+        country = str(media.get("countryOfOrigin") or "").upper()
+        region = {"JP": "japan", "CN": "china"}.get(country, "western" if country else "unknown")
+        relations = (media.get("relations") or {}).get("edges") or []
+        has_prequel = any(
+            str(edge.get("relationType") or "").upper() == "PREQUEL"
+            and str((edge.get("node") or {}).get("type") or "ANIME").upper() == "ANIME"
+            for edge in relations if isinstance(edge, dict)
+        )
+        season_hint = cls._infer_title_season(" ".join(aliases))
+        images = media.get("coverImage") or {}
+        display_name = english or romaji or native
+        return {
+            "id": f"anilist:{media_id}",
+            "source": "anilist",
+            "source_id": media_id,
+            "anilist_id": media_id,
+            "mal_id": cls._safe_int(media.get("idMal"), 0) or None,
+            "quarter": quarter,
+            "name": romaji or english or native,
+            "name_cn": "",
+            "display_name": display_name,
+            "aliases": aliases,
+            "search_titles": aliases[:8],
+            "date": date,
+            "episode_count": cls._safe_int(media.get("episodes"), 0),
+            "platform": str(media.get("format") or "").replace("_", " "),
+            "region": region,
+            "region_name": {
+                "japan": "日漫", "china": "国漫", "western": "海外动画", "unknown": "地区未知",
+            }[region],
+            "is_multi_season": bool(has_prequel or (season_hint and season_hint > 1)),
+            "has_prequel": has_prequel,
+            "country": country,
+            "popularity": cls._safe_int(media.get("popularity"), 0),
+            "poster": images.get("large") or images.get("medium") or "",
+            "url": str(media.get("siteUrl") or f"https://anilist.co/anime/{media_id}"),
+            "imported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def _enrich_anibridge_mappings(
+            self, catalog: List[Dict[str, Any]], headers: Dict[str, str]
+    ) -> None:
+        """一次下载每日映射并只保留当前季度的 AniList→TMDB TV 关系。"""
+        wanted = {
+            self._safe_int(item.get("anilist_id"), 0): item
+            for item in catalog if self._safe_int(item.get("anilist_id"), 0)
+        }
+        if not wanted:
+            return
+        response = RequestUtils(
+            headers=headers,
+            proxies=self._valid_proxies(getattr(settings, "PROXY", None)),
+            timeout=60,
+        ).get_res(
+            "https://github.com/anibridge/anibridge-mappings/releases/download/v3/mappings.min.json"
+        )
+        if not response:
+            raise RuntimeError("AniBridge 映射服务未返回响应")
+        response.raise_for_status()
+        mappings = response.json()
+        candidates: Dict[int, set] = {key: set() for key in wanted}
+        for source, targets in mappings.items():
+            if not isinstance(targets, dict):
+                continue
+            anilist_match = re.fullmatch(r"anilist:(\d+)", str(source))
+            tmdb_match = re.fullmatch(r"tmdb_show:(\d+):s\d+", str(source))
+            if anilist_match:
+                anilist_id = self._safe_int(anilist_match.group(1), 0)
+                if anilist_id not in wanted:
+                    continue
+                for descriptor in targets:
+                    target = re.fullmatch(r"tmdb_show:(\d+):s\d+", str(descriptor))
+                    if target:
+                        candidates[anilist_id].add(self._safe_int(target.group(1), 0))
+            elif tmdb_match:
+                tmdb_id = self._safe_int(tmdb_match.group(1), 0)
+                for descriptor in targets:
+                    target = re.fullmatch(r"anilist:(\d+)", str(descriptor))
+                    if target:
+                        anilist_id = self._safe_int(target.group(1), 0)
+                        if anilist_id in wanted:
+                            candidates[anilist_id].add(tmdb_id)
+        for anilist_id, ids in candidates.items():
+            valid_ids = sorted(value for value in ids if value)
+            item = wanted[anilist_id]
+            item["tmdb_candidates"] = valid_ids
+            if len(valid_ids) != 1:
+                continue
+            tmdb_id = valid_ids[0]
+            item["tmdb_match"] = {
+                "accepted": True,
+                "attempted": True,
+                "reason": "AniBridge 跨库映射",
+                "best": {
+                    "tmdb_id": tmdb_id,
+                    "name": item.get("display_name") or item.get("name"),
+                    "year": str(item.get("date") or "")[:4],
+                    "media_type": MediaType.TV.value,
+                    "score": 100.0,
+                    "source": "anibridge",
+                },
+                "margin": 100.0,
+            }
 
     @classmethod
     def _normalize_bangumi_subject(
