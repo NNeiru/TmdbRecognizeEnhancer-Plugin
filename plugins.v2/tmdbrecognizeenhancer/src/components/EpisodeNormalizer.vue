@@ -15,6 +15,17 @@ const notice = ref('')
 const snackbar = ref(false)
 const rules = ref([])
 const rulesOpen = ref(true)
+const ruleSearch = ref('')
+const ruleQuarter = ref('all')
+const deleteRulesDialog = ref(false)
+const deleteRulesLoading = ref(false)
+const manualDialog = ref(false)
+const manualLoading = ref(false)
+const manualMessage = ref('')
+const manualForm = ref({
+  tmdb_id: '', preference: 'default', specify_quarter: false,
+  year: now.getFullYear(), quarter: Math.floor(now.getMonth() / 3) + 1,
+})
 const catalog = ref([])
 const catalogLoading = ref(false)
 const batchLoading = ref(false)
@@ -71,10 +82,111 @@ const allFilteredSelected = computed(() => (
 const selectedGroup = computed(() => inspection.value?.groups?.find(
   item => item.id === editForm.value?.episode_group_id,
 ))
+const ruleQuarterOptions = computed(() => {
+  const values = new Set()
+  rules.value.forEach(rule => (rule.installments || []).forEach(item => {
+    if (item.quarter) values.add(item.quarter)
+  }))
+  return [
+    { title: '全部季度', value: 'all' },
+    ...Array.from(values).sort().reverse().map(value => ({ title: value, value })),
+    { title: '未分类', value: 'unclassified' },
+  ]
+})
+const filteredRules = computed(() => {
+  const keyword = ruleSearch.value.trim().toLocaleLowerCase()
+  return rules.value.filter(rule => {
+    const quarters = Array.from(new Set((rule.installments || []).map(item => item.quarter).filter(Boolean)))
+    if (ruleQuarter.value === 'unclassified' && quarters.length) return false
+    if (ruleQuarter.value !== 'all' && ruleQuarter.value !== 'unclassified' && !quarters.includes(ruleQuarter.value)) return false
+    if (!keyword) return true
+    const haystack = [
+      rule.title, rule.tmdb_id,
+      ...(rule.installments || []).flatMap(item => [item.title, item.quarter, ...(item.aliases || [])]),
+    ].join(' ').toLocaleLowerCase()
+    return haystack.includes(keyword)
+  })
+})
+const groupedRules = computed(() => {
+  const groups = new Map()
+  filteredRules.value.forEach(rule => {
+    const quarters = Array.from(new Set((rule.installments || []).map(item => item.quarter).filter(Boolean))).sort().reverse()
+    const key = (ruleQuarter.value !== 'all' && ruleQuarter.value !== 'unclassified')
+      ? ruleQuarter.value
+      : (quarters[0] || '未分类')
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(rule)
+  })
+  return Array.from(groups.entries())
+    .sort(([left], [right]) => left === '未分类' ? 1 : right === '未分类' ? -1 : right.localeCompare(left))
+    .map(([quarter, items]) => ({ quarter, items }))
+})
 
 async function loadRules() {
   const data = unwrapResponse(await props.api.get(`${props.pluginBase}/episode-normalizer`)) || {}
   rules.value = data.rules || []
+}
+
+function openManualDialog() {
+  manualMessage.value = ''
+  manualForm.value = {
+    tmdb_id: '', preference: 'default', specify_quarter: false,
+    year: board.value.year, quarter: board.value.quarter,
+  }
+  manualDialog.value = true
+}
+
+async function manualAddRule() {
+  if (!manualForm.value.tmdb_id) return
+  manualLoading.value = true
+  manualMessage.value = ''
+  try {
+    const quarter = manualForm.value.specify_quarter
+      ? `${manualForm.value.year}-Q${manualForm.value.quarter}`
+      : ''
+    const data = unwrapResponse(await props.api.post(
+      `${props.pluginBase}/episode-normalizer/manual-add`,
+      { tmdb_id: manualForm.value.tmdb_id, preference: manualForm.value.preference, quarter },
+    )) || {}
+    if (data.requires_quarter) {
+      manualForm.value.specify_quarter = true
+      manualMessage.value = `${data.title || `TMDB ${data.tmdb_id}`} 没有可用的季首播日期，请指定归属季度后再次加入。`
+      return
+    }
+    rules.value = data.rules || rules.value
+    manualDialog.value = false
+    notice.value = `${data.title || `TMDB ${data.tmdb_id}`} 已加入${data.quarter ? ` ${data.quarter}` : ''} 维护规则`
+    snackbar.value = true
+    await loadQuarter(false, true)
+    if (data.needs_attention && data.rule) await openEditor(data.rule)
+  } catch (err) {
+    manualMessage.value = err?.message || '手动建立规则失败'
+  } finally {
+    manualLoading.value = false
+  }
+}
+
+async function deleteFilteredRules() {
+  if (!filteredRules.value.length) return
+  deleteRulesLoading.value = true
+  try {
+    const deletedIds = new Set(filteredRules.value.map(rule => Number(rule.tmdb_id)))
+    const data = unwrapResponse(await props.api.post(
+      `${props.pluginBase}/episode-normalizer/rule/batch-delete`,
+      { tmdb_ids: Array.from(deletedIds) },
+    )) || {}
+    rules.value = data.rules || []
+    catalog.value.forEach(item => {
+      if (deletedIds.has(Number(item.tmdb_match?.best?.tmdb_id))) item.maintained = false
+    })
+    deleteRulesDialog.value = false
+    notice.value = `已删除 ${data.deleted || deletedIds.size} 条维护规则`
+    snackbar.value = true
+  } catch (err) {
+    error.value = err?.message || '批量删除维护规则失败'
+  } finally {
+    deleteRulesLoading.value = false
+  }
 }
 
 async function loadQuarter(refresh = false, background = false) {
@@ -361,20 +473,45 @@ onMounted(async () => {
       </VCardItem>
       <VExpandTransition>
         <div v-show="rulesOpen" class="rules-scroll">
-          <div class="rules-grid pa-4 pt-0">
-            <VCard v-for="rule in rules" :key="rule.tmdb_id" variant="tonal" class="rule-card">
-              <VCardText class="d-flex align-center ga-3">
-                <VAvatar :color="rule.enabled ? 'success' : 'default'" variant="tonal"><VIcon icon="mdi-animation-outline" /></VAvatar>
-                <div class="flex-grow-1 min-w-0">
-                  <div class="font-weight-bold text-truncate">{{ rule.title }}</div>
-                  <div class="text-caption text-medium-emphasis">TMDB {{ rule.tmdb_id }} · {{ rule.target_type === 'group' ? '剧集组' : '默认编集' }} · {{ rule.installments?.length || 0 }} 个季度片段</div>
-                </div>
-                <VBtn icon="mdi-pencil-outline" variant="text" @click="openEditor(rule)" />
-                <VBtn icon="mdi-delete-outline" variant="text" color="error" :loading="busyId === `rule-${rule.tmdb_id}`" @click="deleteRule(rule)" />
-              </VCardText>
-            </VCard>
-            <div v-if="!rules.length" class="empty-rules">从季度看板直接加入，或批量建立规则。</div>
+          <div class="rules-controls pa-4 pt-0">
+            <VTextField
+              v-model="ruleSearch" label="搜索标题、别名或 TMDBID" prepend-inner-icon="mdi-magnify"
+              clearable hide-details density="compact"
+            />
+            <VSelect v-model="ruleQuarter" :items="ruleQuarterOptions" label="按季度查看" hide-details density="compact" />
+            <VBtn color="primary" variant="tonal" prepend-icon="mdi-plus" @click="openManualDialog">手动添加</VBtn>
+            <VBtn
+              color="error" variant="tonal" prepend-icon="mdi-delete-sweep-outline"
+              :disabled="!filteredRules.length" @click="deleteRulesDialog = true"
+            >删除当前结果 {{ filteredRules.length || '' }}</VBtn>
           </div>
+          <div v-for="group in groupedRules" :key="group.quarter" class="rule-group px-4 pb-4">
+            <div class="rule-group-title mb-2">
+              <VIcon icon="mdi-calendar-month-outline" size="18" />
+              <strong>{{ group.quarter }}</strong>
+              <span class="text-caption text-medium-emphasis">{{ group.items.length }} 条</span>
+            </div>
+            <div class="rules-grid">
+              <VCard v-for="rule in group.items" :key="rule.tmdb_id" variant="tonal" class="rule-card">
+                <VCardText class="d-flex align-center ga-3">
+                  <VAvatar :color="rule.enabled ? 'success' : 'default'" variant="tonal"><VIcon icon="mdi-animation-outline" /></VAvatar>
+                  <div class="flex-grow-1 min-w-0">
+                    <div class="font-weight-bold text-truncate">{{ rule.title }}</div>
+                    <div class="text-caption text-medium-emphasis">TMDB {{ rule.tmdb_id }} · {{ rule.target_type === 'group' ? '剧集组' : '默认编集' }} · {{ rule.installments?.length || 0 }} 个季度片段</div>
+                    <div v-if="rule.installments?.some(item => item.quarter)" class="d-flex flex-wrap ga-1 mt-1">
+                      <VChip
+                        v-for="quarter in Array.from(new Set(rule.installments.map(item => item.quarter).filter(Boolean))).sort().reverse()"
+                        :key="quarter" size="x-small" variant="outlined"
+                      >{{ quarter }}</VChip>
+                    </div>
+                  </div>
+                  <VBtn icon="mdi-pencil-outline" variant="text" @click="openEditor(rule)" />
+                  <VBtn icon="mdi-delete-outline" variant="text" color="error" :loading="busyId === `rule-${rule.tmdb_id}`" @click="deleteRule(rule)" />
+                </VCardText>
+              </VCard>
+            </div>
+          </div>
+          <div v-if="!filteredRules.length" class="empty-rules">当前季度或搜索条件下没有维护规则。</div>
         </div>
       </VExpandTransition>
     </VCard>
@@ -471,6 +608,52 @@ onMounted(async () => {
       </VCardText>
     </VCard>
 
+    <VDialog v-model="manualDialog" max-width="620">
+      <VCard>
+        <VCardItem>
+          <VCardTitle>手动添加维护规则</VCardTitle>
+          <VCardSubtitle>适用于季度看板中没有收录的电视剧或动画</VCardSubtitle>
+          <template #append><VBtn icon="mdi-close" variant="text" @click="manualDialog = false" /></template>
+        </VCardItem>
+        <VDivider />
+        <VCardText>
+          <VAlert v-if="manualMessage" type="warning" variant="tonal" density="compact" class="mb-4">{{ manualMessage }}</VAlert>
+          <VTextField v-model.number="manualForm.tmdb_id" label="TMDBID" type="number" prepend-inner-icon="mdi-database-search" />
+          <VSelect
+            v-model="manualForm.preference" label="目标编集"
+            :items="[{title:'使用 TMDB 默认编集',value:'default'},{title:'优先 Production/Season 剧集组',value:'group_preferred'}]"
+          />
+          <VSwitch v-model="manualForm.specify_quarter" label="手动指定归属季度" color="primary" hide-details class="mb-3" />
+          <VRow v-if="manualForm.specify_quarter" dense>
+            <VCol cols="7"><VSelect v-model="manualForm.year" :items="years" label="年份" /></VCol>
+            <VCol cols="5"><VSelect v-model="manualForm.quarter" :items="[1,2,3,4].map(value => ({title:`Q${value}`,value}))" label="季度" /></VCol>
+          </VRow>
+          <div class="text-caption text-medium-emphasis">
+            不指定时会根据 TMDB 最新有效季的首播日期自动归类；TMDB 缺少日期时会提示补充。
+          </div>
+        </VCardText>
+        <VDivider />
+        <VCardActions class="pa-4">
+          <VSpacer /><VBtn variant="text" @click="manualDialog = false">取消</VBtn>
+          <VBtn color="primary" :loading="manualLoading" :disabled="!manualForm.tmdb_id" @click="manualAddRule">读取并加入</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+
+    <VDialog v-model="deleteRulesDialog" max-width="520">
+      <VCard>
+        <VCardItem>
+          <VCardTitle>删除当前筛选结果？</VCardTitle>
+          <VCardSubtitle>将删除 {{ filteredRules.length }} 条维护规则，季度看板数据不会被删除</VCardSubtitle>
+        </VCardItem>
+        <VCardText>此操作会立即停止这些 TMDB 条目的集数归一化，请确认当前季度和搜索条件正确。</VCardText>
+        <VCardActions class="pa-4">
+          <VSpacer /><VBtn variant="text" @click="deleteRulesDialog = false">取消</VBtn>
+          <VBtn color="error" :loading="deleteRulesLoading" @click="deleteFilteredRules">确认删除</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+
     <VDialog v-model="editorOpen" max-width="820" scrollable>
       <VCard v-if="editForm">
         <VCardItem>
@@ -559,16 +742,21 @@ onMounted(async () => {
 .catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 14px; }
 .catalog-card { position: relative; overflow: hidden; }
 .select-corner { position: absolute; z-index: 2; inset-block-start: 6px; inset-inline-start: 6px; border-radius: 10px; background: rgba(var(--v-theme-surface), .9); }
+.rules-controls { display: grid; grid-template-columns: minmax(220px, 1fr) 160px auto auto; gap: 10px; align-items: center; }
 .rules-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
-.rules-scroll { max-height: 330px; overflow-y: auto; }
+.rules-scroll { max-height: 480px; overflow-y: auto; }
+.rule-group-title { display: flex; align-items: center; gap: 7px; color: rgba(var(--v-theme-on-surface), .82); }
 .rule-card { border: 1px solid rgba(var(--v-theme-success), .1); }
 .empty-catalog, .empty-rules { grid-column: 1 / -1; min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: rgba(var(--v-theme-on-surface), .55); }
 .manual-match { display: grid; grid-template-columns: 120px auto auto; gap: 8px; align-items: center; min-width: 350px; }
 .tmdb-correction { display: grid; grid-template-columns: minmax(180px, 1fr) auto; gap: 10px; align-items: center; }
-@media (max-width: 1000px) { .board-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 1000px) {
+  .board-controls, .rules-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 700px) {
   .preview-line { grid-template-columns: 1fr; }
   .board-controls { grid-template-columns: 1fr; }
+  .rules-controls { grid-template-columns: 1fr; }
   .batch-bar { align-items: stretch; flex-direction: column; }
   .batch-target { max-width: none; }
   .rules-grid { grid-template-columns: 1fr; }

@@ -34,7 +34,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选识别，并将动漫季集归一化到默认编集或选定剧集组。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.3.3"
+    plugin_version = "0.3.4"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -44,6 +44,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
     DATA_KEY_HISTORY = "recognize_history"
     DATA_KEY_EPISODE_RULES = "episode_normalizer_rules"
     DATA_KEY_SEASON_CATALOG = "season_catalog"
+    # 季度目录匹配使用独立策略，不继承整理识别的 max_queries、降级开关等参数。
+    CATALOG_QUERY_LIMIT = 8
+    CATALOG_RESULT_LIMIT = 8
     DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
         "show_sidebar_nav": True,
@@ -224,6 +227,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "删除目标编集规则",
+            },
+            {
+                "path": "/episode-normalizer/rule/batch-delete",
+                "endpoint": self.batch_delete_episode_rules_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "批量删除目标编集规则",
+            },
+            {
+                "path": "/episode-normalizer/manual-add",
+                "endpoint": self.manual_add_episode_rule_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "使用 TMDBID 手动建立目标编集规则",
             },
             {
                 "path": "/episode-normalizer/inspect",
@@ -409,6 +426,83 @@ class TmdbRecognizeEnhancer(_PluginBase):
         ]
         self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
         return schemas.Response(success=True, data={"rules": rules})
+
+    def batch_delete_episode_rules_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """一次删除界面当前筛选出的维护规则。"""
+        tmdb_ids = {
+            self._safe_int(value, 0) for value in (payload or {}).get("tmdb_ids") or []
+            if self._safe_int(value, 0)
+        }
+        if not tmdb_ids:
+            return schemas.Response(success=False, message="没有可删除的维护规则")
+        existing = self._read_episode_rules()
+        rules = [
+            item for item in existing
+            if self._safe_int(item.get("tmdb_id"), 0) not in tmdb_ids
+        ]
+        deleted = len(existing) - len(rules)
+        self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
+        if self._episode_normalizer:
+            self._episode_normalizer.clear_cache()
+        return schemas.Response(
+            success=True,
+            message=f"已删除 {deleted} 条维护规则",
+            data={"rules": rules, "deleted": deleted},
+        )
+
+    def manual_add_episode_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """看板外按 TMDBID 建立规则，并尽可能从 TMDB 季信息推断季度。"""
+        payload = payload or {}
+        tmdb_id = self._safe_int(payload.get("tmdb_id"), 0)
+        if not tmdb_id:
+            return schemas.Response(success=False, message="请输入有效的 TMDBID")
+        requested_quarter = str(payload.get("quarter") or "").strip().upper()
+        if requested_quarter and not re.fullmatch(r"\d{4}-Q[1-4]", requested_quarter):
+            return schemas.Response(success=False, message="季度格式应为 2026-Q3")
+        try:
+            info = self._tmdb_api.get_info(mtype=MediaType.TV, tmdbid=tmdb_id) or {}
+        except Exception as err:
+            return schemas.Response(success=False, message=f"读取 TMDB {tmdb_id} 失败：{err}")
+        if not info:
+            return schemas.Response(success=False, message=f"TMDB {tmdb_id} 不存在或不是电视剧")
+
+        item, inferred_quarter = self._manual_catalog_item(
+            tmdb_id=tmdb_id,
+            info=info,
+            quarter=requested_quarter,
+        )
+        if not requested_quarter and not inferred_quarter:
+            return schemas.Response(
+                success=True,
+                message="TMDB 没有可用的季首播日期，请补充季度",
+                data={
+                    "requires_quarter": True,
+                    "tmdb_id": tmdb_id,
+                    "title": item.get("display_name") or item.get("name"),
+                },
+            )
+        rules = self._read_episode_rules()
+        try:
+            outcome = self._add_catalog_item_to_rules(
+                item=item,
+                preference=str(payload.get("preference") or "default"),
+                rules=rules,
+                tmdb_id_override=tmdb_id,
+            )
+        except ValueError as err:
+            return schemas.Response(success=False, message=str(err))
+        self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
+        return schemas.Response(
+            success=True,
+            message=outcome.get("message") or "已加入维护规则",
+            data={
+                **outcome,
+                "rules": rules,
+                "quarter": inferred_quarter or requested_quarter,
+                "quarter_inferred": not bool(requested_quarter),
+                "requires_quarter": False,
+            },
+        )
 
     def inspect_episode_target_api(self, payload: dict = Body(...)) -> schemas.Response:
         """读取 TMDB 默认季和剧集组，供用户选择目标编集。"""
@@ -1952,6 +2046,88 @@ class TmdbRecognizeEnhancer(_PluginBase):
         item = next((value for value in catalog if str(value.get("id")) == item_id), None)
         return item, catalog
 
+    @classmethod
+    def _quarter_from_date(cls, value: Any) -> str:
+        """把 TMDB 的 YYYY-MM-DD 日期转换成季度键。"""
+        match = re.match(r"^(\d{4})-(\d{1,2})", str(value or "").strip())
+        if not match:
+            return ""
+        year, month = int(match.group(1)), int(match.group(2))
+        if not 1 <= month <= 12:
+            return ""
+        return f"{year}-Q{(month - 1) // 3 + 1}"
+
+    @classmethod
+    def _manual_catalog_item(
+            cls, tmdb_id: int, info: Dict[str, Any], quarter: str = ""
+    ) -> Tuple[Dict[str, Any], str]:
+        """从 TMDB 详情构造一个与季度看板条目兼容的手工条目。"""
+        seasons = [
+            season for season in info.get("seasons") or []
+            if isinstance(season, dict) and cls._safe_int(season.get("season_number"), 0) > 0
+        ]
+        dated_seasons = [season for season in seasons if cls._quarter_from_date(season.get("air_date"))]
+        selected = None
+        if quarter:
+            matching = [
+                season for season in dated_seasons
+                if cls._quarter_from_date(season.get("air_date")) == quarter
+            ]
+            if matching:
+                selected = max(
+                    matching,
+                    key=lambda season: (
+                        str(season.get("air_date") or ""),
+                        cls._safe_int(season.get("season_number"), 0),
+                    ),
+                )
+        elif dated_seasons:
+            selected = max(
+                dated_seasons,
+                key=lambda season: (
+                    str(season.get("air_date") or ""),
+                    cls._safe_int(season.get("season_number"), 0),
+                ),
+            )
+
+        air_date = str((selected or {}).get("air_date") or info.get("first_air_date") or "")
+        inferred_quarter = quarter or cls._quarter_from_date(air_date)
+        if quarter and not selected:
+            year, number = quarter.split("-Q", 1)
+            air_date = f"{year}-{1 + (int(number) - 1) * 3:02d}-01"
+        aliases = cls._candidate_aliases(info)
+        localized = cls._clean_title(info.get("name") or info.get("title"))
+        original = cls._clean_title(info.get("original_name") or info.get("original_title"))
+        display_name = localized or original or f"TMDB {tmdb_id}"
+        aliases = list(dict.fromkeys([display_name, original, *aliases]))
+        aliases = [value for value in aliases if value]
+        return {
+            "id": f"manual:{tmdb_id}:{inferred_quarter or 'unclassified'}",
+            "source": "manual",
+            "quarter": inferred_quarter,
+            "name": original or display_name,
+            "name_cn": display_name if re.search(r"[\u3400-\u9fff]", display_name) else "",
+            "display_name": display_name,
+            "aliases": aliases,
+            "search_titles": aliases,
+            "date": air_date,
+            "source_season": cls._safe_int((selected or {}).get("season_number"), 0) or None,
+            "is_multi_season": len(seasons) > 1,
+            "tmdb_match": {
+                "accepted": True,
+                "attempted": True,
+                "reason": "用户指定 TMDBID",
+                "best": {
+                    "tmdb_id": tmdb_id,
+                    "name": display_name,
+                    "year": cls._candidate_year(info),
+                    "media_type": MediaType.TV.value,
+                    "score": 100.0,
+                    "source": "user-manual",
+                },
+            },
+        }, inferred_quarter
+
     def _match_catalog_item(
             self, item: Dict[str, Any], tmdb_id_override: int = 0
     ) -> Dict[str, Any]:
@@ -2012,8 +2188,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return item["tmdb_match"]
 
     def _fast_catalog_tmdb_match(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        """使用结构化英文/罗马音标题进行有限 TMDB 查询，供单条和并发批量复用。"""
-        titles = self._catalog_search_titles(item)[:6]
+        """使用季度目录专用的多别名策略，不受整理识别参数影响。"""
+        titles = self._catalog_search_titles(item)[: self.CATALOG_QUERY_LIMIT]
         if not titles:
             raise ValueError("没有可用于搜索的标题")
         api = TmdbApi(language="en-US")
@@ -2025,16 +2201,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     value for value in results
                     if self._normalize_media_type(value.get("media_type")) == MediaType.TV
                     and self._safe_int(value.get("id"), 0)
-                ][:6]
+                ][: self.CATALOG_RESULT_LIMIT]
                 for rank, raw in enumerate(tv_results):
                     tmdb_id = self._safe_int(raw.get("id"), 0)
                     candidate = collected.setdefault(tmdb_id, dict(raw))
                     hit = candidate.setdefault("_catalog_hits", [])
                     hit.append({"query": title, "query_index": query_index, "rank": rank, "count": len(tv_results)})
-                if query_index == 0 and tv_results:
-                    first_names = self._candidate_aliases(tv_results[0])
-                    if any(self._normalize_text(title) == self._normalize_text(name) for name in first_names):
-                        break
         finally:
             try:
                 api.close()
@@ -2094,7 +2266,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         match = {
             "accepted": True,
             "attempted": True,
-            "reason": "AniList 结构化标题快速匹配 TMDB",
+            "reason": f"季度目录独立多别名匹配（查询 {len(titles)} 个标题）",
             "best": {
                 "tmdb_id": best["tmdb_id"],
                 "name": self._candidate_name(raw),
@@ -2117,7 +2289,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             for value in [*(item.get("search_titles") or []), *(item.get("aliases") or []), item.get("name")]
             if cls._clean_title(value)
         ))
-        stripped: List[str] = []
+        stripped_by_title: Dict[str, str] = {}
         patterns = (
             r"(?i)\b\d{1,2}(?:st|nd|rd|th)\s+(?:season|part|cour)\b",
             r"(?i)\b(?:season|series|part|cour)\s*(?:\d{1,2}|[ivx]{1,5})\b",
@@ -2139,8 +2311,17 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     reduced = parts[0]
                 reduced = re.sub(r"(?i)\s+(?:[2-9]|II|III|IV|V|VI|VII|VIII|IX|X)$", "", reduced).strip()
             if reduced and cls._normalize_text(reduced) != cls._normalize_text(title):
-                stripped.append(reduced)
-        return list(dict.fromkeys([*stripped, *originals]))
+                stripped_by_title[title] = reduced
+        queries: List[str] = []
+        normalized_seen = set()
+        for title in originals:
+            for value in (stripped_by_title.get(title), title):
+                normalized = cls._normalize_text(value)
+                if not value or not normalized or normalized in normalized_seen:
+                    continue
+                queries.append(value)
+                normalized_seen.add(normalized)
+        return queries
 
     def _add_catalog_item_to_rules(
             self,
@@ -2174,7 +2355,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             target_type = "default"
             group_id = ""
 
-        season_hint = self._infer_title_season(
+        season_hint = self._optional_int(item.get("source_season")) or self._infer_title_season(
             " ".join(str(value or "") for value in [item.get("name"), item.get("name_cn"), *(item.get("aliases") or [])])
         )
         suggestion = self._normalizer().suggest_installment_start(

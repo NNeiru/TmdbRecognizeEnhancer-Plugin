@@ -278,6 +278,8 @@ def test_anibridge_mapping_prefills_tmdb_without_title_search(monkeypatch):
 def test_catalog_fast_match_uses_structured_english_title(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config["max_queries"] = 1
+    searched = []
 
     class FakeTmdb:
         def __init__(self, language=None):
@@ -285,6 +287,7 @@ def test_catalog_fast_match_uses_structured_english_title(monkeypatch):
 
         @staticmethod
         def search_multiis(title):
+            searched.append(title)
             return [{
                 "id": 789,
                 "name": "The Example Anime",
@@ -309,6 +312,8 @@ def test_catalog_fast_match_uses_structured_english_title(monkeypatch):
     assert match["accepted"] is True
     assert match["best"]["tmdb_id"] == 789
     assert match["best"]["score"] == 100.0
+    assert len(searched) >= 2
+    assert "Rei no Anime" in searched
 
 
 def test_catalog_search_titles_remove_season_noise_but_keep_aliases(monkeypatch):
@@ -330,6 +335,69 @@ def test_catalog_search_titles_remove_season_noise_but_keep_aliases(monkeypatch)
     assert "无职转生" in titles
     assert "Mushoku Tensei: Jobless Reincarnation Season 2 Part 2" in titles
     assert item["aliases"] == ["無職転生 II ～異世界行ったら本気だす～"]
+
+
+def test_manual_catalog_item_infers_latest_tmdb_season_quarter(monkeypatch):
+    module = _load_plugin(monkeypatch)
+
+    item, quarter = module.TmdbRecognizeEnhancer._manual_catalog_item(321, {
+        "name": "中文片名",
+        "original_name": "Anime Name",
+        "first_air_date": "2024-01-01",
+        "seasons": [
+            {"season_number": 1, "air_date": "2024-01-05"},
+            {"season_number": 2, "air_date": "2026-07-03"},
+        ],
+    })
+
+    assert quarter == "2026-Q3"
+    assert item["quarter"] == "2026-Q3"
+    assert item["source_season"] == 2
+    assert item["display_name"] == "中文片名"
+
+
+def test_manual_add_tmdb_rule_uses_inferred_quarter(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    info = {
+        "name": "中文片名", "original_name": "Anime Name",
+        "first_air_date": "2024-01-01",
+        "seasons": [
+            {"season_number": 1, "air_date": "2024-01-05"},
+            {"season_number": 2, "air_date": "2026-07-03"},
+        ],
+    }
+    plugin._tmdb_api = SimpleNamespace(get_info=lambda **kwargs: info)
+    plugin._episode_normalizer = SimpleNamespace(
+        suggest_installment_start=lambda **kwargs: {"season": 2, "episode": 1},
+        clear_cache=lambda: None,
+    )
+
+    response = plugin.manual_add_episode_rule_api({"tmdb_id": 321, "preference": "default"})
+
+    assert response.success is True
+    assert response.data["quarter"] == "2026-Q3"
+    assert response.data["quarter_inferred"] is True
+    rule = response.data["rule"]
+    assert rule["tmdb_id"] == 321
+    assert rule["installments"][0]["quarter"] == "2026-Q3"
+    assert rule["installments"][0]["source_season"] == 2
+
+
+def test_batch_delete_episode_rules_only_removes_requested_ids(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._data[plugin.DATA_KEY_EPISODE_RULES] = [
+        {"tmdb_id": 1, "title": "One"},
+        {"tmdb_id": 2, "title": "Two"},
+        {"tmdb_id": 3, "title": "Three"},
+    ]
+
+    response = plugin.batch_delete_episode_rules_api({"tmdb_ids": [1, 3]})
+
+    assert response.success is True
+    assert response.data["deleted"] == 2
+    assert [rule["tmdb_id"] for rule in response.data["rules"]] == [2]
 
 
 def test_rule_tmdb_id_can_be_corrected_without_leaving_old_rule(monkeypatch):
