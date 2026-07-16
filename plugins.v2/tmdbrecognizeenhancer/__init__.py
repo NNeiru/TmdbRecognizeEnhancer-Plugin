@@ -34,7 +34,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选识别，并将动漫季集归一化到默认编集或选定剧集组。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.3.2"
+    plugin_version = "0.3.3"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -99,6 +99,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._episode_normalizer: Optional[EpisodeNormalizer] = None
         self._runtime_adapter = MoviePilotRuntimeAdapter()
         self._history_lock = threading.RLock()
+        self._catalog_lock = threading.RLock()
+        self._catalog_scans: set = set()
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
         """加载配置并启停名称识别事件处理器。"""
@@ -344,18 +346,57 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def save_episode_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
         """新增或更新一个 TMDBID 的目标编集规则。"""
+        payload = payload or {}
+        original_tmdb_id = self._safe_int(payload.get("original_tmdb_id"), 0)
         try:
-            rule = self._normalize_episode_rule(payload or {})
+            rule = self._normalize_episode_rule(payload)
         except ValueError as err:
             return schemas.Response(success=False, message=str(err))
+        if original_tmdb_id and original_tmdb_id != rule["tmdb_id"]:
+            try:
+                info = self._tmdb_api.get_info(mtype=MediaType.TV, tmdbid=rule["tmdb_id"]) or {}
+            except Exception as err:
+                return schemas.Response(success=False, message=f"读取新 TMDBID 失败：{err}")
+            if not info:
+                return schemas.Response(success=False, message="新的 TMDBID 不存在或不是电视剧")
+            rule["title"] = str(
+                info.get("name") or info.get("title") or rule.get("title") or f"TMDB {rule['tmdb_id']}"
+            ).strip()
+            if rule["target_type"] == "group":
+                try:
+                    groups = self._normalizer().inspect(rule["tmdb_id"]).get("groups") or []
+                except Exception as err:
+                    return schemas.Response(success=False, message=f"校验新 TMDBID 的剧集组失败：{err}")
+                if rule["episode_group_id"] not in {
+                    str(group.get("id") or "") for group in groups if isinstance(group, dict)
+                }:
+                    return schemas.Response(
+                        success=False,
+                        message="TMDBID 已更改，请读取新编集并重新选择目标剧集组",
+                    )
         rules = self._read_episode_rules()
-        rules = [item for item in rules if self._safe_int(item.get("tmdb_id"), 0) != rule["tmdb_id"]]
+        replaced_ids = {rule["tmdb_id"]}
+        if original_tmdb_id:
+            replaced_ids.add(original_tmdb_id)
+        rules = [
+            item for item in rules
+            if self._safe_int(item.get("tmdb_id"), 0) not in replaced_ids
+        ]
         rules.append(rule)
         rules.sort(key=lambda item: (str(item.get("title") or ""), item.get("tmdb_id") or 0))
         self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
+        if original_tmdb_id and original_tmdb_id != rule["tmdb_id"]:
+            self._replace_catalog_tmdb_match(
+                original_tmdb_id=original_tmdb_id,
+                tmdb_id=rule["tmdb_id"],
+                title=rule["title"],
+            )
         if self._episode_normalizer:
             self._episode_normalizer.clear_cache()
-        return schemas.Response(success=True, data={"rule": rule, "rules": rules})
+        return schemas.Response(
+            success=True,
+            data={"rule": rule, "rules": rules, "original_tmdb_id": original_tmdb_id or rule["tmdb_id"]},
+        )
 
     def delete_episode_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
         """按 TMDBID 删除目标编集规则。"""
@@ -485,17 +526,26 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 if not item:
                     continue
                 catalog.append(item)
-            try:
-                self._enrich_anibridge_mappings(catalog, headers)
-            except Exception as err:
-                logger.warning(f"[TMDB识别增强] AniBridge 映射加载失败，将在加入时搜索 TMDB：{err}")
             catalog.sort(
                 key=lambda item: (
                     str(item.get("date") or "9999-99-99"),
                     self._safe_int(item.get("popularity"), 0),
                 ),
             )
+            for item in catalog:
+                item["scan_status"] = "scanning"
+                item.pop("scan_error", None)
             self._save_season_catalog_quarter(quarter_key, catalog)
+
+        initialized_scan_status = False
+        for item in catalog or []:
+            if not item.get("scan_status"):
+                item["scan_status"] = "scanning"
+                initialized_scan_status = True
+        if initialized_scan_status:
+            self._save_season_catalog_quarter(quarter_key, catalog)
+        if any(str(item.get("scan_status") or "") == "scanning" for item in catalog or []):
+            self._start_catalog_scan(quarter_key)
 
         rules = {self._safe_int(item.get("tmdb_id"), 0): item for item in self._read_episode_rules()}
         view = []
@@ -503,6 +553,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             matched_id = self._safe_int(((item.get("tmdb_match") or {}).get("best") or {}).get("tmdb_id"), 0)
             item["maintained"] = matched_id in rules if matched_id else False
             view.append(item)
+        scanning_count = sum(1 for item in view if item.get("scan_status") == "scanning")
+        matched_count = sum(1 for item in view if item.get("scan_status") == "matched")
+        failed_count = sum(1 for item in view if item.get("scan_status") == "failed")
         return schemas.Response(
             success=True,
             data={
@@ -510,6 +563,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "catalog": view,
                 "count": len(view),
                 "cached": not refreshed,
+                "scanning_count": scanning_count,
+                "matched_count": matched_count,
+                "failed_count": failed_count,
                 "updated_at": (cache.get(quarter_key) or {}).get("updated_at") if not refreshed else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         )
@@ -556,6 +612,187 @@ class TmdbRecognizeEnhancer(_PluginBase):
             if not (page_data.get("pageInfo") or {}).get("hasNextPage"):
                 break
         return items
+
+    def _enrich_bangumi_chinese_titles(
+            self,
+            year: int,
+            quarter: int,
+            catalog: List[Dict[str, Any]],
+            headers: Dict[str, str],
+    ) -> None:
+        """仅使用 Bangumi 原名→中文名覆盖显示层，不参与地区和续作判断。"""
+        month = 1 + (quarter - 1) * 3
+        request = RequestUtils(
+            headers=headers,
+            proxies=self._valid_proxies(getattr(settings, "PROXY", None)),
+            timeout=25,
+        )
+        subjects: List[Dict[str, Any]] = []
+        for current_month in range(month, month + 3):
+            offset = 0
+            total: Optional[int] = None
+            while total is None or offset < total:
+                response = request.get_res(
+                    "https://api.bgm.tv/v0/subjects"
+                    f"?type=2&sort=date&year={year}&month={current_month}"
+                    f"&limit=100&offset={offset}"
+                )
+                if not response:
+                    break
+                response.raise_for_status()
+                raw = response.json()
+                page = raw.get("data") if isinstance(raw, dict) else []
+                if not isinstance(page, list):
+                    break
+                subjects.extend(value for value in page if isinstance(value, dict))
+                total = self._safe_int(raw.get("total"), len(subjects)) if isinstance(raw, dict) else len(page)
+                offset += len(page)
+                if not page or offset >= 500:
+                    break
+        alias_index: Dict[str, Dict[str, Any]] = {}
+        for item in catalog:
+            for alias in item.get("aliases") or []:
+                normalized = self._normalize_text(alias)
+                if normalized:
+                    alias_index.setdefault(normalized, item)
+        for subject in subjects:
+            original = self._clean_title(subject.get("name"))
+            chinese = self._clean_title(subject.get("name_cn"))
+            item = alias_index.get(self._normalize_text(original))
+            if not item or not chinese:
+                continue
+            item["name_cn"] = chinese
+            item["display_name"] = chinese
+            item["aliases"] = list(dict.fromkeys([*(item.get("aliases") or []), chinese]))
+
+    def _start_catalog_scan(self, quarter: str) -> None:
+        """启动一个季度的后台 TMDB 扫描；同一季度同一时刻只运行一个任务。"""
+        with self._catalog_lock:
+            if quarter in self._catalog_scans:
+                return
+            cache = self._read_season_catalog_cache()
+            data = cache.get(quarter) or {}
+            items = data.get("items") if isinstance(data, dict) else []
+            pending = [
+                deepcopy(item) for item in items or []
+                if str(item.get("scan_status") or "scanning") == "scanning"
+            ]
+            if not pending:
+                return
+            self._catalog_scans.add(quarter)
+        threading.Thread(
+            target=self._scan_catalog_worker,
+            args=(quarter, pending),
+            name=f"tmdb-catalog-{quarter}",
+            daemon=True,
+        ).start()
+
+    def _scan_catalog_worker(self, quarter: str, items: List[Dict[str, Any]]) -> None:
+        """并发扫描 TMDB，逐条合并结果，避免覆盖用户同期写入的看板数据。"""
+        try:
+            match = re.fullmatch(r"(\d{4})-Q([1-4])", quarter)
+            if match:
+                year, season = int(match.group(1)), int(match.group(2))
+                headers = {
+                    "User-Agent": (
+                        "NNeiru/TmdbRecognizeEnhancer-Plugin "
+                        "(https://github.com/NNeiru/TmdbRecognizeEnhancer-Plugin)"
+                    ),
+                    "Accept": "application/json",
+                }
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="catalog-source") as source_executor:
+                    source_futures = {
+                        source_executor.submit(self._enrich_anibridge_mappings, items, headers): "AniBridge 映射",
+                        source_executor.submit(
+                            self._enrich_bangumi_chinese_titles, year, season, items, headers,
+                        ): "Bangumi 中文标题",
+                    }
+                    for future in as_completed(source_futures):
+                        try:
+                            future.result()
+                        except Exception as err:
+                            logger.warning(
+                                f"[TMDB识别增强] {source_futures[future]}后台加载失败：{err}"
+                            )
+            with ThreadPoolExecutor(max_workers=min(6, len(items)), thread_name_prefix="tmdb-scan") as executor:
+                futures = {executor.submit(self._scan_catalog_item, item): item for item in items}
+                for future in as_completed(futures):
+                    item = futures[future]
+                    try:
+                        updated = future.result()
+                    except Exception as err:
+                        item["scan_status"] = "failed"
+                        item["scan_error"] = str(err)
+                        updated = item
+                    self._merge_catalog_scan_item(quarter, updated)
+        finally:
+            with self._catalog_lock:
+                self._catalog_scans.discard(quarter)
+
+    def _scan_catalog_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """完成单条快速匹配及本地化详情补充。"""
+        match = item.get("tmdb_match") or {}
+        if not match.get("accepted"):
+            match = self._fast_catalog_tmdb_match(item)
+        tmdb_id = self._safe_int((match.get("best") or {}).get("tmdb_id"), 0)
+        if not tmdb_id:
+            raise ValueError("未获得有效 TMDBID")
+        api = TmdbApi()
+        try:
+            info = api.get_info(mtype=MediaType.TV, tmdbid=tmdb_id) or {}
+        finally:
+            try:
+                api.close()
+            except Exception:
+                pass
+        if not info:
+            raise ValueError(f"TMDB {tmdb_id} 不存在或不是电视剧")
+        localized = self._clean_title(info.get("name") or info.get("title"))
+        if localized:
+            item["display_name"] = item.get("name_cn") or localized
+            if re.search(r"[\u3400-\u9fff]", localized):
+                item["name_cn"] = localized
+                item["display_name"] = localized
+            item["aliases"] = list(dict.fromkeys([*(item.get("aliases") or []), localized]))
+            match["best"]["name"] = localized
+        seasons = [
+            season for season in info.get("seasons") or []
+            if self._safe_int(season.get("season_number"), 0) > 0
+        ]
+        item["is_multi_season"] = bool(item.get("is_multi_season") or len(seasons) > 1)
+        match["season_count"] = len(seasons)
+        item["tmdb_match"] = match
+        item["scan_status"] = "matched"
+        item.pop("scan_error", None)
+        return item
+
+    def _merge_catalog_scan_item(self, quarter: str, updated: Dict[str, Any]) -> None:
+        """只合并扫描字段，保留用户同时执行的规则添加和其它缓存变化。"""
+        with self._catalog_lock:
+            cache = self._read_season_catalog_cache()
+            data = cache.get(quarter) or {}
+            items = data.get("items") if isinstance(data, dict) else []
+            current = next((item for item in items or [] if item.get("id") == updated.get("id")), None)
+            if not current:
+                return
+            current_match = current.get("tmdb_match") or {}
+            user_locked = (
+                str(current_match.get("reason") or "").startswith("用户")
+                or str((current_match.get("best") or {}).get("source") or "") == "user-corrected"
+            )
+            for key in (
+                    "tmdb_match", "scan_status", "scan_error", "is_multi_season",
+                    "display_name", "name_cn", "aliases",
+            ):
+                if user_locked and key in ("tmdb_match", "display_name", "name_cn", "aliases"):
+                    continue
+                if key in updated:
+                    current[key] = deepcopy(updated[key])
+                elif key == "scan_error":
+                    current.pop(key, None)
+            data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cache[quarter] = data
+            self.save_data(self.DATA_KEY_SEASON_CATALOG, cache)
 
     def add_season_catalog_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
         """单条看板项目直接匹配 TMDB 并建立目标规则。"""
@@ -1640,7 +1877,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def _read_season_catalog_cache(self) -> Dict[str, Dict[str, Any]]:
         """读取按季度隔离的看板缓存，并兼容 v0.3.0 的聚合列表。"""
-        stored = self.get_data(self.DATA_KEY_SEASON_CATALOG) or {}
+        with self._catalog_lock:
+            stored = self.get_data(self.DATA_KEY_SEASON_CATALOG) or {}
         if isinstance(stored, dict):
             return deepcopy(stored)
         if not isinstance(stored, list):
@@ -1655,14 +1893,53 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def _save_season_catalog_quarter(self, quarter: str, items: List[Dict[str, Any]]) -> None:
         """只缓存最近八个季度，界面始终仅返回当前选择季度。"""
-        cache = self._read_season_catalog_cache()
-        cache[quarter] = {
-            "items": deepcopy(items),
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        ordered_keys = sorted(cache.keys(), reverse=True)
-        cache = {key: cache[key] for key in ordered_keys[:8]}
-        self.save_data(self.DATA_KEY_SEASON_CATALOG, cache)
+        with self._catalog_lock:
+            cache = self._read_season_catalog_cache()
+            cache[quarter] = {
+                "items": deepcopy(items),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            ordered_keys = sorted(cache.keys(), reverse=True)
+            cache = {key: cache[key] for key in ordered_keys[:8]}
+            self.save_data(self.DATA_KEY_SEASON_CATALOG, cache)
+
+    def _replace_catalog_tmdb_match(
+            self, original_tmdb_id: int, tmdb_id: int, title: str = ""
+    ) -> None:
+        """用户纠正规则 ID 时，同步修正看板里指向旧 ID 的自动匹配。"""
+        if not original_tmdb_id or not tmdb_id or original_tmdb_id == tmdb_id:
+            return
+        with self._catalog_lock:
+            cache = self._read_season_catalog_cache()
+            changed = False
+            for quarter_data in cache.values():
+                quarter_changed = False
+                items = quarter_data.get("items") if isinstance(quarter_data, dict) else []
+                for item in items or []:
+                    match = item.get("tmdb_match") or {}
+                    best = match.get("best") or {}
+                    if self._safe_int(best.get("tmdb_id"), 0) != original_tmdb_id:
+                        continue
+                    best["tmdb_id"] = tmdb_id
+                    if title:
+                        best["name"] = title
+                        item["aliases"] = list(dict.fromkeys([*(item.get("aliases") or []), title]))
+                        if re.search(r"[\u3400-\u9fff]", title):
+                            item["name_cn"] = title
+                            item["display_name"] = title
+                    best["source"] = "user-corrected"
+                    match["accepted"] = True
+                    match["attempted"] = True
+                    match["reason"] = "用户在维护规则中纠正 TMDBID"
+                    match["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    item["scan_status"] = "matched"
+                    item.pop("scan_error", None)
+                    changed = True
+                    quarter_changed = True
+                if quarter_changed and isinstance(quarter_data, dict):
+                    quarter_data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if changed:
+                self.save_data(self.DATA_KEY_SEASON_CATALOG, cache)
 
     def _find_catalog_item(
             self, quarter: str, item_id: str
@@ -1715,6 +1992,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             if self._safe_int(season.get("season_number"), 0) > 0
         ]
         item["is_multi_season"] = bool(item.get("is_multi_season") or len(seasons) > 1)
+        localized = self._clean_title(info.get("name") or info.get("title"))
+        if localized:
+            item["display_name"] = item.get("name_cn") or localized
+            if re.search(r"[\u3400-\u9fff]", localized):
+                item["name_cn"] = localized
+                item["display_name"] = localized
+            item["aliases"] = list(dict.fromkeys([*(item.get("aliases") or []), localized]))
+            best["name"] = localized
         item["tmdb_match"] = {
             "accepted": True,
             "reason": match.get("reason") or "匹配成功",
@@ -1722,15 +2007,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "season_count": len(seasons),
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+        item["scan_status"] = "matched"
+        item.pop("scan_error", None)
         return item["tmdb_match"]
 
     def _fast_catalog_tmdb_match(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """使用结构化英文/罗马音标题进行有限 TMDB 查询，供单条和并发批量复用。"""
-        titles = list(dict.fromkeys(
-            self._clean_title(value)
-            for value in [*(item.get("search_titles") or []), *(item.get("aliases") or []), item.get("name")]
-            if self._clean_title(value)
-        ))[:4]
+        titles = self._catalog_search_titles(item)[:6]
         if not titles:
             raise ValueError("没有可用于搜索的标题")
         api = TmdbApi(language="en-US")
@@ -1825,6 +2108,39 @@ class TmdbRecognizeEnhancer(_PluginBase):
         }
         item["tmdb_match"] = match
         return match
+
+    @classmethod
+    def _catalog_search_titles(cls, item: Dict[str, Any]) -> List[str]:
+        """为季度匹配生成去季号标题；完整别名仍保留在条目中供显示和规则命中。"""
+        originals = list(dict.fromkeys(
+            cls._clean_title(value)
+            for value in [*(item.get("search_titles") or []), *(item.get("aliases") or []), item.get("name")]
+            if cls._clean_title(value)
+        ))
+        stripped: List[str] = []
+        patterns = (
+            r"(?i)\b\d{1,2}(?:st|nd|rd|th)\s+(?:season|part|cour)\b",
+            r"(?i)\b(?:season|series|part|cour)\s*(?:\d{1,2}|[ivx]{1,5})\b",
+            r"(?i)\b(?:the\s+)?final\s+season\b",
+            r"(?i)\bS\s*0*\d{1,2}\b",
+            r"第\s*[0-9一二三四五六七八九十百]+\s*[季期部]",
+            r"第\s*[0-9一二三四五六七八九十百]+\s*クール",
+            r"(?i)(?:続編|续篇|續篇|第二期|新章)$",
+        )
+        for title in originals:
+            reduced = title
+            for pattern in patterns:
+                reduced = re.sub(pattern, " ", reduced)
+            reduced = re.sub(r"\s*[-:：/／|｜]\s*$", "", reduced)
+            reduced = cls._clean_title(reduced).strip(" -_:：/／|｜")
+            if item.get("is_multi_season"):
+                parts = cls._split_pattern.split(reduced, maxsplit=1)
+                if len(parts) > 1 and len(cls._tokens(parts[0])) >= 2:
+                    reduced = parts[0]
+                reduced = re.sub(r"(?i)\s+(?:[2-9]|II|III|IV|V|VI|VII|VIII|IX|X)$", "", reduced).strip()
+            if reduced and cls._normalize_text(reduced) != cls._normalize_text(title):
+                stripped.append(reduced)
+        return list(dict.fromkeys([*stripped, *originals]))
 
     def _add_catalog_item_to_rules(
             self,

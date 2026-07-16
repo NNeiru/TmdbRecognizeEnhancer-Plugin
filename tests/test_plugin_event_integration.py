@@ -311,6 +311,156 @@ def test_catalog_fast_match_uses_structured_english_title(monkeypatch):
     assert match["best"]["score"] == 100.0
 
 
+def test_catalog_search_titles_remove_season_noise_but_keep_aliases(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    item = {
+        "search_titles": [
+            "Mushoku Tensei II: Isekai Ittara Honki Dasu Part 2",
+            "Mushoku Tensei: Jobless Reincarnation Season 2 Part 2",
+            "无职转生 第二季",
+        ],
+        "aliases": ["無職転生 II ～異世界行ったら本気だす～"],
+        "name": "Mushoku Tensei II: Isekai Ittara Honki Dasu Part 2",
+        "is_multi_season": True,
+    }
+
+    titles = module.TmdbRecognizeEnhancer._catalog_search_titles(item)
+
+    assert titles[0] == "Mushoku Tensei"
+    assert "无职转生" in titles
+    assert "Mushoku Tensei: Jobless Reincarnation Season 2 Part 2" in titles
+    assert item["aliases"] == ["無職転生 II ～異世界行ったら本気だす～"]
+
+
+def test_rule_tmdb_id_can_be_corrected_without_leaving_old_rule(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._tmdb_api = SimpleNamespace(get_info=lambda **kwargs: {"id": 456, "name": "正确中文标题"})
+    plugin._data[plugin.DATA_KEY_EPISODE_RULES] = [{
+        "tmdb_id": 123, "title": "错误标题", "enabled": True,
+        "target_type": "default", "episode_group_id": "", "installments": [],
+    }]
+    plugin._data[plugin.DATA_KEY_SEASON_CATALOG] = {
+        "2026-Q3": {
+            "items": [{
+                "id": "anilist:1", "name": "Wrong",
+                "tmdb_match": {
+                    "accepted": True,
+                    "best": {"tmdb_id": 123, "name": "错误标题", "media_type": "电视剧"},
+                },
+            }],
+            "updated_at": "",
+        },
+    }
+
+    response = plugin.save_episode_rule_api({
+        "original_tmdb_id": 123,
+        "tmdb_id": 456,
+        "title": "错误标题",
+        "enabled": True,
+        "target_type": "default",
+        "installments": [],
+    })
+
+    assert response.success is True
+    assert [rule["tmdb_id"] for rule in response.data["rules"]] == [456]
+    assert response.data["rule"]["title"] == "正确中文标题"
+    catalog_item = plugin._data[plugin.DATA_KEY_SEASON_CATALOG]["2026-Q3"]["items"][0]
+    assert catalog_item["tmdb_match"]["best"]["tmdb_id"] == 456
+    assert catalog_item["display_name"] == "正确中文标题"
+    assert catalog_item["scan_status"] == "matched"
+
+
+def test_catalog_scan_adds_localized_title_and_multi_season(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+
+    class FakeTmdb:
+        def __init__(self, language=None):
+            pass
+
+        @staticmethod
+        def get_info(**kwargs):
+            return {
+                "name": "中文动画名",
+                "seasons": [{"season_number": 1}, {"season_number": 2}],
+            }
+
+        @staticmethod
+        def close():
+            return None
+
+    monkeypatch.setattr(module, "TmdbApi", FakeTmdb)
+    item = {
+        "id": "anilist:1",
+        "name": "Anime",
+        "aliases": ["Anime"],
+        "is_multi_season": False,
+        "tmdb_match": {
+            "accepted": True,
+            "best": {"tmdb_id": 789, "name": "Anime", "media_type": module.MediaType.TV.value},
+        },
+    }
+
+    updated = plugin._scan_catalog_item(item)
+
+    assert updated["scan_status"] == "matched"
+    assert updated["display_name"] == "中文动画名"
+    assert updated["is_multi_season"] is True
+
+
+def test_scan_result_merge_preserves_concurrent_catalog_fields(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._data[plugin.DATA_KEY_SEASON_CATALOG] = {
+        "2026-Q3": {
+            "items": [{
+                "id": "anilist:1", "name": "Anime", "maintained": True,
+                "scan_status": "scanning", "custom_field": "keep",
+            }],
+            "updated_at": "",
+        }
+    }
+
+    plugin._merge_catalog_scan_item("2026-Q3", {
+        "id": "anilist:1", "scan_status": "matched", "display_name": "中文名",
+        "tmdb_match": {"accepted": True, "best": {"tmdb_id": 1}},
+    })
+
+    item = plugin._data[plugin.DATA_KEY_SEASON_CATALOG]["2026-Q3"]["items"][0]
+    assert item["scan_status"] == "matched"
+    assert item["display_name"] == "中文名"
+    assert item["maintained"] is True
+    assert item["custom_field"] == "keep"
+
+
+def test_scan_result_does_not_overwrite_user_corrected_match(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._data[plugin.DATA_KEY_SEASON_CATALOG] = {
+        "2026-Q3": {
+            "items": [{
+                "id": "anilist:1", "display_name": "用户选择",
+                "scan_status": "matched",
+                "tmdb_match": {
+                    "accepted": True, "reason": "用户补充 TMDBID",
+                    "best": {"tmdb_id": 456, "name": "用户选择"},
+                },
+            }],
+            "updated_at": "",
+        }
+    }
+
+    plugin._merge_catalog_scan_item("2026-Q3", {
+        "id": "anilist:1", "scan_status": "matched", "display_name": "后台错误结果",
+        "tmdb_match": {"accepted": True, "best": {"tmdb_id": 123}},
+    })
+
+    item = plugin._data[plugin.DATA_KEY_SEASON_CATALOG]["2026-Q3"]["items"][0]
+    assert item["tmdb_match"]["best"]["tmdb_id"] == 456
+    assert item["display_name"] == "用户选择"
+
+
 def test_title_only_episode_preview_uses_saved_rule(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { unwrapResponse } from '../utils'
 
 const props = defineProps({
@@ -27,6 +27,7 @@ const board = ref({
   search: '',
   region: 'all',
   platform: 'all',
+  scanStatus: 'all',
   multiOnly: false,
 })
 const batchPreference = ref('default')
@@ -40,6 +41,7 @@ const editForm = ref(null)
 const failureDialog = ref(false)
 const failures = ref([])
 const manualTmdb = ref({})
+let scanTimer = null
 
 const quarterKey = computed(() => `${board.value.year}-Q${board.value.quarter}`)
 const platforms = computed(() => [
@@ -53,6 +55,7 @@ const filteredCatalog = computed(() => {
   return catalog.value.filter(item => {
     if (board.value.region !== 'all' && item.region !== board.value.region) return false
     if (board.value.platform !== 'all' && item.platform !== board.value.platform) return false
+    if (board.value.scanStatus !== 'all' && item.scan_status !== board.value.scanStatus) return false
     if (board.value.multiOnly && !item.is_multi_season) return false
     if (!keyword) return true
     return [item.name, item.name_cn, ...(item.aliases || [])]
@@ -74,10 +77,10 @@ async function loadRules() {
   rules.value = data.rules || []
 }
 
-async function loadQuarter(refresh = false) {
-  catalogLoading.value = true
+async function loadQuarter(refresh = false, background = false) {
+  if (!background) catalogLoading.value = true
   error.value = ''
-  selectedIds.value = []
+  if (!background) selectedIds.value = []
   try {
     const data = unwrapResponse(await props.api.post(
       `${props.pluginBase}/episode-normalizer/catalog/query`,
@@ -86,11 +89,20 @@ async function loadQuarter(refresh = false) {
     catalog.value = data.catalog || []
     catalogMeta.value = data
     if (!platforms.value.some(item => item.value === board.value.platform)) board.value.platform = 'all'
+    scheduleScanPoll(Number(data.scanning_count || 0))
   } catch (err) {
     error.value = err?.message || '季度看板加载失败'
-    catalog.value = []
+    if (!background) catalog.value = []
   } finally {
-    catalogLoading.value = false
+    if (!background) catalogLoading.value = false
+  }
+}
+
+function scheduleScanPoll(scanningCount) {
+  if (scanTimer) clearTimeout(scanTimer)
+  scanTimer = null
+  if (scanningCount > 0) {
+    scanTimer = setTimeout(() => loadQuarter(false, true), 1800)
   }
 }
 
@@ -111,7 +123,7 @@ async function runPreview() {
   }
 }
 
-async function addCatalogItem(item, preference, tmdbId = '') {
+async function addCatalogItem(item, preference, tmdbId = '', singleFailure = true) {
   busyId.value = item.id
   error.value = ''
   try {
@@ -135,7 +147,9 @@ async function addCatalogItem(item, preference, tmdbId = '') {
       item,
       preference,
     }
-    failures.value = [...failures.value.filter(value => value.id !== item.id), failure]
+    failures.value = singleFailure
+      ? [failure]
+      : [...failures.value.filter(value => value.id !== item.id), failure]
     failureDialog.value = true
   } finally {
     busyId.value = ''
@@ -178,7 +192,7 @@ async function batchAdd() {
 async function retryFailure(failure) {
   const tmdbId = manualTmdb.value[failure.id]
   if (!tmdbId || !failure.item) return
-  await addCatalogItem(failure.item, failure.preference, tmdbId)
+  await addCatalogItem(failure.item, failure.preference, tmdbId, false)
   if (!failures.value.length) failureDialog.value = false
 }
 
@@ -191,8 +205,16 @@ function toggleAllFiltered() {
   }
 }
 
+function ignoreFailure(failure) {
+  failures.value = failures.value.filter(value => value.id !== failure.id)
+  selectedIds.value = selectedIds.value.filter(id => id !== failure.id)
+  delete manualTmdb.value[failure.id]
+  if (!failures.value.length) failureDialog.value = false
+}
+
 function prepareRule(rule) {
   const cloned = JSON.parse(JSON.stringify(rule))
+  cloned.original_tmdb_id = rule.tmdb_id
   cloned.installments = (cloned.installments || []).map(item => ({
     ...item,
     aliases: Array.isArray(item.aliases) ? item.aliases.join('\n') : (item.aliases || ''),
@@ -216,6 +238,10 @@ async function inspectTarget() {
       `${props.pluginBase}/episode-normalizer/inspect`,
       { tmdb_id: editForm.value.tmdb_id },
     ))
+    if (Number(editForm.value.original_tmdb_id) !== Number(editForm.value.tmdb_id) && inspection.value?.title) {
+      editForm.value.title = inspection.value.title
+      editForm.value.episode_group_id = ''
+    }
   } catch (err) {
     error.value = err?.message || '目标编集读取失败'
   } finally {
@@ -231,6 +257,7 @@ async function saveRule() {
       `${props.pluginBase}/episode-normalizer/rule`, editForm.value,
     )) || {}
     rules.value = data.rules || rules.value
+    await loadQuarter(false, true)
     editorOpen.value = false
     notice.value = '维护规则已保存'
     snackbar.value = true
@@ -269,6 +296,7 @@ function groupType(type) {
 }
 
 watch(() => [board.value.year, board.value.quarter], () => loadQuarter(false))
+onBeforeUnmount(() => { if (scanTimer) clearTimeout(scanTimer) })
 onMounted(async () => {
   try {
     await Promise.all([loadRules(), loadQuarter(false)])
@@ -368,6 +396,10 @@ onMounted(async () => {
             :items="[{title:'全部地区',value:'all'},{title:'日漫',value:'japan'},{title:'国漫',value:'china'},{title:'海外动画',value:'western'},{title:'地区未知',value:'unknown'}]"
           />
           <VSelect v-model="board.platform" :items="platforms" label="载体" hide-details density="compact" />
+          <VSelect
+            v-model="board.scanStatus" label="扫描状态" hide-details density="compact"
+            :items="[{title:'全部状态',value:'all'},{title:'正在扫描',value:'scanning'},{title:'已匹配',value:'matched'},{title:'匹配失败',value:'failed'}]"
+          />
           <VSwitch v-model="board.multiOnly" label="仅续作/多季" color="secondary" hide-details density="compact" />
         </div>
 
@@ -390,6 +422,7 @@ onMounted(async () => {
         <VProgressLinear v-if="catalogLoading" indeterminate color="secondary" class="mb-4" />
         <div class="text-caption text-medium-emphasis mb-3">
           当前 {{ filteredCatalog.length }} / {{ catalog.length }} 条
+          <span v-if="catalogMeta.scanning_count"> · {{ catalogMeta.scanning_count }} 条正在扫描</span>
           <span v-if="catalogMeta.updated_at"> · 更新于 {{ catalogMeta.updated_at }}</span>
         </div>
         <div class="catalog-grid">
@@ -405,6 +438,10 @@ onMounted(async () => {
                 <VChip v-if="item.region_name" size="x-small" variant="tonal">{{ item.region_name }}</VChip>
                 <VChip v-if="item.platform" size="x-small" variant="tonal">{{ item.platform }}</VChip>
                 <VChip v-if="item.is_multi_season" size="x-small" color="secondary" variant="tonal">续作/多季</VChip>
+                <VChip v-if="item.scan_status === 'scanning'" size="x-small" color="info" variant="tonal">
+                  <VProgressCircular indeterminate size="11" width="2" class="me-1" />正在扫描
+                </VChip>
+                <VChip v-else-if="item.scan_status === 'failed'" size="x-small" color="warning" variant="tonal">匹配待补充</VChip>
                 <VChip v-if="item.maintained" size="x-small" color="success" prepend-icon="mdi-check">已维护</VChip>
               </div>
               <div v-if="item.tmdb_match?.best" class="text-caption text-medium-emphasis mt-2">
@@ -447,6 +484,14 @@ onMounted(async () => {
             <VSwitch v-model="editForm.enabled" label="启用规则" color="success" hide-details />
             <VSpacer /><VBtn variant="tonal" prepend-icon="mdi-refresh" :loading="editorLoading" @click="inspectTarget">刷新编集</VBtn>
           </div>
+          <div class="tmdb-correction mb-4">
+            <VTextField v-model.number="editForm.tmdb_id" label="TMDBID" type="number" hide-details />
+            <VBtn variant="tonal" prepend-icon="mdi-database-search" :loading="editorLoading" @click="inspectTarget">读取并校验</VBtn>
+          </div>
+          <VAlert
+            v-if="Number(editForm.original_tmdb_id) !== Number(editForm.tmdb_id)"
+            type="warning" variant="tonal" density="compact" class="mb-4"
+          >保存后将用 TMDB {{ editForm.tmdb_id }} 替换原规则 TMDB {{ editForm.original_tmdb_id }}</VAlert>
           <VRadioGroup v-model="editForm.target_type" hide-details>
             <VRadio value="default" label="TMDB 默认编集" />
             <VRadio value="group" label="TMDB 剧集组" />
@@ -492,6 +537,7 @@ onMounted(async () => {
               <div class="manual-match">
                 <VTextField v-model="manualTmdb[failure.id]" label="TMDBID" type="number" hide-details density="compact" />
                 <VBtn color="primary" variant="tonal" :loading="busyId === failure.id" @click="retryFailure(failure)">补充并加入</VBtn>
+                <VBtn variant="text" color="medium-emphasis" @click="ignoreFailure(failure)">忽略</VBtn>
               </div>
             </template>
           </VListItem>
@@ -507,7 +553,7 @@ onMounted(async () => {
 <style scoped>
 .normalizer-card { border-color: rgba(var(--v-theme-on-surface), .1); }
 .preview-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
-.board-controls { display: grid; grid-template-columns: 120px 110px minmax(220px, 1fr) 150px 150px auto; gap: 10px; align-items: center; }
+.board-controls { display: grid; grid-template-columns: 110px 100px minmax(210px, 1fr) 135px 135px 135px auto; gap: 10px; align-items: center; }
 .batch-bar { display: flex; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .055); }
 .batch-target { max-width: 280px; }
 .catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 14px; }
@@ -517,7 +563,8 @@ onMounted(async () => {
 .rules-scroll { max-height: 330px; overflow-y: auto; }
 .rule-card { border: 1px solid rgba(var(--v-theme-success), .1); }
 .empty-catalog, .empty-rules { grid-column: 1 / -1; min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: rgba(var(--v-theme-on-surface), .55); }
-.manual-match { display: grid; grid-template-columns: 130px auto; gap: 8px; align-items: center; min-width: 290px; }
+.manual-match { display: grid; grid-template-columns: 120px auto auto; gap: 8px; align-items: center; min-width: 350px; }
+.tmdb-correction { display: grid; grid-template-columns: minmax(180px, 1fr) auto; gap: 10px; align-items: center; }
 @media (max-width: 1000px) { .board-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 700px) {
   .preview-line { grid-template-columns: 1fr; }
@@ -526,5 +573,6 @@ onMounted(async () => {
   .batch-target { max-width: none; }
   .rules-grid { grid-template-columns: 1fr; }
   .manual-match { grid-template-columns: 1fr; min-width: 160px; }
+  .tmdb-correction { grid-template-columns: 1fr; }
 }
 </style>
