@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 import threading
 import unicodedata
+from copy import deepcopy
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from fastapi import Body
 
@@ -20,15 +21,19 @@ from app.log import logger
 from app.modules.themoviedb.tmdbapi import TmdbApi
 from app.plugins import _PluginBase
 from app.schemas.types import ChainEventType, MediaType
+from app.utils.http import RequestUtils
+
+from .episode_normalizer import EpisodeNormalizer
+from .runtime_adapter import MoviePilotRuntimeAdapter
 
 
 class TmdbRecognizeEnhancer(_PluginBase):
-    """在原生识别失败后，通过降级搜索词和候选评分提供 TMDB 标准名称。"""
+    """提供可解释的 TMDB 候选选择与目标编集季集归一化。"""
 
     plugin_name = "TMDB 识别增强"
-    plugin_desc = "原生识别失败后降级搜索 TMDB，并以标题、年份、类型和季信息对候选进行受控评分。"
+    plugin_desc = "增强 TMDB 候选识别，并将动漫季集归一化到默认编集或选定剧集组。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.2.4"
+    plugin_version = "0.3.0"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -36,6 +41,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
     auth_level = 1
 
     DATA_KEY_HISTORY = "recognize_history"
+    DATA_KEY_EPISODE_RULES = "episode_normalizer_rules"
+    DATA_KEY_SEASON_CATALOG = "season_catalog"
     DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
         "show_sidebar_nav": True,
@@ -64,6 +71,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "type_weight": 6.0,
         "season_missing_penalty": 20.0,
         "history_limit": 30,
+        "episode_normalizer_enabled": False,
     }
 
     _split_pattern = re.compile(r"\s*(?::|：|\||｜|/|／|—|–)\s*")
@@ -87,6 +95,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         super().__init__()
         self._config = dict(self.DEFAULT_CONFIG)
         self._tmdb_api: Optional[TmdbApi] = None
+        self._episode_normalizer: Optional[EpisodeNormalizer] = None
+        self._runtime_adapter = MoviePilotRuntimeAdapter()
         self._history_lock = threading.RLock()
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
@@ -95,6 +105,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if self._tmdb_api:
             self._close_tmdb_client()
         self._tmdb_api = TmdbApi()
+        self._episode_normalizer = EpisodeNormalizer(self._tmdb_api)
+        self._sync_runtime_adapter_state()
         self._sync_event_handler_state()
 
     def get_state(self) -> bool:
@@ -189,11 +201,61 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "auth": "bear",
                 "summary": "清空识别历史",
             },
+            {
+                "path": "/episode-normalizer",
+                "endpoint": self.get_episode_normalizer_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取集数归一化规则和季度条目",
+            },
+            {
+                "path": "/episode-normalizer/rule",
+                "endpoint": self.save_episode_rule_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "保存目标编集规则",
+            },
+            {
+                "path": "/episode-normalizer/rule/delete",
+                "endpoint": self.delete_episode_rule_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "删除目标编集规则",
+            },
+            {
+                "path": "/episode-normalizer/inspect",
+                "endpoint": self.inspect_episode_target_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "查看 TMDB 默认编集和剧集组",
+            },
+            {
+                "path": "/episode-normalizer/preview",
+                "endpoint": self.preview_episode_normalizer_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "试跑集数归一化",
+            },
+            {
+                "path": "/episode-normalizer/catalog/import",
+                "endpoint": self.import_season_catalog_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "从 Bangumi 导入季度动画目录",
+            },
+            {
+                "path": "/episode-normalizer/catalog/match",
+                "endpoint": self.match_season_catalog_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "为季度动画匹配 TMDB 候选",
+            },
         ]
 
     def stop_service(self):
         """禁用事件处理器并释放 TMDB 客户端。"""
         self._sync_event_handler_state(enabled=False)
+        self._runtime_adapter.uninstall()
         self._close_tmdb_client()
 
     def get_status(self) -> schemas.Response:
@@ -212,6 +274,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "acceptance_rate": round(accepted * 100 / len(history), 1) if history else 0,
                 },
                 "history": history,
+                "episode_normalizer": {
+                    "enabled": bool(self._config.get("episode_normalizer_enabled")),
+                    "rule_count": len(self._read_episode_rules()),
+                    "catalog_count": len(self._read_season_catalog()),
+                    "runtime_compatible": self._runtime_adapter.compatible,
+                    "runtime_message": self._runtime_adapter.message,
+                    "plugin_first": bool(getattr(settings, "RECOGNIZE_PLUGIN_FIRST", False)),
+                },
             },
         )
 
@@ -219,6 +289,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """校验并保存联邦界面提交的插件配置。"""
         self._config = self._normalize_config(config or {})
         self.update_config(self._current_config())
+        self._sync_runtime_adapter_state()
         self._sync_event_handler_state()
         return self.get_status()
 
@@ -249,9 +320,183 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self.save_data(self.DATA_KEY_HISTORY, [])
         return self.get_status()
 
+    def get_episode_normalizer_api(self) -> schemas.Response:
+        """返回目标编集规则和已导入的季度番剧条目。"""
+        return schemas.Response(
+            success=True,
+            data={
+                "rules": self._read_episode_rules(),
+                "catalog": self._read_season_catalog(),
+                "enabled": bool(self._config.get("episode_normalizer_enabled")),
+            },
+        )
+
+    def save_episode_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """新增或更新一个 TMDBID 的目标编集规则。"""
+        try:
+            rule = self._normalize_episode_rule(payload or {})
+        except ValueError as err:
+            return schemas.Response(success=False, message=str(err))
+        rules = self._read_episode_rules()
+        rules = [item for item in rules if self._safe_int(item.get("tmdb_id"), 0) != rule["tmdb_id"]]
+        rules.append(rule)
+        rules.sort(key=lambda item: (str(item.get("title") or ""), item.get("tmdb_id") or 0))
+        self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
+        if self._episode_normalizer:
+            self._episode_normalizer.clear_cache()
+        return schemas.Response(success=True, data={"rule": rule, "rules": rules})
+
+    def delete_episode_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """按 TMDBID 删除目标编集规则。"""
+        tmdb_id = self._safe_int((payload or {}).get("tmdb_id"), 0)
+        if not tmdb_id:
+            return schemas.Response(success=False, message="缺少有效的 TMDBID")
+        rules = [
+            item for item in self._read_episode_rules()
+            if self._safe_int(item.get("tmdb_id"), 0) != tmdb_id
+        ]
+        self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
+        return schemas.Response(success=True, data={"rules": rules})
+
+    def inspect_episode_target_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """读取 TMDB 默认季和剧集组，供用户选择目标编集。"""
+        tmdb_id = self._safe_int((payload or {}).get("tmdb_id"), 0)
+        if not tmdb_id:
+            return schemas.Response(success=False, message="请输入有效的 TMDBID")
+        try:
+            normalizer = self._normalizer()
+            normalizer.clear_cache()
+            return schemas.Response(success=True, data=normalizer.inspect(tmdb_id))
+        except Exception as err:
+            logger.error(f"[TMDB识别增强] 获取 TMDB {tmdb_id} 编集失败：{err}")
+            return schemas.Response(success=False, message=f"获取目标编集失败：{err}")
+
+    def preview_episode_normalizer_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """试跑某一条规则，不写入识别链。"""
+        payload = payload or {}
+        tmdb_id = self._safe_int(payload.get("tmdb_id"), 0)
+        rule = next((
+            item for item in self._read_episode_rules()
+            if self._safe_int(item.get("tmdb_id"), 0) == tmdb_id
+        ), None)
+        if not rule:
+            try:
+                rule = self._normalize_episode_rule(payload.get("rule") or payload)
+            except ValueError as err:
+                return schemas.Response(success=False, message=str(err))
+        result = self._normalizer().normalize(
+            rule=rule,
+            season=self._optional_int(payload.get("season")),
+            episode=self._optional_int(payload.get("episode")),
+            end_episode=self._optional_int(payload.get("end_episode")),
+            raw_title=str(payload.get("title") or ""),
+            parsed_name=str(payload.get("parsed_name") or ""),
+        )
+        return schemas.Response(success=True, data={"rule": rule, "result": result})
+
+    def import_season_catalog_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """通过 Bangumi 官方 API 导入指定季度首月的动画条目。"""
+        payload = payload or {}
+        year = self._safe_int(payload.get("year"), datetime.now().year)
+        quarter = self._safe_int(payload.get("quarter"), 1)
+        if year < 1900 or year > 2099 or quarter not in (1, 2, 3, 4):
+            return schemas.Response(success=False, message="年份或季度无效")
+        month = 1 + (quarter - 1) * 3
+        headers = {
+            "User-Agent": (
+                "NNeiru/TmdbRecognizeEnhancer-Plugin "
+                "(https://github.com/NNeiru/TmdbRecognizeEnhancer-Plugin)"
+            ),
+            "Accept": "application/json",
+        }
+        try:
+            items = self._fetch_bangumi_quarter_month(year, month, headers)
+        except Exception as err:
+            logger.error(f"[TMDB识别增强] 导入 {year}-Q{quarter} Bangumi 目录失败：{err}")
+            return schemas.Response(success=False, message=f"Bangumi 导入失败：{err}")
+
+        quarter_key = f"{year}-Q{quarter}"
+        imported = [self._normalize_bangumi_subject(item, quarter_key) for item in items if isinstance(item, dict)]
+        imported = [item for item in imported if item]
+        existing = self._read_season_catalog()
+        index = {str(item.get("id")): item for item in existing if item.get("id")}
+        for item in imported:
+            previous = index.get(item["id"]) or {}
+            index[item["id"]] = {**previous, **item, "tmdb_match": previous.get("tmdb_match")}
+        catalog = sorted(index.values(), key=lambda item: (str(item.get("quarter") or ""), str(item.get("date") or ""), str(item.get("name") or "")), reverse=True)
+        self.save_data(self.DATA_KEY_SEASON_CATALOG, catalog)
+        return schemas.Response(
+            success=True,
+            data={"quarter": quarter_key, "imported": len(imported), "catalog": catalog},
+        )
+
+    def _fetch_bangumi_quarter_month(
+            self, year: int, month: int, headers: Dict[str, str]
+    ) -> List[Dict[str, Any]]:
+        """分页读取季度首月条目，避免 Bangumi 单页 100 条造成静默缺失。"""
+        page_size = 100
+        offset = 0
+        total: Optional[int] = None
+        items: List[Dict[str, Any]] = []
+        request = RequestUtils(
+            headers=headers,
+            proxies=self._valid_proxies(getattr(settings, "PROXY", None)),
+            timeout=20,
+        )
+        while total is None or offset < total:
+            url = (
+                "https://api.bgm.tv/v0/subjects"
+                f"?type=2&sort=date&year={year}&month={month}"
+                f"&limit={page_size}&offset={offset}"
+            )
+            response = request.get_res(url)
+            if not response:
+                raise RuntimeError(f"Bangumi API 第 {offset // page_size + 1} 页未返回响应")
+            response.raise_for_status()
+            raw = response.json()
+            page = raw.get("data") if isinstance(raw, dict) else raw
+            if not isinstance(page, list):
+                raise RuntimeError("Bangumi API 返回了无法识别的数据结构")
+            items.extend(item for item in page if isinstance(item, dict))
+            total = self._safe_int(raw.get("total"), len(items)) if isinstance(raw, dict) else len(items)
+            offset += len(page)
+            if not page or len(items) >= 500:
+                break
+        return items
+
+    def match_season_catalog_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """使用现有 TMDB 候选算法为一个季度条目匹配 TMDBID。"""
+        item_id = str((payload or {}).get("id") or "").strip()
+        catalog = self._read_season_catalog()
+        item = next((value for value in catalog if str(value.get("id")) == item_id), None)
+        if not item:
+            return schemas.Response(success=False, message="季度条目不存在")
+        year = str(item.get("date") or "")[:4]
+        hints = {"year": year, "media_type": MediaType.TV, "season": 0, "episode": 0}
+        results = []
+        for title in dict.fromkeys([item.get("name"), item.get("name_cn"), *(item.get("aliases") or [])]):
+            title = self._clean_title(title)
+            if not title:
+                continue
+            try:
+                results.append(self._recognize_title(title, hints=hints, include_candidates=False))
+            except Exception as err:
+                logger.debug(f"[TMDB识别增强] 季度条目 {title} 匹配失败：{err}")
+        accepted = [result for result in results if result.get("accepted") and result.get("best")]
+        accepted.sort(key=lambda result: (result["best"].get("score") or 0, result.get("margin") or 0), reverse=True)
+        match = accepted[0] if accepted else (results[0] if results else None)
+        item["tmdb_match"] = {
+            "accepted": bool(match and match.get("accepted")),
+            "reason": match.get("reason") if match else "没有可用标题",
+            "best": match.get("best") if match else None,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.save_data(self.DATA_KEY_SEASON_CATALOG, catalog)
+        return schemas.Response(success=True, data={"item": item, "catalog": catalog})
+
     @eventmanager.register(ChainEventType.NameRecognize, priority=5)
     def on_name_recognize(self, event: Event) -> None:
-        """处理原生识别失败事件，并在高置信度时写回标准 TMDB 名称。"""
+        """处理名称识别事件，并在高置信度时写回 TMDBID 与目标季集。"""
         if not self.get_state() or not event or not event.event_data:
             return
         event_data = event.event_data
@@ -261,7 +506,53 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not raw_title:
             return
 
-        title, hints = self._prepare_recognition_input(raw_title)
+        # 运行在 MoviePilot 正式识别链中时，优先使用其已经执行识别词后的
+        # MetaBase；旧版核心或识别试验接口没有运行时上下文时再安全回退。
+        title, hints = self._prepare_event_recognition_input(event_data, raw_title)
+
+        # MP 传统识别词中显式指定的 ID 拥有最高优先级。TMDBID 命中本插件
+        # 规则时只做第三步季集归一化，不重新搜索、更不覆盖这个 ID；豆瓣等
+        # 其它固定 ID 则完全交回原生链处理。
+        runtime_meta = self._runtime_adapter.current_meta()
+        fixed_tmdb_id = self._safe_int(getattr(runtime_meta, "tmdbid", 0), 0)
+        other_fixed_id = any((
+            getattr(runtime_meta, "doubanid", None),
+            getattr(runtime_meta, "bangumiid", None),
+        )) if runtime_meta is not None else False
+        if fixed_tmdb_id:
+            fixed_type = self._normalize_media_type(getattr(runtime_meta, "type", None)) or MediaType.TV
+            fixed_best = {
+                "tmdb_id": fixed_tmdb_id,
+                "name": title,
+                "year": self._normalize_year(getattr(runtime_meta, "year", "")),
+                "media_type": fixed_type.value,
+                "score": 100.0,
+            }
+            adjustment = self._normalize_best_episode(
+                best=fixed_best,
+                hints=hints,
+                raw_title=raw_title,
+                parsed_name=title,
+            )
+            if adjustment is not None:
+                self._apply_runtime_meta(fixed_best, adjustment)
+                self._append_history({
+                    "accepted": True,
+                    "title": title,
+                    "original_title": raw_title if raw_title != title else "",
+                    "reason": "沿用 MP 传统识别词指定的 TMDBID，仅检查目标编集",
+                    "queries": [],
+                    "hints": self._serialize_hints(hints),
+                    "best": fixed_best,
+                    "runner_up": None,
+                    "margin": 100.0,
+                    "episode_adjustment": adjustment,
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+            return
+        if other_fixed_id:
+            return
+
         try:
             result = self._recognize_title(title, hints=hints, include_candidates=False)
         except Exception as err:
@@ -276,23 +567,51 @@ class TmdbRecognizeEnhancer(_PluginBase):
             }
         result["original_title"] = raw_title if raw_title != title else ""
 
-        self._append_history(result)
         best = result.get("best") or {}
         if not result.get("accepted") or not best.get("name"):
+            self._append_history(result)
             if self._config.get("debug"):
                 logger.info(f"[TMDB识别增强] 拒绝注入：{title}，{result.get('reason')}")
             return
 
+        adjustment = self._normalize_best_episode(
+            best=best,
+            hints=hints,
+            raw_title=raw_title,
+            parsed_name=title,
+        )
+        result["episode_adjustment"] = adjustment
+        self._apply_runtime_meta(best, adjustment)
+        self._append_history(result)
+
         self._event_set(event_data, "name", best.get("name"))
         self._event_set(event_data, "year", best.get("year") or "")
-        self._event_set(event_data, "season", hints.get("season") or 0)
-        self._event_set(event_data, "episode", hints.get("episode") or 0)
+        self._event_set(event_data, "tmdbid", best.get("tmdb_id"))
+        media_type = best.get("media_type")
+        self._event_set(
+            event_data,
+            "media_type",
+            media_type.value if isinstance(media_type, MediaType) else media_type,
+        )
+        final_season = adjustment.get("season") if adjustment else hints.get("season")
+        final_episode = adjustment.get("episode") if adjustment else hints.get("episode")
+        final_end_episode = adjustment.get("end_episode") if adjustment else hints.get("end_episode")
+        if final_season is not None:
+            self._event_set(event_data, "season", final_season)
+        if final_episode is not None:
+            self._event_set(event_data, "episode", final_episode)
+        if final_end_episode is not None:
+            self._event_set(event_data, "end_episode", final_end_episode)
+        if adjustment and adjustment.get("episode_group"):
+            self._event_set(event_data, "episode_group", adjustment.get("episode_group"))
         self._event_set(event_data, "source_plugin", self.__class__.__name__)
         self._event_set(event_data, "confidence", round(float(best.get("score") or 0) / 100, 3))
         self._event_set(event_data, "reason", result.get("reason"))
         logger.info(
             f"[TMDB识别增强] {raw_title} => {best.get('name')} ({best.get('year') or '未知年份'}) "
-            f"TMDB {best.get('tmdb_id')}，得分 {best.get('score')}，分差 {result.get('margin')}"
+            f"TMDB {best.get('tmdb_id')}，得分 {best.get('score')}，分差 {result.get('margin')}；"
+            f"季集：S{final_season}E{final_episode}，"
+            f"归一化：{(adjustment or {}).get('reason') or '未启用'}"
         )
 
     def _sync_event_handler_state(self, enabled: Optional[bool] = None) -> None:
@@ -304,6 +623,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
         else:
             eventmanager.disable_event_handler(self.on_name_recognize)
             eventmanager.disable_event_handler(type(self))
+
+    def _sync_runtime_adapter_state(self) -> None:
+        """只在插件启用期间安装运行时适配器。"""
+        if self.get_state():
+            self._runtime_adapter.install()
+        else:
+            self._runtime_adapter.uninstall()
 
     def _prepare_recognition_input(self, raw_title: str) -> Tuple[str, Dict[str, Any]]:
         """复用 MoviePilot 元数据解析结果，返回搜索标题与识别提示。"""
@@ -331,6 +657,118 @@ class TmdbRecognizeEnhancer(_PluginBase):
         except Exception as err:
             logger.warning(f"[TMDB识别增强] MoviePilot 标题解析失败，回退原标题：{raw_title}，{err}")
         return title, hints
+
+    def _prepare_event_recognition_input(
+            self, event_data: Any, raw_title: str
+    ) -> Tuple[str, Dict[str, Any]]:
+        """优先采用 MP 已执行识别词后的结构化结果，旧核心则回退自行解析。"""
+        runtime_meta = self._runtime_adapter.current_meta()
+        parsed_name = self._clean_title(getattr(runtime_meta, "name", ""))
+        if runtime_meta is not None and parsed_name:
+            hints = self._extract_hints(raw_title)
+            runtime_hints = {
+                "year": self._normalize_year(getattr(runtime_meta, "year", "")),
+                "media_type": self._normalize_media_type(getattr(runtime_meta, "type", None)),
+                "season": self._optional_int(getattr(runtime_meta, "begin_season", None)),
+                "episode": self._optional_int(getattr(runtime_meta, "begin_episode", None)),
+                "end_episode": self._optional_int(getattr(runtime_meta, "end_episode", None)),
+            }
+            hints.update({key: value for key, value in runtime_hints.items() if value not in (None, "")})
+            return parsed_name, hints
+
+        parsed_name = self._clean_title(self._event_get(event_data, "parsed_name"))
+        if not parsed_name:
+            return self._prepare_recognition_input(raw_title)
+        hints = self._extract_hints(raw_title)
+        parsed_hints = {
+            "year": self._normalize_year(self._event_get(event_data, "parsed_year")),
+            "media_type": self._normalize_media_type(self._event_get(event_data, "parsed_media_type")),
+            "season": self._optional_int(self._event_get(event_data, "parsed_season")),
+            "episode": self._optional_int(self._event_get(event_data, "parsed_episode")),
+            "end_episode": self._optional_int(self._event_get(event_data, "parsed_end_episode")),
+        }
+        hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "")})
+        return parsed_name, hints
+
+    def _apply_runtime_meta(
+            self, best: Dict[str, Any], adjustment: Optional[Dict[str, Any]]
+    ) -> None:
+        """直接写回本次识别 MetaBase，使原版 MP 能按 TMDBID 和目标编集继续处理。"""
+        meta = self._runtime_adapter.current_meta()
+        if meta is None:
+            return
+        tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
+        if tmdb_id:
+            meta.tmdbid = tmdb_id
+        media_type = self._normalize_media_type(best.get("media_type"))
+        if media_type:
+            meta.type = media_type
+        if not adjustment:
+            return
+        if adjustment.get("season") is not None:
+            meta.begin_season = int(adjustment["season"])
+        if adjustment.get("episode") is not None:
+            meta.begin_episode = int(adjustment["episode"])
+        if adjustment.get("end_episode") is not None:
+            meta.end_episode = int(adjustment["end_episode"])
+            if meta.begin_episode is not None:
+                meta.total_episode = max(0, meta.end_episode - meta.begin_episode + 1)
+        if adjustment.get("episode_group"):
+            meta.episode_group = str(adjustment["episode_group"])
+
+    def _normalize_best_episode(
+            self,
+            best: Dict[str, Any],
+            hints: Dict[str, Any],
+            raw_title: str,
+            parsed_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        """对已确定 TMDBID 的电视剧执行可选目标编集归一化。"""
+        if not self._config.get("episode_normalizer_enabled"):
+            return None
+        if not self._runtime_adapter.compatible:
+            return {
+                "applied": False,
+                "season": hints.get("season"),
+                "episode": hints.get("episode"),
+                "end_episode": hints.get("end_episode"),
+                "reason": self._runtime_adapter.message,
+                "strategy": "runtime-incompatible",
+            }
+        if not bool(getattr(settings, "RECOGNIZE_PLUGIN_FIRST", False)):
+            return {
+                "applied": False,
+                "season": hints.get("season"),
+                "episode": hints.get("episode"),
+                "end_episode": hints.get("end_episode"),
+                "reason": "请先在 MP 中开启识别插件优先，否则原生识别成功时插件不会运行",
+                "strategy": "plugin-first-required",
+            }
+        media_type = self._normalize_media_type(best.get("media_type"))
+        if media_type != MediaType.TV:
+            return None
+        tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
+        rule = next((
+            item for item in self._read_episode_rules()
+            if item.get("enabled", True) and self._safe_int(item.get("tmdb_id"), 0) == tmdb_id
+        ), None)
+        if not rule:
+            return None
+        result = self._normalizer().normalize(
+            rule=rule,
+            season=self._optional_int(hints.get("season")),
+            episode=self._optional_int(hints.get("episode")),
+            end_episode=self._optional_int(hints.get("end_episode")),
+            raw_title=raw_title,
+            parsed_name=parsed_name,
+        )
+        if result.get("applied"):
+            logger.info(
+                f"[TMDB识别增强] TMDB {tmdb_id} 集数归一化："
+                f"S{hints.get('season')}E{hints.get('episode')} => "
+                f"S{result.get('season')}E{result.get('episode')}（{result.get('strategy')}）"
+            )
+        return result
 
     def _recognize_title(
             self,
@@ -615,8 +1053,24 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _proxy_url(proxy_setting: Any) -> Optional[str]:
         """兼容 MoviePilot 字典或字符串形式的代理配置。"""
         if isinstance(proxy_setting, dict):
-            return proxy_setting.get("http") or proxy_setting.get("https")
-        return str(proxy_setting).strip() if proxy_setting else None
+            proxy_setting = proxy_setting.get("http") or proxy_setting.get("https")
+        value = str(proxy_setting or "").strip()
+        if not value:
+            return None
+        parsed = urlparse(value)
+        return value if parsed.scheme and parsed.hostname else None
+
+    @classmethod
+    def _valid_proxies(cls, proxy_setting: Any) -> Optional[dict]:
+        """过滤 http:// 这类没有主机的无效系统代理。"""
+        if not isinstance(proxy_setting, dict):
+            value = cls._proxy_url(proxy_setting)
+            return {"http": value, "https": value} if value else None
+        proxies = {
+            key: value for key, raw in proxy_setting.items()
+            if key in ("http", "https") and (value := cls._proxy_url(raw))
+        }
+        return proxies or None
 
     def _score_candidate(
             self,
@@ -884,6 +1338,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return default
 
     @staticmethod
+    def _optional_int(value: Any) -> Optional[int]:
+        """把可选季集值转换为整数，空值保持 None。"""
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _safe_float(value: Any, default: float) -> float:
         """将配置值安全转换为浮点数。"""
         try:
@@ -932,7 +1396,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         bool_keys = (
             "enabled", "show_sidebar_nav", "debug", "prefer_parsed_title", "web_search_fallback",
             "main_title_fallback",
-            "progressive_fallback", "fetch_aliases",
+            "progressive_fallback", "fetch_aliases", "episode_normalizer_enabled",
         )
         for key in bool_keys:
             merged[key] = bool(merged.get(key))
@@ -998,13 +1462,120 @@ class TmdbRecognizeEnhancer(_PluginBase):
             key: result.get(key)
             for key in (
                 "accepted", "title", "original_title", "reason", "queries", "hints",
-                "best", "runner_up", "margin", "web_search", "created_at",
+                "best", "runner_up", "margin", "web_search", "episode_adjustment", "created_at",
             )
         }
         with self._history_lock:
             records = self._read_history()
             records.insert(0, record)
             self.save_data(self.DATA_KEY_HISTORY, records[: int(self._config["history_limit"])])
+
+    def _normalizer(self) -> EpisodeNormalizer:
+        """返回当前 TMDB 客户端对应的归一化服务。"""
+        if not self._episode_normalizer:
+            if not self._tmdb_api:
+                self._tmdb_api = TmdbApi()
+            self._episode_normalizer = EpisodeNormalizer(self._tmdb_api)
+        return self._episode_normalizer
+
+    def _read_episode_rules(self) -> List[Dict[str, Any]]:
+        """读取目标编集规则。"""
+        rules = self.get_data(self.DATA_KEY_EPISODE_RULES) or []
+        return deepcopy(rules) if isinstance(rules, list) else []
+
+    def _read_season_catalog(self) -> List[Dict[str, Any]]:
+        """读取季度番剧目录。"""
+        catalog = self.get_data(self.DATA_KEY_SEASON_CATALOG) or []
+        return deepcopy(catalog) if isinstance(catalog, list) else []
+
+    def _normalize_episode_rule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """校验目标编集规则，并把别名和季度片段转换为稳定结构。"""
+        tmdb_id = self._safe_int(payload.get("tmdb_id"), 0)
+        if not tmdb_id:
+            raise ValueError("请输入有效的 TMDBID")
+        target_type = str(payload.get("target_type") or "default").strip().lower()
+        if target_type not in ("default", "group"):
+            raise ValueError("目标编集只能是 TMDB 默认或剧集组")
+        episode_group_id = str(payload.get("episode_group_id") or "").strip()
+        if target_type == "group" and not episode_group_id:
+            raise ValueError("选择剧集组目标时必须指定 Group ID")
+
+        installments = []
+        for index, item in enumerate(payload.get("installments") or []):
+            if not isinstance(item, dict):
+                continue
+            aliases = item.get("aliases") or []
+            if isinstance(aliases, str):
+                aliases = [value.strip() for value in aliases.split("\n") if value.strip()]
+            start_season = self._optional_int(item.get("target_start_season"))
+            start_episode = self._optional_int(item.get("target_start_episode"))
+            if start_season is None or start_episode is None:
+                continue
+            installments.append({
+                "id": str(item.get("id") or f"segment-{index + 1}"),
+                "title": str(item.get("title") or "").strip(),
+                "quarter": str(item.get("quarter") or "").strip(),
+                "aliases": list(dict.fromkeys(str(value).strip() for value in aliases if str(value).strip())),
+                "source_season": self._optional_int(item.get("source_season")),
+                "target_start_season": start_season,
+                "target_start_episode": start_episode,
+            })
+
+        return {
+            "tmdb_id": tmdb_id,
+            "title": str(payload.get("title") or f"TMDB {tmdb_id}").strip(),
+            "enabled": bool(payload.get("enabled", True)),
+            "target_type": target_type,
+            "episode_group_id": episode_group_id if target_type == "group" else "",
+            "installments": installments,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    @classmethod
+    def _normalize_bangumi_subject(
+            cls, subject: Dict[str, Any], quarter: str
+    ) -> Optional[Dict[str, Any]]:
+        """把 Bangumi Subject 转换为季度看板使用的稳定字段。"""
+        subject_id = cls._safe_int(subject.get("id"), 0)
+        name = cls._clean_title(subject.get("name"))
+        name_cn = cls._clean_title(subject.get("name_cn"))
+        if not subject_id or not (name or name_cn):
+            return None
+
+        aliases: List[str] = []
+        for item in subject.get("infobox") or []:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").casefold()
+            if not any(token in key for token in ("别名", "alias", "英文", "日文", "中文")):
+                continue
+            value = item.get("value")
+            if isinstance(value, list):
+                values = []
+                for entry in value:
+                    if isinstance(entry, dict):
+                        values.append(entry.get("v") or entry.get("value"))
+                    else:
+                        values.append(entry)
+            else:
+                values = re.split(r"[\n、/]", str(value or ""))
+            aliases.extend(cls._clean_title(value) for value in values if cls._clean_title(value))
+        aliases = list(dict.fromkeys([name, name_cn, *aliases]))
+        images = subject.get("images") or {}
+        return {
+            "id": f"bangumi:{subject_id}",
+            "source": "bangumi",
+            "source_id": subject_id,
+            "quarter": quarter,
+            "name": name,
+            "name_cn": name_cn,
+            "aliases": aliases,
+            "date": str(subject.get("date") or ""),
+            "episode_count": cls._safe_int(subject.get("total_episodes") or subject.get("eps"), 0),
+            "poster": images.get("common") or images.get("large") or "",
+            "url": f"https://bgm.tv/subject/{subject_id}",
+            "imported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
     def _close_tmdb_client(self) -> None:
         """安全关闭 TMDB 客户端。"""
@@ -1016,3 +1587,4 @@ class TmdbRecognizeEnhancer(_PluginBase):
             logger.debug(f"[TMDB识别增强] 关闭 TMDB 客户端失败：{err}")
         finally:
             self._tmdb_api = None
+            self._episode_normalizer = None

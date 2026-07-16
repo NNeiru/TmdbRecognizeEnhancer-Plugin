@@ -1,0 +1,11 @@
+
+.setting-card[data-v-898fe132] { border-color: rgba(var(--v-theme-on-surface), .1);
+}
+.slider-label[data-v-898fe132] { display: flex; justify-content: space-between; margin-bottom: -6px; color: rgba(var(--v-theme-on-surface), .72);
+}
+.slider-label strong[data-v-898fe132] { color: rgb(var(--v-theme-primary)); font-variant-numeric: tabular-nums;
+}
+.weight-box[data-v-898fe132] { padding: 12px 14px; border-radius: 12px; background: rgba(var(--v-theme-primary), .045);
+}
+.web-fallback-box[data-v-898fe132] { padding: 14px; border: 1px solid rgba(var(--v-theme-warning), .22); border-radius: 14px; background: rgba(var(--v-theme-warning), .045);
+}

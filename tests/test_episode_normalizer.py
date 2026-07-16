@@ -1,0 +1,190 @@
+"""目标编集归一化核心测试。"""
+
+import importlib.util
+import sys
+from enum import Enum
+from pathlib import Path
+from types import ModuleType
+
+
+class _MediaType(Enum):
+    TV = "电视剧"
+
+
+app_module = ModuleType("app")
+schemas_module = ModuleType("app.schemas")
+types_module = ModuleType("app.schemas.types")
+types_module.MediaType = _MediaType
+sys.modules.setdefault("app", app_module)
+sys.modules.setdefault("app.schemas", schemas_module)
+sys.modules.setdefault("app.schemas.types", types_module)
+
+module_path = Path(__file__).parents[1] / "plugins.v2" / "tmdbrecognizeenhancer" / "episode_normalizer.py"
+spec = importlib.util.spec_from_file_location("episode_normalizer_under_test", module_path)
+normalizer_module = importlib.util.module_from_spec(spec)
+assert spec and spec.loader
+spec.loader.exec_module(normalizer_module)
+EpisodeNormalizer = normalizer_module.EpisodeNormalizer
+
+
+class FakeTmdbApi:
+    """提供一个默认单季、Production 两季，以及一个默认三季的稳定数据集。"""
+
+    @staticmethod
+    def get_info(mtype, tmdbid):
+        if tmdbid == 200:
+            seasons = [
+                {"season_number": 1, "episode_count": 12},
+                {"season_number": 2, "episode_count": 12},
+                {"season_number": 3, "episode_count": 12},
+            ]
+            groups = []
+        else:
+            seasons = [{"season_number": 1, "episode_count": 24}]
+            groups = [{
+                "id": "production",
+                "name": "Production Order",
+                "type": 6,
+                "group_count": 2,
+                "episode_count": 24,
+            }]
+        return {
+            "id": tmdbid,
+            "name": f"Anime {tmdbid}",
+            "seasons": seasons,
+            "episode_groups": {"results": groups},
+        }
+
+    @staticmethod
+    def get_tv_season_detail(tmdbid, season):
+        if tmdbid == 200:
+            start = (season - 1) * 12
+            count = 12
+        else:
+            start = 0
+            count = 24
+        return {
+            "episodes": [
+                {"id": start + index, "season_number": season, "episode_number": index}
+                for index in range(1, count + 1)
+            ]
+        }
+
+    @staticmethod
+    def get_tv_group_seasons(group_id):
+        assert group_id == "production"
+        return [
+            {
+                "order": 1,
+                "episodes": [
+                    {"id": index, "season_number": 1, "episode_number": index}
+                    for index in range(1, 13)
+                ],
+            },
+            {
+                "order": 2,
+                "episodes": [
+                    {"id": index, "season_number": 1, "episode_number": index - 12}
+                    for index in range(13, 25)
+                ],
+            },
+        ]
+
+
+def test_default_absolute_episode_maps_to_production_season():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+    rule = {
+        "tmdb_id": 100,
+        "enabled": True,
+        "target_type": "group",
+        "episode_group_id": "production",
+    }
+
+    result = normalizer.normalize(rule, season=1, episode=13)
+
+    assert result["applied"] is True
+    assert (result["season"], result["episode"]) == (2, 1)
+
+
+def test_production_local_episode_maps_to_flat_default():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+    rule = {"tmdb_id": 100, "enabled": True, "target_type": "default"}
+
+    result = normalizer.normalize(rule, season=2, episode=1)
+
+    assert result["applied"] is True
+    assert (result["season"], result["episode"]) == (1, 13)
+    assert result["strategy"].startswith("episode-group:")
+
+
+def test_target_coordinate_is_idempotent():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+    rule = {
+        "tmdb_id": 100,
+        "enabled": True,
+        "target_type": "group",
+        "episode_group_id": "production",
+    }
+
+    result = normalizer.normalize(rule, season=2, episode=1)
+
+    assert result["applied"] is False
+    assert result["strategy"] == "target-coordinate"
+
+
+def test_installment_alias_resolves_third_season_even_when_s1e1_is_valid():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+    rule = {
+        "tmdb_id": 200,
+        "enabled": True,
+        "target_type": "default",
+        "installments": [{
+            "aliases": ["Anime 200 Season 3", "第三期"],
+            "target_start_season": 3,
+            "target_start_episode": 1,
+        }],
+    }
+
+    result = normalizer.normalize(
+        rule, season=1, episode=1, raw_title="[Group] Anime 200 Season 3 - 01.mkv",
+    )
+
+    assert result["applied"] is True
+    assert (result["season"], result["episode"]) == (3, 1)
+    assert result["strategy"] == "installment"
+
+
+def test_installment_does_not_apply_twice_after_traditional_offset():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+    rule = {
+        "tmdb_id": 100,
+        "enabled": True,
+        "target_type": "default",
+        "installments": [{
+            "aliases": ["Anime 100 Part 2"],
+            "target_start_season": 1,
+            "target_start_episode": 13,
+        }],
+    }
+
+    result = normalizer.normalize(
+        rule, season=1, episode=13, raw_title="Anime 100 Part 2 - 01.mkv",
+    )
+
+    assert result["applied"] is False
+    assert result["strategy"] == "target-coordinate"
+
+
+def test_batch_crossing_target_seasons_is_safely_rejected():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+    rule = {
+        "tmdb_id": 100,
+        "enabled": True,
+        "target_type": "group",
+        "episode_group_id": "production",
+    }
+
+    result = normalizer.normalize(rule, season=1, episode=12, end_episode=13)
+
+    assert result["applied"] is False
+    assert "结束集" in result["reason"] or result["strategy"] in ("unresolved", "ambiguous")

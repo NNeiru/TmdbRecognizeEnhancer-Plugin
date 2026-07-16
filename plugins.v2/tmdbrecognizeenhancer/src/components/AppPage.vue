@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import StrategySettings from './StrategySettings.vue'
+import EpisodeNormalizer from './EpisodeNormalizer.vue'
 import { cloneConfig, mediaTypeText, scoreColor, unwrapResponse } from '../utils'
 
 const props = defineProps({
@@ -28,6 +29,7 @@ const config = computed({
 })
 const summary = computed(() => status.value.summary || {})
 const history = computed(() => status.value.history || [])
+const normalizerStatus = computed(() => status.value.episode_normalizer || {})
 
 async function loadStatus() {
   loading.value = true
@@ -92,7 +94,7 @@ onMounted(loadStatus)
         <VAvatar size="54" color="white" variant="tonal"><VIcon icon="mdi-database-search-outline" size="30" /></VAvatar>
         <div>
           <div class="text-h5 font-weight-bold hero-title">TMDB 识别增强</div>
-          <div class="text-body-2 hero-subtitle">让失败标题经过可解释的候选选择，再安全回到原生整理链</div>
+          <div class="text-body-2 hero-subtitle">可解释地确定 TMDBID，并按目标编集归一化动漫季集</div>
         </div>
         <VSpacer />
         <VChip :color="config.enabled ? 'success' : 'default'" variant="flat" prepend-icon="mdi-circle-medium">
@@ -126,6 +128,7 @@ onMounted(loadStatus)
           <VTab value="settings" prepend-icon="mdi-tune-variant">参数设置</VTab>
           <VTab value="preview" prepend-icon="mdi-flask-outline">识别试跑</VTab>
           <VTab value="history" prepend-icon="mdi-history">运行记录</VTab>
+          <VTab value="episodes" prepend-icon="mdi-animation-outline">集数归一化</VTab>
           <VTab value="parser" prepend-icon="mdi-puzzle-outline">解析扩展</VTab>
         </VTabs>
         <VDivider />
@@ -136,7 +139,7 @@ onMounted(loadStatus)
               <VRow>
                 <VCol cols="12" md="7">
                   <div class="text-h6 mb-1">当前决策链</div>
-                  <div class="text-body-2 text-medium-emphasis mb-5">仅在 MoviePilot 原生识别失败后执行，不改变 Rust 标题提取。</div>
+                  <div class="text-body-2 text-medium-emphasis mb-5">候选搜索保持原策略；集数归一化只在 TMDBID 命中已维护目标时执行，不改变 Rust 标题提取。</div>
                   <div v-for="(step, index) in [
                     ['原生完全匹配', '沿用 MoviePilot 当前严格匹配，成功即结束', 'mdi-check-bold'],
                     ['生成降级搜索词', '完整标题失败后，尝试冒号前的稳定主体名称', 'mdi-text-search'],
@@ -233,6 +236,12 @@ onMounted(loadStatus)
                 </div>
               </div>
               <div v-else class="empty-preview"><VIcon icon="mdi-history" size="60" /><div class="text-h6 mt-3">尚无运行记录</div></div>
+            </div>
+          </section>
+
+          <section v-show="tab === 'episodes'" class="workspace-panel">
+            <div class="tab-content">
+              <EpisodeNormalizer :api="api" :plugin-base="pluginBase" :runtime-status="normalizerStatus" />
             </div>
           </section>
 

@@ -65,7 +65,7 @@ function applyBalancedPreset() {
 <template>
   <div class="strategy-settings">
     <VAlert type="info" variant="tonal" density="comfortable" class="mb-5" icon="mdi-shield-check-outline">
-      原生完全匹配仍然优先。此处只处理原生失败的标题，并要求最佳候选同时越过最低分与领先分差。
+      候选必须同时越过最低分与领先分差。启用集数归一化时，请在 MoviePilot 开启识别插件优先；没有维护目标规则的作品仍按原结果处理。
     </VAlert>
 
     <VRow>
@@ -82,6 +82,7 @@ function applyBalancedPreset() {
             <VSwitch v-model="config.prefer_parsed_title" color="primary" label="优先使用 MP 解析标题" hint="原标题进入事件后，复用识别词与 Rust 解析结果作为搜索标题" persistent-hint />
             <VSwitch v-model="config.main_title_fallback" color="primary" label="启用主体名称降级" hint="例如 Mushoku Tensei: ... → Mushoku Tensei" persistent-hint />
             <VSwitch v-model="config.fetch_aliases" color="primary" label="拉取候选别名与译名" hint="准确率更高，但会增加少量 TMDB 请求" persistent-hint />
+            <VSwitch v-model="config.episode_normalizer_enabled" color="success" label="启用动漫集数归一化" hint="TMDBID 命中已维护规则时，按默认编集或剧集组修正季集；需在 MP 开启识别插件优先" persistent-hint />
             <VSwitch v-model="config.progressive_fallback" color="warning" label="启用逐词缩短（实验性）" hint="会扩大召回范围，建议保持关闭" persistent-hint />
             <VSwitch v-model="config.web_search_fallback" color="warning" label="启用搜索引擎兜底" hint="仅在 TMDB 候选未过阈值时搜索，并要求罗马音与候选别名交叉验证" persistent-hint />
             <VExpandTransition>

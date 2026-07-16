@@ -34,6 +34,7 @@ const DEFAULT_CONFIG = {
   type_weight: 6,
   season_missing_penalty: 20,
   history_limit: 30,
+  episode_normalizer_enabled: false,
 };
 
 function cloneConfig(config) {

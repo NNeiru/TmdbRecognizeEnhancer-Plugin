@@ -9,3 +9,4 @@ Thumbs.db
 
 # 本地研究快照：用于对照 MoviePilot / 前端 / 插件仓 / Rust，不上传 GitHub
 /research/
+/logs/
