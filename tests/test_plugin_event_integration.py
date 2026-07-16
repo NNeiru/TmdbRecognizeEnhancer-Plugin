@@ -196,3 +196,99 @@ def test_bangumi_quarter_import_reads_all_pages(monkeypatch):
 
     assert len(result) == 101
     assert offsets == [0, 100]
+
+
+def test_catalog_helpers_classify_region_and_sequel(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    subject = {
+        "id": 1,
+        "name": "Example Anime 3rd Season",
+        "name_cn": "示例动画 第三季",
+        "date": "2026-07-03",
+        "platform": "TV",
+        "tags": [{"name": "日本"}],
+        "meta_tags": ["日本", "TV"],
+        "images": {},
+    }
+
+    item = module.TmdbRecognizeEnhancer._normalize_bangumi_subject(subject, "2026-Q3")
+
+    assert item["region"] == "japan"
+    assert item["is_multi_season"] is True
+    assert module.TmdbRecognizeEnhancer._infer_title_season("示例动画 第十二季") == 12
+
+
+def test_title_only_episode_preview_uses_saved_rule(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._data[plugin.DATA_KEY_EPISODE_RULES] = [{
+        "tmdb_id": 123,
+        "title": "Example",
+        "enabled": True,
+        "target_type": "default",
+        "episode_group_id": "",
+        "installments": [],
+    }]
+    plugin._recognize_title = Mock(return_value={
+        "accepted": True,
+        "best": {"tmdb_id": 123, "name": "Example", "media_type": module.MediaType.TV.value},
+        "reason": "matched",
+    })
+    fake_normalizer = SimpleNamespace(normalize=Mock(return_value={
+        "applied": False,
+        "season": 1,
+        "episode": 2,
+        "reason": "already normalized",
+        "strategy": "target-coordinate",
+    }))
+    plugin._episode_normalizer = fake_normalizer
+    monkeypatch.setattr(module, "MetaInfo", lambda title: SimpleNamespace(
+        name="Example",
+        year="",
+        type=module.MediaType.TV,
+        begin_season=1,
+        begin_episode=2,
+        end_episode=None,
+    ))
+
+    response = plugin.preview_episode_normalizer_api({"title": "Example S01E02.mkv"})
+
+    assert response.success is True
+    assert response.data["recognition"]["best"]["tmdb_id"] == 123
+    assert fake_normalizer.normalize.call_args.kwargs["episode"] == 2
+
+
+def test_catalog_add_prefers_production_but_preserves_existing_target(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._match_catalog_item = Mock(return_value={
+        "accepted": True,
+        "best": {"tmdb_id": 456, "name": "Example", "media_type": module.MediaType.TV.value},
+    })
+    normalizer = SimpleNamespace(
+        preferred_group=Mock(return_value={"id": "production", "name": "Season Order", "type": 6}),
+        suggest_installment_start=Mock(return_value={"season": 2, "episode": 1, "strategy": "air-date"}),
+    )
+    plugin._normalizer = lambda: normalizer
+    item = {
+        "id": "bangumi:1",
+        "name": "Example 2nd Season",
+        "name_cn": "示例 第二季",
+        "aliases": ["Example Season 2"],
+        "quarter": "2026-Q3",
+        "date": "2026-07-01",
+    }
+    rules = []
+
+    outcome = plugin._add_catalog_item_to_rules(item, "group_preferred", rules)
+
+    assert outcome["rule"]["target_type"] == "group"
+    assert outcome["rule"]["episode_group_id"] == "production"
+    assert outcome["rule"]["installments"][0]["target_start_season"] == 2
+
+    existing = outcome["rule"]
+    existing["target_type"] = "default"
+    existing["episode_group_id"] = ""
+    rules[:] = [existing]
+    plugin._add_catalog_item_to_rules(item, "group_preferred", rules)
+    assert rules[0]["target_type"] == "default"

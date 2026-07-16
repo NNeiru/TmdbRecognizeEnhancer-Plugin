@@ -188,3 +188,29 @@ def test_batch_crossing_target_seasons_is_safely_rejected():
 
     assert result["applied"] is False
     assert "结束集" in result["reason"] or result["strategy"] in ("unresolved", "ambiguous")
+
+
+def test_group_preference_selects_production_layout():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+
+    group = normalizer.preferred_group(100)
+
+    assert group["id"] == "production"
+    assert group["type"] == 6
+    assert group["seasons"] == [
+        {"season": 1, "episode_count": 12},
+        {"season": 2, "episode_count": 12},
+    ]
+
+
+def test_installment_start_uses_explicit_title_season():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+
+    start = normalizer.suggest_installment_start(
+        tmdb_id=200,
+        target_type="default",
+        season_hint=3,
+        air_date="2026-07-01",
+    )
+
+    assert start == {"season": 3, "episode": 1, "strategy": "title-season"}

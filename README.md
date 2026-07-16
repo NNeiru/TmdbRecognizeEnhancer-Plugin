@@ -13,9 +13,10 @@
 - 目标编集可选 TMDB 默认编集或具体剧集组（支持优先查看 Production/Absolute）
 - 通过 TMDB Episode ID、其它编集坐标和全局序号归一化 Season/Episode
 - 支持 Bangumi 季度目录、续作别名片段和目标起始集定位
+- 季度选择自动加载，支持地区/载体/续作筛选、标题搜索以及单条或批量直接建立规则
 - 运行时捕获 MoviePilot 已应用识别词后的 MetaBase，不修改或覆盖 MoviePilot/Rust 源码
 
-当前版本：`0.3.0`
+当前版本：`0.3.1`
 
 ## 在 MoviePilot 中安装
 

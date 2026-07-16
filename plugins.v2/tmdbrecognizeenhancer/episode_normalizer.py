@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import threading
 from copy import deepcopy
+from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.schemas.types import MediaType
@@ -59,6 +60,85 @@ class EpisodeNormalizer:
             "default": self._layout_summary(default_layout),
             "groups": groups,
         }
+
+    def preferred_group(self, tmdb_id: int) -> Optional[Dict[str, Any]]:
+        """选择最像常规季度划分的剧集组，优先 Production/Season。"""
+        info = self._series_info(tmdb_id)
+        candidates = sorted(
+            self._group_metadata(info),
+            key=self._preferred_group_score,
+            reverse=True,
+        )
+        for group in candidates:
+            group_id = str(group.get("id") or "").strip()
+            if not group_id:
+                continue
+            try:
+                layout = self._group_layout(tmdb_id, group_id)
+            except Exception:
+                continue
+            if layout.get("sequence"):
+                return {
+                    "id": group_id,
+                    "name": group.get("name") or "未命名剧集组",
+                    "type": self._safe_int(group.get("type"), 0),
+                    "group_count": self._safe_int(group.get("group_count"), 0),
+                    "episode_count": self._safe_int(group.get("episode_count"), 0),
+                    "seasons": self._layout_summary(layout).get("seasons") or [],
+                }
+        return None
+
+    def suggest_installment_start(
+            self,
+            tmdb_id: int,
+            target_type: str,
+            group_id: str = "",
+            air_date: str = "",
+            season_hint: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """根据明确季号或首播日期建议季度条目在目标编集中的起点。"""
+        info = self._series_info(tmdb_id)
+        target = self._target_layout(tmdb_id, target_type, group_id, info)
+        sequence = target.get("sequence") or []
+        if not sequence:
+            return None
+
+        season_hint = self._optional_int(season_hint)
+        if season_hint is not None:
+            hinted = [item for item in sequence if item.get("season") == season_hint]
+            if hinted:
+                first = hinted[0]
+                return {
+                    "season": first["season"],
+                    "episode": first["episode"],
+                    "strategy": "title-season",
+                }
+
+        requested_date = self._parse_date(air_date)
+        if requested_date:
+            dated = []
+            for item in sequence:
+                episode_date = self._parse_date(item.get("air_date"))
+                if episode_date:
+                    dated.append((abs((episode_date - requested_date).days), episode_date, item))
+            if dated:
+                distance, _, closest = min(dated, key=lambda value: (value[0], value[1]))
+                if distance <= 120:
+                    return {
+                        "season": closest["season"],
+                        "episode": closest["episode"],
+                        "strategy": "air-date",
+                    }
+
+        seasons = {item.get("season") for item in sequence}
+        if len(seasons) == 1:
+            first = sequence[0]
+            return {
+                "season": first["season"],
+                "episode": first["episode"],
+                "strategy": "single-season",
+            }
+        return None
 
     def normalize(
             self,
@@ -277,6 +357,33 @@ class EpisodeNormalizer:
         if isinstance(groups, dict):
             groups = groups.get("results") or []
         return [item for item in groups if isinstance(item, dict)]
+
+    @classmethod
+    def _preferred_group_score(cls, group: Dict[str, Any]) -> Tuple[int, int, int]:
+        """Production 与名称含 Season 的组最符合常规季度分季预期。"""
+        group_type = cls._safe_int(group.get("type"), 0)
+        name = str(group.get("name") or "").casefold()
+        score = {
+            6: 120,  # Production
+            2: 75,   # Absolute
+            1: 55,   # Original air date
+            7: 45,   # TV
+            3: 30,
+            4: 25,
+            5: 10,
+        }.get(group_type, 0)
+        if any(token in name for token in ("season", "production", "制片", "制作", "シーズン", "季")):
+            score += 45
+        group_count = cls._safe_int(group.get("group_count"), 0)
+        episode_count = cls._safe_int(group.get("episode_count"), 0)
+        return score, group_count, episode_count
+
+    @staticmethod
+    def _parse_date(value: Any):
+        try:
+            return datetime.strptime(str(value or "")[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            return None
 
     @classmethod
     def _match_installment(

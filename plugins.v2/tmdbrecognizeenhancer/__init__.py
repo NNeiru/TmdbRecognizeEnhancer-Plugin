@@ -33,7 +33,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选识别，并将动漫季集归一化到默认编集或选定剧集组。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.3.0"
+    plugin_version = "0.3.1"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -77,7 +77,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     _split_pattern = re.compile(r"\s*(?::|：|\||｜|/|／|—|–)\s*")
     _bracket_suffix_pattern = re.compile(r"\s*[\[(（【][^\])）】]{1,40}[\])）】]\s*$")
     _season_pattern = re.compile(r"(?i)(?:\bS(?:eason)?\s*0*(\d{1,2})\b|第\s*(\d{1,2})\s*季)")
-    _episode_pattern = re.compile(r"(?i)(?:\bE(?:P(?:ISODE)?)?\s*0*(\d{1,4})\b|第\s*(\d{1,4})\s*[集话])")
+    _episode_pattern = re.compile(r"(?i)(?:(?<![A-Z])E(?:P(?:ISODE)?)?\s*0*(\d{1,4})\b|第\s*(\d{1,4})\s*[集话])")
     _token_pattern = re.compile(r"[a-z0-9]+|[\u3400-\u9fff]+", re.IGNORECASE)
     _tmdb_url_pattern = re.compile(
         r"https?://(?:www\.)?themoviedb\.org/(tv|movie)/(\d+)", re.IGNORECASE,
@@ -237,18 +237,25 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "summary": "试跑集数归一化",
             },
             {
-                "path": "/episode-normalizer/catalog/import",
-                "endpoint": self.import_season_catalog_api,
+                "path": "/episode-normalizer/catalog/query",
+                "endpoint": self.query_season_catalog_api,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "从 Bangumi 导入季度动画目录",
+                "summary": "按季度查询动画看板",
             },
             {
-                "path": "/episode-normalizer/catalog/match",
-                "endpoint": self.match_season_catalog_api,
+                "path": "/episode-normalizer/catalog/add",
+                "endpoint": self.add_season_catalog_rule_api,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "为季度动画匹配 TMDB 候选",
+                "summary": "从季度看板直接加入维护规则",
+            },
+            {
+                "path": "/episode-normalizer/catalog/batch-add",
+                "endpoint": self.batch_add_season_catalog_rules_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "批量匹配季度动画并加入维护规则",
             },
         ]
 
@@ -277,7 +284,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "episode_normalizer": {
                     "enabled": bool(self._config.get("episode_normalizer_enabled")),
                     "rule_count": len(self._read_episode_rules()),
-                    "catalog_count": len(self._read_season_catalog()),
+                    "catalog_count": sum(
+                        len(value.get("items") or [])
+                        for value in self._read_season_catalog_cache().values()
+                        if isinstance(value, dict)
+                    ),
                     "runtime_compatible": self._runtime_adapter.compatible,
                     "runtime_message": self._runtime_adapter.message,
                     "plugin_first": bool(getattr(settings, "RECOGNIZE_PLUGIN_FIRST", False)),
@@ -321,12 +332,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return self.get_status()
 
     def get_episode_normalizer_api(self) -> schemas.Response:
-        """返回目标编集规则和已导入的季度番剧条目。"""
+        """返回目标编集规则；季度看板按用户当前选择单独查询。"""
         return schemas.Response(
             success=True,
             data={
                 "rules": self._read_episode_rules(),
-                "catalog": self._read_season_catalog(),
                 "enabled": bool(self._config.get("episode_normalizer_enabled")),
             },
         )
@@ -372,30 +382,75 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return schemas.Response(success=False, message=f"获取目标编集失败：{err}")
 
     def preview_episode_normalizer_api(self, payload: dict = Body(...)) -> schemas.Response:
-        """试跑某一条规则，不写入识别链。"""
+        """只接收原标题，自动完成解析、TMDB 匹配和已维护规则试跑。"""
         payload = payload or {}
-        tmdb_id = self._safe_int(payload.get("tmdb_id"), 0)
+        raw_title = self._clean_title(payload.get("title"))
+        if not raw_title:
+            return schemas.Response(success=False, message="请输入需要试跑的原标题")
+        parsed_title, hints = self._prepare_recognition_input(raw_title)
+        try:
+            recognition = self._recognize_title(parsed_title, hints=hints, include_candidates=False)
+        except Exception as err:
+            return schemas.Response(success=False, message=f"TMDB 匹配失败：{err}")
+        best = recognition.get("best") or {}
+        if not recognition.get("accepted") or not best.get("tmdb_id"):
+            return schemas.Response(
+                success=True,
+                data={
+                    "title": raw_title,
+                    "parsed_title": parsed_title,
+                    "hints": self._serialize_hints(hints),
+                    "recognition": recognition,
+                    "rule": None,
+                    "result": None,
+                },
+            )
+        tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
         rule = next((
             item for item in self._read_episode_rules()
             if self._safe_int(item.get("tmdb_id"), 0) == tmdb_id
         ), None)
         if not rule:
-            try:
-                rule = self._normalize_episode_rule(payload.get("rule") or payload)
-            except ValueError as err:
-                return schemas.Response(success=False, message=str(err))
+            return schemas.Response(
+                success=True,
+                data={
+                    "title": raw_title,
+                    "parsed_title": parsed_title,
+                    "hints": self._serialize_hints(hints),
+                    "recognition": recognition,
+                    "rule": None,
+                    "result": {
+                        "applied": False,
+                        "season": hints.get("season"),
+                        "episode": hints.get("episode"),
+                        "end_episode": hints.get("end_episode"),
+                        "strategy": "rule-missing",
+                        "reason": f"TMDB {tmdb_id} 尚未加入维护规则",
+                    },
+                },
+            )
         result = self._normalizer().normalize(
             rule=rule,
-            season=self._optional_int(payload.get("season")),
-            episode=self._optional_int(payload.get("episode")),
-            end_episode=self._optional_int(payload.get("end_episode")),
-            raw_title=str(payload.get("title") or ""),
-            parsed_name=str(payload.get("parsed_name") or ""),
+            season=self._optional_int(hints.get("season")),
+            episode=self._optional_int(hints.get("episode")),
+            end_episode=self._optional_int(hints.get("end_episode")),
+            raw_title=raw_title,
+            parsed_name=parsed_title,
         )
-        return schemas.Response(success=True, data={"rule": rule, "result": result})
+        return schemas.Response(
+            success=True,
+            data={
+                "title": raw_title,
+                "parsed_title": parsed_title,
+                "hints": self._serialize_hints(hints),
+                "recognition": recognition,
+                "rule": rule,
+                "result": result,
+            },
+        )
 
-    def import_season_catalog_api(self, payload: dict = Body(...)) -> schemas.Response:
-        """通过 Bangumi 官方 API 导入指定季度首月的动画条目。"""
+    def query_season_catalog_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """选择季度即返回对应看板，后台自动读取并缓存最近季度。"""
         payload = payload or {}
         year = self._safe_int(payload.get("year"), datetime.now().year)
         quarter = self._safe_int(payload.get("quarter"), 1)
@@ -409,25 +464,53 @@ class TmdbRecognizeEnhancer(_PluginBase):
             ),
             "Accept": "application/json",
         }
-        try:
-            items = self._fetch_bangumi_quarter_month(year, month, headers)
-        except Exception as err:
-            logger.error(f"[TMDB识别增强] 导入 {year}-Q{quarter} Bangumi 目录失败：{err}")
-            return schemas.Response(success=False, message=f"Bangumi 导入失败：{err}")
-
         quarter_key = f"{year}-Q{quarter}"
-        imported = [self._normalize_bangumi_subject(item, quarter_key) for item in items if isinstance(item, dict)]
-        imported = [item for item in imported if item]
-        existing = self._read_season_catalog()
-        index = {str(item.get("id")): item for item in existing if item.get("id")}
-        for item in imported:
-            previous = index.get(item["id"]) or {}
-            index[item["id"]] = {**previous, **item, "tmdb_match": previous.get("tmdb_match")}
-        catalog = sorted(index.values(), key=lambda item: (str(item.get("quarter") or ""), str(item.get("date") or ""), str(item.get("name") or "")), reverse=True)
-        self.save_data(self.DATA_KEY_SEASON_CATALOG, catalog)
+        cache = self._read_season_catalog_cache()
+        cached = cache.get(quarter_key) or {}
+        catalog = cached.get("items") if isinstance(cached, dict) else None
+        refreshed = bool(payload.get("refresh")) or not isinstance(catalog, list)
+        if refreshed:
+            try:
+                raw_index: Dict[int, Dict[str, Any]] = {}
+                for current_month in range(month, month + 3):
+                    for raw_item in self._fetch_bangumi_quarter_month(year, current_month, headers):
+                        subject_id = self._safe_int(raw_item.get("id"), 0)
+                        if subject_id:
+                            raw_index[subject_id] = raw_item
+                raw_items = list(raw_index.values())
+            except Exception as err:
+                logger.error(f"[TMDB识别增强] 查询 {quarter_key} Bangumi 看板失败：{err}")
+                return schemas.Response(success=False, message=f"季度看板加载失败：{err}")
+            previous = {
+                str(item.get("id")): item for item in (catalog or [])
+                if isinstance(item, dict) and item.get("id")
+            }
+            catalog = []
+            for raw_item in raw_items:
+                item = self._normalize_bangumi_subject(raw_item, quarter_key)
+                if not item:
+                    continue
+                old = previous.get(item["id"]) or {}
+                item["tmdb_match"] = old.get("tmdb_match")
+                catalog.append(item)
+            catalog.sort(key=lambda item: (str(item.get("date") or ""), str(item.get("name") or "")), reverse=True)
+            self._save_season_catalog_quarter(quarter_key, catalog)
+
+        rules = {self._safe_int(item.get("tmdb_id"), 0): item for item in self._read_episode_rules()}
+        view = []
+        for item in deepcopy(catalog or []):
+            matched_id = self._safe_int(((item.get("tmdb_match") or {}).get("best") or {}).get("tmdb_id"), 0)
+            item["maintained"] = matched_id in rules if matched_id else False
+            view.append(item)
         return schemas.Response(
             success=True,
-            data={"quarter": quarter_key, "imported": len(imported), "catalog": catalog},
+            data={
+                "quarter": quarter_key,
+                "catalog": view,
+                "count": len(view),
+                "cached": not refreshed,
+                "updated_at": (cache.get(quarter_key) or {}).get("updated_at") if not refreshed else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
         )
 
     def _fetch_bangumi_quarter_month(
@@ -464,35 +547,74 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 break
         return items
 
-    def match_season_catalog_api(self, payload: dict = Body(...)) -> schemas.Response:
-        """使用现有 TMDB 候选算法为一个季度条目匹配 TMDBID。"""
-        item_id = str((payload or {}).get("id") or "").strip()
-        catalog = self._read_season_catalog()
-        item = next((value for value in catalog if str(value.get("id")) == item_id), None)
+    def add_season_catalog_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """单条看板项目直接匹配 TMDB 并建立目标规则。"""
+        payload = payload or {}
+        quarter_key = str(payload.get("quarter") or "").strip()
+        item_id = str(payload.get("id") or "").strip()
+        item, catalog = self._find_catalog_item(quarter_key, item_id)
         if not item:
-            return schemas.Response(success=False, message="季度条目不存在")
-        year = str(item.get("date") or "")[:4]
-        hints = {"year": year, "media_type": MediaType.TV, "season": 0, "episode": 0}
-        results = []
-        for title in dict.fromkeys([item.get("name"), item.get("name_cn"), *(item.get("aliases") or [])]):
-            title = self._clean_title(title)
-            if not title:
+            return schemas.Response(success=False, message="当前季度中没有找到该番剧")
+        try:
+            rules = self._read_episode_rules()
+            outcome = self._add_catalog_item_to_rules(
+                item=item,
+                preference=str(payload.get("preference") or "default"),
+                rules=rules,
+                tmdb_id_override=self._safe_int(payload.get("tmdb_id"), 0),
+            )
+            self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
+            self._save_season_catalog_quarter(quarter_key, catalog)
+            return schemas.Response(success=True, data={**outcome, "rules": rules, "item": item})
+        except ValueError as err:
+            self._save_season_catalog_quarter(quarter_key, catalog)
+            return schemas.Response(success=False, message=str(err), data={"item": item})
+
+    def batch_add_season_catalog_rules_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """批量把当前看板选择项加入规则，并逐条返回需人工补充的项目。"""
+        payload = payload or {}
+        quarter_key = str(payload.get("quarter") or "").strip()
+        item_ids = list(dict.fromkeys(str(value) for value in payload.get("ids") or [] if value))[:200]
+        if not quarter_key or not item_ids:
+            return schemas.Response(success=False, message="请选择需要批量加入的番剧")
+        cache = self._read_season_catalog_cache()
+        quarter_data = cache.get(quarter_key) or {}
+        catalog = quarter_data.get("items") if isinstance(quarter_data, dict) else []
+        if not isinstance(catalog, list):
+            return schemas.Response(success=False, message="当前季度看板尚未加载")
+        index = {str(item.get("id")): item for item in catalog if isinstance(item, dict)}
+        rules = self._read_episode_rules()
+        added, failed, needs_attention = [], [], []
+        preference = str(payload.get("preference") or "default")
+        for item_id in item_ids:
+            item = index.get(item_id)
+            if not item:
+                failed.append({"id": item_id, "title": item_id, "reason": "看板条目不存在"})
                 continue
             try:
-                results.append(self._recognize_title(title, hints=hints, include_candidates=False))
-            except Exception as err:
-                logger.debug(f"[TMDB识别增强] 季度条目 {title} 匹配失败：{err}")
-        accepted = [result for result in results if result.get("accepted") and result.get("best")]
-        accepted.sort(key=lambda result: (result["best"].get("score") or 0, result.get("margin") or 0), reverse=True)
-        match = accepted[0] if accepted else (results[0] if results else None)
-        item["tmdb_match"] = {
-            "accepted": bool(match and match.get("accepted")),
-            "reason": match.get("reason") if match else "没有可用标题",
-            "best": match.get("best") if match else None,
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        self.save_data(self.DATA_KEY_SEASON_CATALOG, catalog)
-        return schemas.Response(success=True, data={"item": item, "catalog": catalog})
+                outcome = self._add_catalog_item_to_rules(item, preference, rules)
+                added.append(outcome)
+                if outcome.get("needs_attention"):
+                    needs_attention.append(outcome)
+            except ValueError as err:
+                failed.append({
+                    "id": item_id,
+                    "title": item.get("name_cn") or item.get("name") or item_id,
+                    "reason": str(err),
+                })
+        self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
+        self._save_season_catalog_quarter(quarter_key, catalog)
+        return schemas.Response(
+            success=True,
+            message=f"成功加入 {len(added)} 条，失败 {len(failed)} 条",
+            data={
+                "added": added,
+                "failed": failed,
+                "needs_attention": needs_attention,
+                "rules": rules,
+                "catalog": catalog,
+            },
+        )
 
     @eventmanager.register(ChainEventType.NameRecognize, priority=5)
     def on_name_recognize(self, event: Event) -> None:
@@ -650,6 +772,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "media_type": self._normalize_media_type(getattr(meta, "type", None)),
                 "season": self._safe_int(getattr(meta, "begin_season", 0), 0),
                 "episode": self._safe_int(getattr(meta, "begin_episode", 0), 0),
+                "end_episode": self._optional_int(getattr(meta, "end_episode", None)),
             }
             hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "", 0)})
             if self._config.get("debug") and title != raw_title:
@@ -1483,10 +1606,218 @@ class TmdbRecognizeEnhancer(_PluginBase):
         rules = self.get_data(self.DATA_KEY_EPISODE_RULES) or []
         return deepcopy(rules) if isinstance(rules, list) else []
 
-    def _read_season_catalog(self) -> List[Dict[str, Any]]:
-        """读取季度番剧目录。"""
-        catalog = self.get_data(self.DATA_KEY_SEASON_CATALOG) or []
-        return deepcopy(catalog) if isinstance(catalog, list) else []
+    def _read_season_catalog_cache(self) -> Dict[str, Dict[str, Any]]:
+        """读取按季度隔离的看板缓存，并兼容 v0.3.0 的聚合列表。"""
+        stored = self.get_data(self.DATA_KEY_SEASON_CATALOG) or {}
+        if isinstance(stored, dict):
+            return deepcopy(stored)
+        if not isinstance(stored, list):
+            return {}
+        migrated: Dict[str, Dict[str, Any]] = {}
+        for item in stored:
+            if not isinstance(item, dict):
+                continue
+            quarter = str(item.get("quarter") or "未知季度")
+            migrated.setdefault(quarter, {"items": [], "updated_at": ""})["items"].append(item)
+        return migrated
+
+    def _save_season_catalog_quarter(self, quarter: str, items: List[Dict[str, Any]]) -> None:
+        """只缓存最近八个季度，界面始终仅返回当前选择季度。"""
+        cache = self._read_season_catalog_cache()
+        cache[quarter] = {
+            "items": deepcopy(items),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        ordered_keys = sorted(cache.keys(), reverse=True)
+        cache = {key: cache[key] for key in ordered_keys[:8]}
+        self.save_data(self.DATA_KEY_SEASON_CATALOG, cache)
+
+    def _find_catalog_item(
+            self, quarter: str, item_id: str
+    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        cache = self._read_season_catalog_cache()
+        data = cache.get(quarter) or {}
+        catalog = data.get("items") if isinstance(data, dict) else []
+        if not isinstance(catalog, list):
+            return None, []
+        item = next((value for value in catalog if str(value.get("id")) == item_id), None)
+        return item, catalog
+
+    def _match_catalog_item(
+            self, item: Dict[str, Any], tmdb_id_override: int = 0
+    ) -> Dict[str, Any]:
+        """匹配单个番剧；允许用户在自动匹配失败后补充 TMDBID。"""
+        if tmdb_id_override:
+            info = self._tmdb_api.get_info(mtype=MediaType.TV, tmdbid=tmdb_id_override) or {}
+            if not info:
+                raise ValueError(f"TMDB {tmdb_id_override} 不存在或不是电视剧")
+            best = {
+                "tmdb_id": tmdb_id_override,
+                "name": info.get("name") or info.get("title") or f"TMDB {tmdb_id_override}",
+                "year": self._candidate_year(info),
+                "media_type": MediaType.TV.value,
+                "score": 100.0,
+            }
+            match = {"accepted": True, "best": best, "reason": "用户补充 TMDBID", "margin": 100.0}
+        else:
+            cached = item.get("tmdb_match") or {}
+            cached_best = cached.get("best") or {}
+            if (
+                    cached.get("accepted") and cached_best.get("tmdb_id")
+                    and self._normalize_media_type(cached_best.get("media_type")) == MediaType.TV
+            ):
+                match = cached
+            else:
+                year = str(item.get("date") or "")[:4]
+                hints = {"year": year, "media_type": MediaType.TV, "season": 0, "episode": 0}
+                results = []
+                for title in dict.fromkeys([item.get("name"), item.get("name_cn"), *(item.get("aliases") or [])]):
+                    title = self._clean_title(title)
+                    if not title:
+                        continue
+                    try:
+                        results.append(self._recognize_title(title, hints=hints, include_candidates=False))
+                    except Exception as err:
+                        logger.debug(f"[TMDB识别增强] 季度条目 {title} 匹配失败：{err}")
+                accepted = [result for result in results if result.get("accepted") and result.get("best")]
+                accepted.sort(
+                    key=lambda result: (result["best"].get("score") or 0, result.get("margin") or 0),
+                    reverse=True,
+                )
+                match = accepted[0] if accepted else (results[0] if results else None)
+                if not match or not match.get("accepted") or not match.get("best"):
+                    reason = match.get("reason") if match else "没有可用标题"
+                    item["tmdb_match"] = {
+                        "accepted": False,
+                        "reason": reason,
+                        "best": match.get("best") if match else None,
+                        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    }
+                    raise ValueError(f"自动匹配 TMDB 失败：{reason}；请补充 TMDBID 或放弃该条目")
+
+        best = match.get("best") or {}
+        if self._normalize_media_type(best.get("media_type")) != MediaType.TV:
+            raise ValueError("匹配结果不是电视剧，不能建立集数归一化规则")
+        tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
+        info = self._tmdb_api.get_info(mtype=MediaType.TV, tmdbid=tmdb_id) or {}
+        seasons = [
+            season for season in info.get("seasons") or []
+            if self._safe_int(season.get("season_number"), 0) > 0
+        ]
+        item["is_multi_season"] = bool(item.get("is_multi_season") or len(seasons) > 1)
+        item["tmdb_match"] = {
+            "accepted": True,
+            "reason": match.get("reason") or "匹配成功",
+            "best": best,
+            "season_count": len(seasons),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        return item["tmdb_match"]
+
+    def _add_catalog_item_to_rules(
+            self,
+            item: Dict[str, Any],
+            preference: str,
+            rules: List[Dict[str, Any]],
+            tmdb_id_override: int = 0,
+    ) -> Dict[str, Any]:
+        """把一个看板条目转成规则，已有规则只追加季度片段、不覆盖用户目标。"""
+        match = self._match_catalog_item(item, tmdb_id_override)
+        best = match.get("best") or {}
+        tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
+        if not tmdb_id:
+            raise ValueError("TMDB 匹配结果缺少有效 ID")
+
+        existing_index = next((
+            index for index, rule in enumerate(rules)
+            if self._safe_int(rule.get("tmdb_id"), 0) == tmdb_id
+        ), None)
+        existing = rules[existing_index] if existing_index is not None else None
+        if existing:
+            target_type = str(existing.get("target_type") or "default")
+            group_id = str(existing.get("episode_group_id") or "")
+            selected_group = None
+        elif preference in ("group", "group_preferred"):
+            selected_group = self._normalizer().preferred_group(tmdb_id)
+            target_type = "group" if selected_group else "default"
+            group_id = str((selected_group or {}).get("id") or "")
+        else:
+            selected_group = None
+            target_type = "default"
+            group_id = ""
+
+        season_hint = self._infer_title_season(
+            " ".join(str(value or "") for value in [item.get("name"), item.get("name_cn"), *(item.get("aliases") or [])])
+        )
+        suggestion = self._normalizer().suggest_installment_start(
+            tmdb_id=tmdb_id,
+            target_type=target_type,
+            group_id=group_id,
+            air_date=str(item.get("date") or ""),
+            season_hint=season_hint,
+        )
+        installments = deepcopy((existing or {}).get("installments") or [])
+        segment_id = f"catalog:{item.get('id')}"
+        installments = [value for value in installments if str(value.get("id")) != segment_id]
+        if suggestion:
+            installments.append({
+                "id": segment_id,
+                "title": item.get("name_cn") or item.get("name") or "",
+                "quarter": item.get("quarter") or "",
+                "aliases": item.get("aliases") or [],
+                "source_season": season_hint or 1,
+                "target_start_season": suggestion.get("season"),
+                "target_start_episode": suggestion.get("episode"),
+            })
+
+        rule = self._normalize_episode_rule({
+            "tmdb_id": tmdb_id,
+            "title": (existing or {}).get("title") or best.get("name") or item.get("name_cn") or item.get("name"),
+            "enabled": (existing or {}).get("enabled", True),
+            "target_type": target_type,
+            "episode_group_id": group_id,
+            "installments": installments,
+        })
+        if existing_index is None:
+            rules.append(rule)
+        else:
+            rules[existing_index] = rule
+        rules.sort(key=lambda value: (str(value.get("title") or ""), value.get("tmdb_id") or 0))
+        return {
+            "id": item.get("id"),
+            "title": item.get("name_cn") or item.get("name") or rule["title"],
+            "tmdb_id": tmdb_id,
+            "rule": rule,
+            "target": "剧集组" if target_type == "group" else "TMDB 默认",
+            "group": selected_group,
+            "needs_attention": suggestion is None,
+            "message": (
+                "已加入规则，但无法自动确定该季度在目标编集中的起点，请在维护规则中补充"
+                if suggestion is None else "已加入维护规则"
+            ),
+        }
+
+    @classmethod
+    def _infer_title_season(cls, value: str) -> Optional[int]:
+        """从中英日常见续作标题中提取明确季号。"""
+        text = str(value or "")
+        digit_match = re.search(
+            r"(?i)(?:season\s*|第\s*|\bS)(\d{1,2})(?:\s*季|\b)|\b(\d{1,2})(?:st|nd|rd|th)\s+season\b",
+            text,
+        )
+        if digit_match:
+            return cls._safe_int(digit_match.group(1) or digit_match.group(2), 0) or None
+        chinese_match = re.search(r"第\s*([一二三四五六七八九十]+)\s*季", text)
+        if not chinese_match:
+            return None
+        numbers = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+        token = chinese_match.group(1)
+        if token == "十":
+            return 10
+        if "十" in token:
+            left, right = token.split("十", 1)
+            return numbers.get(left, 1) * 10 + numbers.get(right, 0)
+        return numbers.get(token)
 
     def _normalize_episode_rule(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """校验目标编集规则，并把别名和季度片段转换为稳定结构。"""
@@ -1562,6 +1893,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             aliases.extend(cls._clean_title(value) for value in values if cls._clean_title(value))
         aliases = list(dict.fromkeys([name, name_cn, *aliases]))
         images = subject.get("images") or {}
+        tag_names = [
+            str(item.get("name") or "") for item in subject.get("tags") or []
+            if isinstance(item, dict)
+        ]
+        meta_tags = [str(value or "") for value in subject.get("meta_tags") or []]
+        region = cls._detect_anime_region([*tag_names, *meta_tags])
+        platform = cls._clean_title(subject.get("platform")) or "未知"
+        multi_text = " ".join([name, name_cn, *aliases])
         return {
             "id": f"bangumi:{subject_id}",
             "source": "bangumi",
@@ -1572,10 +1911,27 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "aliases": aliases,
             "date": str(subject.get("date") or ""),
             "episode_count": cls._safe_int(subject.get("total_episodes") or subject.get("eps"), 0),
+            "platform": platform,
+            "region": region,
+            "region_name": {"japan": "日漫", "china": "国漫", "western": "美漫/欧美", "unknown": "地区未知"}[region],
+            "is_multi_season": bool(cls._infer_title_season(multi_text) and cls._infer_title_season(multi_text) > 1),
+            "tags": tag_names[:12],
             "poster": images.get("common") or images.get("large") or "",
             "url": f"https://bgm.tv/subject/{subject_id}",
             "imported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+
+    @staticmethod
+    def _detect_anime_region(values: List[str]) -> str:
+        """按 Bangumi 标签给看板提供保守的地区筛选。"""
+        text = " ".join(str(value or "").casefold() for value in values)
+        if any(token in text for token in ("中国", "国产", "大陆", "国漫", "donghua")):
+            return "china"
+        if any(token in text for token in ("欧美", "美国", "加拿大", "英国", "法国", "欧洲", "american")):
+            return "western"
+        if any(token in text for token in ("日本", "日漫", "japan")):
+            return "japan"
+        return "unknown"
 
     def _close_tmdb_client(self) -> None:
         """安全关闭 TMDB 客户端。"""
