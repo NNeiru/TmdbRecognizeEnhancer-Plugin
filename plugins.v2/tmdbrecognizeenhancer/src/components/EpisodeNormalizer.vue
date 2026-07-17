@@ -9,6 +9,7 @@ const props = defineProps({
 })
 
 const now = new Date()
+const uiStateKey = 'tmdbrecognizeenhancer:episode-normalizer-ui:v1'
 const years = Array.from({ length: now.getFullYear() - 1999 }, (_, index) => now.getFullYear() + 1 - index)
 const error = ref('')
 const notice = ref('')
@@ -407,7 +408,45 @@ function groupType(type) {
   return ({ 1: '原始播出', 2: '绝对编号', 3: 'DVD', 4: 'Digital', 5: '故事线', 6: '制片', 7: 'TV' })[type] || `类型 ${type}`
 }
 
+function applyTargetRecommendation() {
+  const recommendation = inspection.value?.recommendation
+  if (!recommendation || !editForm.value) return
+  editForm.value.target_type = recommendation.target_type || 'default'
+  editForm.value.episode_group_id = recommendation.target_type === 'group'
+    ? (recommendation.episode_group_id || '')
+    : ''
+}
+
+function restoreUiState() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(uiStateKey) || '{}')
+    if (saved.board && typeof saved.board === 'object') Object.assign(board.value, saved.board)
+    if (typeof saved.ruleSearch === 'string') ruleSearch.value = saved.ruleSearch
+    if (typeof saved.ruleQuarter === 'string') ruleQuarter.value = saved.ruleQuarter
+    if (typeof saved.batchPreference === 'string') batchPreference.value = saved.batchPreference
+    if (typeof saved.rulesOpen === 'boolean') rulesOpen.value = saved.rulesOpen
+  } catch (_) {
+    // 浏览器禁用存储或旧数据损坏时使用默认值。
+  }
+}
+
+function persistUiState() {
+  try {
+    localStorage.setItem(uiStateKey, JSON.stringify({
+      board: board.value,
+      ruleSearch: ruleSearch.value,
+      ruleQuarter: ruleQuarter.value,
+      batchPreference: batchPreference.value,
+      rulesOpen: rulesOpen.value,
+    }))
+  } catch (_) {
+    // 无痕模式下存储失败不影响功能。
+  }
+}
+
+restoreUiState()
 watch(() => [board.value.year, board.value.quarter], () => loadQuarter(false))
+watch([board, ruleSearch, ruleQuarter, batchPreference, rulesOpen], persistUiState, { deep: true })
 onBeforeUnmount(() => { if (scanTimer) clearTimeout(scanTimer) })
 onMounted(async () => {
   try {
@@ -520,7 +559,7 @@ onMounted(async () => {
       <VCardItem>
         <template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-view-dashboard-outline" /></VAvatar></template>
         <VCardTitle>季度番剧看板</VCardTitle>
-        <VCardSubtitle>AniList 季度目录 · AniBridge/TMDB 匹配；当前仅显示 {{ quarterKey }}</VCardSubtitle>
+        <VCardSubtitle>AniList 日漫主目录 · Bangumi/TMDB 补充国漫与海外动画；当前仅显示 {{ quarterKey }}</VCardSubtitle>
         <template #append><VBtn icon="mdi-refresh" variant="text" :loading="catalogLoading" @click="loadQuarter(true)" /></template>
       </VCardItem>
       <VCardText>
@@ -575,6 +614,7 @@ onMounted(async () => {
                 <VChip v-if="item.region_name" size="x-small" variant="tonal">{{ item.region_name }}</VChip>
                 <VChip v-if="item.platform" size="x-small" variant="tonal">{{ item.platform }}</VChip>
                 <VChip v-if="item.is_multi_season" size="x-small" color="secondary" variant="tonal">续作/多季</VChip>
+                <VChip v-if="item.matched_media_type" size="x-small" variant="tonal">{{ item.matched_media_type }}</VChip>
                 <VChip v-if="item.scan_status === 'scanning'" size="x-small" color="info" variant="tonal">
                   <VProgressCircular indeterminate size="11" width="2" class="me-1" />正在扫描
                 </VChip>
@@ -586,7 +626,7 @@ onMounted(async () => {
               </div>
             </VCardText>
             <VCardActions>
-              <VMenu v-if="!item.maintained">
+              <VMenu v-if="!item.maintained && item.rule_eligible !== false">
                 <template #activator="{ props: menuProps }">
                   <VBtn v-bind="menuProps" color="primary" variant="tonal" append-icon="mdi-menu-down" :loading="busyId === item.id">加入规则</VBtn>
                 </template>
@@ -595,6 +635,7 @@ onMounted(async () => {
                   <VListItem title="优先 Production/Season 剧集组" prepend-icon="mdi-animation-outline" @click="addCatalogItem(item, 'group_preferred')" />
                 </VList>
               </VMenu>
+              <VBtn v-else-if="item.rule_eligible === false" variant="text" disabled prepend-icon="mdi-movie-open-outline">电影条目无需集数规则</VBtn>
               <VBtn
                 v-else variant="text" prepend-icon="mdi-pencil-outline"
                 @click="openEditor(rules.find(rule => Number(rule.tmdb_id) === Number(item.tmdb_match?.best?.tmdb_id)))"
@@ -675,13 +716,22 @@ onMounted(async () => {
             v-if="Number(editForm.original_tmdb_id) !== Number(editForm.tmdb_id)"
             type="warning" variant="tonal" density="compact" class="mb-4"
           >保存后将用 TMDB {{ editForm.tmdb_id }} 替换原规则 TMDB {{ editForm.original_tmdb_id }}</VAlert>
+          <VAlert v-if="inspection?.recommendation" type="info" variant="tonal" density="compact" class="mb-3">
+            <div class="d-flex align-center flex-wrap ga-2">
+              <span class="flex-grow-1">
+                <strong>智能建议：{{ inspection.recommendation.target_type === 'group' ? '剧集组' : 'TMDB 默认编集' }}</strong>
+                · {{ inspection.recommendation.reason }}
+              </span>
+              <VBtn size="small" variant="tonal" @click="applyTargetRecommendation">采用建议</VBtn>
+            </div>
+          </VAlert>
           <VRadioGroup v-model="editForm.target_type" hide-details>
             <VRadio value="default" label="TMDB 默认编集" />
             <VRadio value="group" label="TMDB 剧集组" />
           </VRadioGroup>
           <VSelect
             v-if="editForm.target_type === 'group'" v-model="editForm.episode_group_id" class="mt-3"
-            :items="(inspection?.groups || []).map(group => ({ title: `${group.name} · ${groupType(group.type)} · ${group.episode_count} 集`, value: group.id }))"
+            :items="(inspection?.groups || []).map(group => ({ title: `${group.recommended ? '推荐 · ' : ''}${group.name} · ${groupType(group.type)} · ${group.episode_count} 集`, value: group.id }))"
             label="目标剧集组"
           />
           <div v-if="selectedGroup" class="text-caption text-medium-emphasis mb-4">
@@ -735,12 +785,16 @@ onMounted(async () => {
 
 <style scoped>
 .normalizer-card { border-color: rgba(var(--v-theme-on-surface), .1); }
+.episode-normalizer :deep(.v-card-title),
+.episode-normalizer :deep(.v-card-subtitle),
+.episode-normalizer :deep(.v-field-label) { overflow-wrap: anywhere; }
 .preview-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
 .board-controls { display: grid; grid-template-columns: 110px 100px minmax(210px, 1fr) 135px 135px 135px auto; gap: 10px; align-items: center; }
 .batch-bar { display: flex; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .055); }
 .batch-target { max-width: 280px; }
 .catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 14px; }
 .catalog-card { position: relative; overflow: hidden; }
+.catalog-card :deep(.v-card-actions) { flex-wrap: wrap; row-gap: 6px; }
 .select-corner { position: absolute; z-index: 2; inset-block-start: 6px; inset-inline-start: 6px; border-radius: 10px; background: rgba(var(--v-theme-surface), .9); }
 .rules-controls { display: grid; grid-template-columns: minmax(220px, 1fr) 160px auto auto; gap: 10px; align-items: center; }
 .rules-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
@@ -752,6 +806,10 @@ onMounted(async () => {
 .tmdb-correction { display: grid; grid-template-columns: minmax(180px, 1fr) auto; gap: 10px; align-items: center; }
 @media (max-width: 1000px) {
   .board-controls, .rules-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 1280px) and (min-width: 1001px) {
+  .board-controls { grid-template-columns: 100px 90px minmax(180px, 1fr) repeat(2, 125px); }
+  .board-controls > :nth-child(6), .board-controls > :nth-child(7) { grid-column: span 1; }
 }
 @media (max-width: 700px) {
   .preview-line { grid-template-columns: 1fr; }

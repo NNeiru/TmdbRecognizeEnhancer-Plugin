@@ -203,6 +203,57 @@ def test_group_preference_selects_production_layout():
     ]
 
 
+def test_group_preference_keeps_default_when_default_is_already_multiseason():
+    class DefaultMultiWithPlatformGroup(FakeTmdbApi):
+        @staticmethod
+        def get_info(mtype, tmdbid):
+            info = FakeTmdbApi.get_info(mtype, 200)
+            info["id"] = tmdbid
+            info["episode_groups"] = {"results": [{
+                "id": "production", "name": "Netflix Order", "type": 6,
+                "group_count": 1, "episode_count": 36,
+            }]}
+            return info
+
+    normalizer = EpisodeNormalizer(DefaultMultiWithPlatformGroup())
+
+    recommendation = normalizer.recommend_target(300)
+
+    assert recommendation["target_type"] == "default"
+    assert recommendation["group"] is None
+    assert "已经按 3 季" in recommendation["reason"]
+
+
+def test_missing_latest_group_episode_is_safely_extended_from_installment():
+    class IncompleteGroup(FakeTmdbApi):
+        @staticmethod
+        def get_tv_group_seasons(group_id):
+            groups = FakeTmdbApi.get_tv_group_seasons(group_id)
+            groups[1]["episodes"] = groups[1]["episodes"][:-1]
+            return groups
+
+    normalizer = EpisodeNormalizer(IncompleteGroup())
+    rule = {
+        "tmdb_id": 100,
+        "enabled": True,
+        "target_type": "group",
+        "episode_group_id": "production",
+        "installments": [{
+            "aliases": ["Anime 100 Part 2"],
+            "target_start_season": 2,
+            "target_start_episode": 1,
+        }],
+    }
+
+    result = normalizer.normalize(
+        rule, season=1, episode=12, raw_title="Anime 100 Part 2 - 12.mkv",
+    )
+
+    assert result["applied"] is True
+    assert (result["season"], result["episode"]) == (2, 12)
+    assert result["strategy"] == "installment-tail"
+
+
 def test_installment_start_uses_explicit_title_season():
     normalizer = EpisodeNormalizer(FakeTmdbApi())
 

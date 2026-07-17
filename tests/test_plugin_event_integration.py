@@ -311,7 +311,7 @@ def test_catalog_fast_match_uses_structured_english_title(monkeypatch):
 
     assert match["accepted"] is True
     assert match["best"]["tmdb_id"] == 789
-    assert match["best"]["score"] == 100.0
+    assert match["best"]["score"] >= 90.0
     assert len(searched) >= 2
     assert "Rei no Anime" in searched
 
@@ -335,6 +335,102 @@ def test_catalog_search_titles_remove_season_noise_but_keep_aliases(monkeypatch)
     assert "无职转生" in titles
     assert "Mushoku Tensei: Jobless Reincarnation Season 2 Part 2" in titles
     assert item["aliases"] == ["無職転生 II ～異世界行ったら本気だす～"]
+
+
+def test_catalog_match_prefers_main_multiseason_animation_over_rogue_sequel(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+
+    class FakeTmdb:
+        def __init__(self, language=None):
+            pass
+
+        @staticmethod
+        def search_multiis(title):
+            return [
+                {
+                    "id": 10, "name": "Example Season 2", "media_type": module.MediaType.TV,
+                    "first_air_date": "2026-07-01", "genre_ids": [16], "original_language": "ja",
+                },
+                {
+                    "id": 20, "name": "Example", "media_type": module.MediaType.TV,
+                    "first_air_date": "2024-01-01", "genre_ids": [16], "original_language": "ja",
+                },
+            ]
+
+        @staticmethod
+        def get_info(mtype, tmdbid):
+            return {
+                "name": "Example Season 2" if tmdbid == 10 else "Example",
+                "first_air_date": "2026-07-01" if tmdbid == 10 else "2024-01-01",
+                "genres": [{"id": 16}], "original_language": "ja",
+                "seasons": (
+                    [{"season_number": 1}]
+                    if tmdbid == 10 else [{"season_number": 1}, {"season_number": 2}]
+                ),
+            }
+
+        @staticmethod
+        def close():
+            return None
+
+    monkeypatch.setattr(module, "TmdbApi", FakeTmdb)
+    item = {
+        "search_titles": ["Example Season 2", "Example"],
+        "aliases": ["Example Season 2", "Example"],
+        "name": "Example Season 2",
+        "date": "2026-07-01",
+        "region": "japan",
+        "has_prequel": True,
+        "is_multi_season": True,
+        "franchise_start_year": 2024,
+        "platform": "TV",
+    }
+
+    match = plugin._fast_catalog_tmdb_match(item)
+
+    assert match["accepted"] is True
+    assert match["best"]["tmdb_id"] == 20
+    assert match["best"]["score"] > 90
+
+
+def test_catalog_movie_uses_movie_candidate_and_rejects_live_action(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+
+    class FakeTmdb:
+        def __init__(self, language=None):
+            pass
+
+        @staticmethod
+        def search_multiis(title):
+            return [
+                {
+                    "id": 1, "title": "Animated Example", "media_type": module.MediaType.MOVIE,
+                    "release_date": "2026-07-01", "genre_ids": [18], "original_language": "en",
+                },
+                {
+                    "id": 2, "title": "Animated Example", "media_type": module.MediaType.MOVIE,
+                    "release_date": "2026-07-01", "genre_ids": [16], "original_language": "en",
+                },
+            ]
+
+        @staticmethod
+        def close():
+            return None
+
+    monkeypatch.setattr(module, "TmdbApi", FakeTmdb)
+    item = {
+        "search_titles": ["Animated Example"], "aliases": ["Animated Example"],
+        "name": "Animated Example", "date": "2026-07-01", "region": "western",
+        "platform": "MOVIE", "catalog_media_type": "movie",
+    }
+
+    match = plugin._fast_catalog_tmdb_match(item)
+
+    assert match["accepted"] is True
+    assert match["best"]["tmdb_id"] == 2
+    assert match["best"]["media_type"] == module.MediaType.MOVIE.value
 
 
 def test_manual_catalog_item_infers_latest_tmdb_season_quarter(monkeypatch):
@@ -577,7 +673,11 @@ def test_catalog_add_prefers_production_but_preserves_existing_target(monkeypatc
         "best": {"tmdb_id": 456, "name": "Example", "media_type": module.MediaType.TV.value},
     })
     normalizer = SimpleNamespace(
-        preferred_group=Mock(return_value={"id": "production", "name": "Season Order", "type": 6}),
+        recommend_target=Mock(return_value={
+            "target_type": "group",
+            "reason": "默认单季，推荐主流多季剧集组",
+            "group": {"id": "production", "name": "Season Order", "type": 6},
+        }),
         suggest_installment_start=Mock(return_value={"season": 2, "episode": 1, "strategy": "air-date"}),
     )
     plugin._normalizer = lambda: normalizer

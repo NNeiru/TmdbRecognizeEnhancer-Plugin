@@ -15,6 +15,10 @@ class EpisodeNormalizer:
     """基于 TMDB Episode ID、目标坐标和全局顺序进行安全的季集归一化。"""
 
     _alias_space_re = re.compile(r"[\W_]+", re.UNICODE)
+    _special_group_re = re.compile(
+        r"(?i)\b(?:specials?|ova|oad|extra|bonus|sp)\b|特别|特別|番外|特典|未放送"
+    )
+    TAIL_EXTENSION_LIMIT = 4
 
     def __init__(self, tmdb_api: Any):
         self._tmdb = tmdb_api
@@ -52,6 +56,12 @@ class EpisodeNormalizer:
                 "description": group.get("description") or "",
                 "seasons": layout.get("seasons") or [],
             })
+        recommendation = self.recommend_target(tmdb_id)
+        for group in groups:
+            group["recommended"] = (
+                recommendation.get("target_type") == "group"
+                and recommendation.get("episode_group_id") == group.get("id")
+            )
         return {
             "tmdb_id": tmdb_id,
             "title": info.get("name") or info.get("title") or "",
@@ -59,17 +69,32 @@ class EpisodeNormalizer:
             "poster_path": info.get("poster_path") or "",
             "default": self._layout_summary(default_layout),
             "groups": groups,
+            "recommendation": recommendation,
         }
 
     def preferred_group(self, tmdb_id: int) -> Optional[Dict[str, Any]]:
-        """选择最像常规季度划分的剧集组，优先 Production/Season。"""
+        """仅当默认编集不是正常多季结构时，返回主流多季剧集组。"""
+        recommendation = self.recommend_target(tmdb_id)
+        return recommendation.get("group") if recommendation.get("target_type") == "group" else None
+
+    def recommend_target(self, tmdb_id: int) -> Dict[str, Any]:
+        """在默认编集与剧集组之间选择更符合主流多季分配的目标。"""
         info = self._series_info(tmdb_id)
-        candidates = sorted(
-            self._group_metadata(info),
-            key=self._preferred_group_score,
-            reverse=True,
-        )
-        for group in candidates:
+        default_layout = self._default_layout(tmdb_id, info)
+        default_profile = self._layout_profile(default_layout)
+        if default_profile["regular_group_count"] >= 2:
+            return {
+                "target_type": "default",
+                "episode_group_id": "",
+                "reason": f"TMDB 默认编集已经按 {default_profile['regular_group_count']} 季划分",
+                "default_profile": default_profile,
+                "group": None,
+            }
+
+        prepared = []
+        default_ids = set(default_layout.get("by_id") or {})
+        default_count = len(default_layout.get("sequence") or [])
+        for group in self._group_metadata(info):
             group_id = str(group.get("id") or "").strip()
             if not group_id:
                 continue
@@ -77,16 +102,73 @@ class EpisodeNormalizer:
                 layout = self._group_layout(tmdb_id, group_id)
             except Exception:
                 continue
-            if layout.get("sequence"):
-                return {
-                    "id": group_id,
-                    "name": group.get("name") or "未命名剧集组",
-                    "type": self._safe_int(group.get("type"), 0),
-                    "group_count": self._safe_int(group.get("group_count"), 0),
-                    "episode_count": self._safe_int(group.get("episode_count"), 0),
-                    "seasons": self._layout_summary(layout).get("seasons") or [],
-                }
-        return None
+            profile = self._layout_profile(layout)
+            if profile["regular_group_count"] < 2:
+                continue
+            layout_ids = set(layout.get("by_id") or {})
+            overlap = len(default_ids & layout_ids)
+            coverage = overlap / len(default_ids) if default_ids else 0.0
+            if not default_ids:
+                metadata_count = self._safe_int(group.get("episode_count"), 0)
+                coverage = min(1.0, metadata_count / default_count) if default_count else 1.0
+            prepared.append({
+                "metadata": group,
+                "layout": layout,
+                "profile": profile,
+                "coverage": coverage,
+            })
+        if not prepared:
+            return {
+                "target_type": "default", "episode_group_id": "",
+                "reason": "没有找到至少划分为两季的完整剧集组",
+                "default_profile": default_profile, "group": None,
+            }
+
+        partition_frequency: Dict[int, int] = {}
+        for item in prepared:
+            count = item["profile"]["regular_group_count"]
+            partition_frequency[count] = partition_frequency.get(count, 0) + 1
+        for item in prepared:
+            item["score"] = self._mainstream_group_score(
+                item["metadata"], item["profile"], item["coverage"],
+                default_count, partition_frequency,
+            )
+        selected = max(
+            prepared,
+            key=lambda item: (
+                item["score"], item["coverage"], item["profile"]["has_specials"],
+                -item["profile"]["regular_group_count"],
+            ),
+        )
+        if selected["score"] < 75 or (default_count >= 6 and selected["coverage"] < 0.55):
+            return {
+                "target_type": "default", "episode_group_id": "",
+                "reason": "现有剧集组的分季结构或正片覆盖率不足，安全保留默认编集",
+                "default_profile": default_profile, "group": None,
+            }
+        group = selected["metadata"]
+        profile = selected["profile"]
+        result = {
+            "id": str(group.get("id") or ""),
+            "name": group.get("name") or "未命名剧集组",
+            "type": self._safe_int(group.get("type"), 0),
+            "group_count": self._safe_int(group.get("group_count"), 0),
+            "episode_count": self._safe_int(group.get("episode_count"), 0),
+            "seasons": self._layout_summary(selected["layout"]).get("seasons") or [],
+            "score": round(selected["score"], 2),
+            "coverage": round(selected["coverage"] * 100, 1),
+            "has_specials": profile["has_specials"],
+            "selection_reason": (
+                f"默认编集仅 {default_profile['regular_group_count']} 季；该组按 "
+                f"{profile['regular_group_count']} 季划分，覆盖 {selected['coverage'] * 100:.0f}% 正片"
+                f"{'，并包含 Special' if profile['has_specials'] else ''}"
+            ),
+        }
+        return {
+            "target_type": "group", "episode_group_id": result["id"],
+            "reason": result["selection_reason"],
+            "default_profile": default_profile, "group": result,
+        }
 
     def suggest_installment_start(
             self,
@@ -190,6 +272,12 @@ class EpisodeNormalizer:
             # 二次偏移；只有当前坐标位于季度目标起点之前时才按相对集数映射。
             if current and self._is_at_or_after_installment_start(target, installment, current):
                 if end_episode is not None and (season, end_episode) not in target["by_coord"]:
+                    mapped = self._map_installment(target, installment, episode, end_episode)
+                    if mapped and mapped.get("provisional"):
+                        return self._result_from_mapping(
+                            base_result, mapped, "installment-tail",
+                            "TMDB 暂缺最新集条目，已在同一目标季内安全推算",
+                        )
                     return {**base_result, "reason": "开始集符合目标，但结束集不在同一目标季中"}
                 return {
                     **base_result,
@@ -198,7 +286,15 @@ class EpisodeNormalizer:
                 }
             mapped = self._map_installment(target, installment, episode, end_episode)
             if mapped:
-                return self._result_from_mapping(base_result, mapped, "installment", "命中季度条目对应片段")
+                return self._result_from_mapping(
+                    base_result,
+                    mapped,
+                    "installment-tail" if mapped.get("provisional") else "installment",
+                    (
+                        "TMDB 暂缺最新集条目，已在同一目标季内安全推算"
+                        if mapped.get("provisional") else "命中季度条目对应片段"
+                    ),
+                )
 
         current = target["by_coord"].get((season, episode))
         if current:
@@ -320,12 +416,14 @@ class EpisodeNormalizer:
         entries: List[Dict[str, Any]] = []
         for group in sorted(groups, key=lambda item: self._safe_int(item.get("order"), 0)):
             season_number = self._safe_int(group.get("order"), 0)
+            group_name = str(group.get("name") or "")
             for index, item in enumerate(group.get("episodes") or [], start=1):
                 entries.append({
                     "id": self._optional_int(item.get("id")),
                     "season": season_number,
                     "episode": self._safe_int(item.get("episode_number"), index),
                     "air_date": item.get("air_date") or "",
+                    "group_name": group_name,
                 })
         layout = self._build_layout(f"group:{group_id}", entries, exclude_specials=False)
         with self._lock:
@@ -359,24 +457,67 @@ class EpisodeNormalizer:
         return [item for item in groups if isinstance(item, dict)]
 
     @classmethod
-    def _preferred_group_score(cls, group: Dict[str, Any]) -> Tuple[int, int, int]:
-        """Production 与名称含 Season 的组最符合常规季度分季预期。"""
+    def _layout_profile(cls, layout: Dict[str, Any]) -> Dict[str, Any]:
+        """提取分组数量、每组集数和 Special 覆盖等结构特征。"""
+        regular: Dict[int, int] = {}
+        specials: Dict[int, int] = {}
+        for item in layout.get("sequence") or []:
+            season = cls._safe_int(item.get("season"), 0)
+            name = str(item.get("group_name") or "")
+            target = specials if name and cls._special_group_re.search(name) else regular
+            target[season] = max(target.get(season, 0), cls._safe_int(item.get("episode"), 0))
+        return {
+            "regular_group_count": len(regular),
+            "regular_counts": [regular[key] for key in sorted(regular)],
+            "special_group_count": len(specials),
+            "special_episode_count": sum(specials.values()),
+            "has_specials": bool(specials),
+            "episode_count": len(layout.get("sequence") or []),
+        }
+
+    @classmethod
+    def _mainstream_group_score(
+            cls,
+            group: Dict[str, Any],
+            profile: Dict[str, Any],
+            coverage: float,
+            default_count: int,
+            partition_frequency: Dict[int, int],
+    ) -> float:
+        """按类型、结构共识、正片覆盖和 Special 完整度评估剧集组。"""
         group_type = cls._safe_int(group.get("type"), 0)
         name = str(group.get("name") or "").casefold()
         score = {
-            6: 120,  # Production
-            2: 75,   # Absolute
-            1: 55,   # Original air date
-            7: 45,   # TV
-            3: 30,
-            4: 25,
-            5: 10,
+            6: 65,   # Production
+            1: 35,   # Original air date
+            7: 25,   # TV
+            2: 5,    # Absolute 通常不是期望的多季相对编号
+            3: 0,
+            4: -5,
+            5: -20,
         }.get(group_type, 0)
         if any(token in name for token in ("season", "production", "制片", "制作", "シーズン", "季")):
-            score += 45
-        group_count = cls._safe_int(group.get("group_count"), 0)
-        episode_count = cls._safe_int(group.get("episode_count"), 0)
-        return score, group_count, episode_count
+            score += 28
+        if any(token in name for token in (
+                "netflix", "disney", "crunchyroll", "broadcast", "air date",
+                "dvd", "blu-ray", "stream", "平台", "放送顺", "放送順",
+        )):
+            score -= 35
+        regular_count = profile.get("regular_group_count") or 0
+        score += min(40.0, max(0.0, coverage) * 40.0)
+        score += min(24, partition_frequency.get(regular_count, 0) * 8)
+        score += 10 if profile.get("has_specials") else 0
+        regular_counts = profile.get("regular_counts") or []
+        if regular_count >= 2:
+            score += 20
+        if default_count >= 12 and regular_counts:
+            average = sum(regular_counts) / len(regular_counts)
+            if average < 3:
+                score -= 25
+        missing = max(0, default_count - cls._safe_int(group.get("episode_count"), 0))
+        if missing > cls.TAIL_EXTENSION_LIMIT:
+            score -= min(35, (missing - cls.TAIL_EXTENSION_LIMIT) * 4)
+        return score
 
     @staticmethod
     def _parse_date(value: Any):
@@ -427,7 +568,56 @@ class EpisodeNormalizer:
             return None
         begin_index = start_index + episode - 1
         end_index = start_index + (end_episode if end_episode is not None else episode) - 1
-        return self._mapping_from_indexes(target, begin_index, end_index, end_episode is not None)
+        mapped = self._mapping_from_indexes(target, begin_index, end_index, end_episode is not None)
+        if mapped:
+            return mapped
+        return self._extend_installment_tail(
+            target=target,
+            start_season=start_season,
+            start_episode=start_episode,
+            episode=episode,
+            end_episode=end_episode,
+        )
+
+    @classmethod
+    def _extend_installment_tail(
+            cls,
+            target: Dict[str, Any],
+            start_season: int,
+            start_episode: int,
+            episode: int,
+            end_episode: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        """只在目标最后一个常规季末尾缺少少量集数时进行受控推算。"""
+        season_entries = [
+            item for item in target.get("sequence") or []
+            if item.get("season") == start_season
+        ]
+        if not season_entries:
+            return None
+        last = max(season_entries, key=lambda item: cls._safe_int(item.get("episode"), 0))
+        last_index = (target.get("sequence") or []).index(last)
+        later_regular = [
+            item for item in (target.get("sequence") or [])[last_index + 1:]
+            if not cls._special_group_re.search(str(item.get("group_name") or ""))
+        ]
+        if later_regular:
+            return None
+        begin = start_episode + episode - 1
+        end = start_episode + (end_episode if end_episode is not None else episode) - 1
+        known_max = cls._safe_int(last.get("episode"), 0)
+        if (
+                begin < start_episode or end < begin or end <= known_max
+                or end - known_max > cls.TAIL_EXTENSION_LIMIT
+                or (begin <= known_max and (start_season, begin) not in (target.get("by_coord") or {}))
+        ):
+            return None
+        return {
+            "season": start_season,
+            "episode": begin,
+            "end_episode": end if end_episode is not None else None,
+            "provisional": True,
+        }
 
     @staticmethod
     def _is_at_or_after_installment_start(
