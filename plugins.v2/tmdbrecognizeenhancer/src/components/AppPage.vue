@@ -229,7 +229,7 @@ onMounted(loadStatus)
                       </div>
                       <VAlert v-if="preview.episode_adjustment" :type="preview.episode_adjustment.applied ? 'success' : 'info'" variant="tonal" density="compact" class="mt-4">
                         <strong>集数偏移：</strong>{{ preview.episode_adjustment.reason }}
-                        <span v-if="preview.episode_adjustment.season != null && preview.episode_adjustment.episode != null"> · 最终 S{{ String(preview.episode_adjustment.season).padStart(2, '0') }}E{{ String(preview.episode_adjustment.episode).padStart(2, '0') }}</span>
+                        <span v-if="preview.episode_adjustment.coordinates_authoritative !== false && preview.episode_adjustment.season != null && preview.episode_adjustment.episode != null"> · 最终 S{{ String(preview.episode_adjustment.season).padStart(2, '0') }}E{{ String(preview.episode_adjustment.episode).padStart(2, '0') }}</span>
                       </VAlert>
                       <VTable v-if="preview.candidates?.length" density="compact" class="candidate-table mt-4">
                         <thead><tr><th>候选</th><th>命中名称</th><th>得分</th></tr></thead>

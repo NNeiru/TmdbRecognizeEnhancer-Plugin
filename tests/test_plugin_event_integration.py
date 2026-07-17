@@ -200,6 +200,38 @@ def test_preview_mode_override_cannot_fall_into_saved_scoring_thresholds(monkeyp
     assert "低于分差阈值" not in result["reason"]
 
 
+def test_missing_season_hint_is_not_converted_to_specials(monkeypatch):
+    module = _load_plugin(monkeypatch)
+
+    ordinary = module.TmdbRecognizeEnhancer._extract_hints(
+        "Sono Bisque Doll wa Koi o Suru [2022] [01]"
+    )
+    explicit_special = module.TmdbRecognizeEnhancer._extract_hints("Example S00E01")
+
+    assert ordinary["season"] is None
+    assert ordinary["episode"] is None
+    assert explicit_special["season"] == 0
+    assert explicit_special["episode"] == 1
+
+
+def test_preview_without_rule_does_not_claim_final_coordinates(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({"episode_normalizer_enabled": True})
+
+    preview = plugin._preview_episode_pipeline(
+        best={"tmdb_id": 123249, "media_type": module.MediaType.TV},
+        hints={"season": None, "episode": 1},
+        raw_title="Example [01]",
+        parsed_title="Example",
+    )["result"]
+
+    assert preview["strategy"] == "rule-missing"
+    assert preview["coordinates_authoritative"] is False
+    assert preview["season"] is None
+    assert "沿用 MP 后续识别结果" in preview["reason"]
+
+
 def test_duplicate_tmdb_entries_share_one_decision_slot(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

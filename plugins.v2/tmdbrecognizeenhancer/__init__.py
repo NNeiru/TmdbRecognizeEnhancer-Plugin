@@ -35,7 +35,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.4.1"
+    plugin_version = "0.4.2"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -88,7 +88,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     _split_pattern = re.compile(r"\s*(?::|：|\||｜|/|／|—|–)\s*")
     _bracket_suffix_pattern = re.compile(r"\s*[\[(（【][^\])）】]{1,40}[\])）】]\s*$")
-    _season_pattern = re.compile(r"(?i)(?:\bS(?:eason)?\s*0*(\d{1,2})\b|第\s*(\d{1,2})\s*季)")
+    _season_pattern = re.compile(
+        r"(?i)(?:\bS(?:eason)?\s*(\d{1,2})(?=E\d|\b)|第\s*(\d{1,2})\s*季)"
+    )
     _episode_pattern = re.compile(r"(?i)(?:(?<![A-Z])E(?:P(?:ISODE)?)?\s*0*(\d{1,4})\b|第\s*(\d{1,4})\s*[集话])")
     _token_pattern = re.compile(r"[a-z0-9]+|[\u3400-\u9fff]+", re.IGNORECASE)
     _tmdb_url_pattern = re.compile(
@@ -390,7 +392,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             result["episode_adjustment"] = episode_preview.get("result")
             result["pipeline"] = [
                 {
-                    "module": "MoviePilot 解析",
+                    "module": "MoviePilot 标题解析（识别前）",
                     "status": "completed",
                     "summary": f"{title} · 年份 {hints.get('year') or '未提供'} · S{hints.get('season') or '?'}E{hints.get('episode') or '?'}",
                 },
@@ -427,16 +429,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return {"rule": None, "result": {
                 "applied": False, "strategy": "module-disabled", "reason": "集数偏移模块未启用",
                 "season": hints.get("season"), "episode": hints.get("episode"),
+                "coordinates_authoritative": False,
             }}
         if not best:
             return {"rule": None, "result": {
                 "applied": False, "strategy": "recognition-missing", "reason": "TMDB 未通过，无法检查偏移",
                 "season": hints.get("season"), "episode": hints.get("episode"),
+                "coordinates_authoritative": False,
             }}
         if self._normalize_media_type(best.get("media_type")) != MediaType.TV:
             return {"rule": None, "result": {
                 "applied": False, "strategy": "not-tv", "reason": "电影不执行集数偏移",
                 "season": hints.get("season"), "episode": hints.get("episode"),
+                "coordinates_authoritative": False,
             }}
         tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
         rule = next((
@@ -445,8 +450,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
         ), None)
         if not rule:
             return {"rule": None, "result": {
-                "applied": False, "strategy": "rule-missing", "reason": f"TMDB {tmdb_id} 没有维护偏移规则",
+                "applied": False,
+                "strategy": "rule-missing",
+                "reason": f"TMDB {tmdb_id} 没有维护偏移规则；插件未修改季集，沿用 MP 后续识别结果",
                 "season": hints.get("season"), "episode": hints.get("episode"),
+                "coordinates_authoritative": False,
             }}
         result = self._normalizer().normalize(
             rule=rule,
@@ -456,6 +464,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             raw_title=raw_title,
             parsed_name=parsed_title,
         )
+        result["coordinates_authoritative"] = True
         return {"rule": rule, "result": result}
 
     def clear_history_api(self) -> schemas.Response:
@@ -2387,8 +2396,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         year_match = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", title)
         season_match = cls._season_pattern.search(title)
         episode_match = cls._episode_pattern.search(title)
-        season = next((int(value) for value in season_match.groups() if value), 0) if season_match else 0
-        episode = next((int(value) for value in episode_match.groups() if value), 0) if episode_match else 0
+        season = next((int(value) for value in season_match.groups() if value), 0) if season_match else None
+        episode = next((int(value) for value in episode_match.groups() if value), 0) if episode_match else None
         return {
             "year": year_match.group(1) if year_match else "",
             "media_type": MediaType.TV if season or episode else None,

@@ -2812,7 +2812,7 @@ return (_ctx, _cache) => {
                                           default: _withCtx(() => [
                                             _cache[40] || (_cache[40] = _createElementVNode("strong", null, "集数偏移：", -1)),
                                             _createTextVNode(_toDisplayString(preview.value.episode_adjustment.reason) + " ", 1),
-                                            (preview.value.episode_adjustment.season != null && preview.value.episode_adjustment.episode != null)
+                                            (preview.value.episode_adjustment.coordinates_authoritative !== false && preview.value.episode_adjustment.season != null && preview.value.episode_adjustment.episode != null)
                                               ? (_openBlock(), _createElementBlock("span", _hoisted_29, " · 最终 S" + _toDisplayString(String(preview.value.episode_adjustment.season).padStart(2, '0')) + "E" + _toDisplayString(String(preview.value.episode_adjustment.episode).padStart(2, '0')), 1))
                                               : _createCommentVNode("", true)
                                           ]),
@@ -3079,6 +3079,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-c270bd04"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-c897e0cd"]]);
 
 export { AppPage as default };
