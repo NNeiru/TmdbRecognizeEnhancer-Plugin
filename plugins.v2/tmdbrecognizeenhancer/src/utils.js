@@ -33,6 +33,9 @@ export const DEFAULT_CONFIG = {
   season_missing_penalty: 20,
   history_limit: 30,
   episode_normalizer_enabled: false,
+  release_group_assist_enabled: true,
+  custom_rename_fields_enabled: true,
+  release_group_type_weight: 12,
 }
 
 export function cloneConfig(config) {

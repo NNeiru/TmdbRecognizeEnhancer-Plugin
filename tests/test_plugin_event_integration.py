@@ -180,6 +180,57 @@ def test_tmdb_first_mode_uses_first_result_without_score_or_margin(monkeypatch):
     assert result["margin"] == 0.0
 
 
+def test_tmdb_first_prefers_animation_for_animation_release_group(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "enabled": True, "recognition_mode": "tmdb_first", "fetch_aliases": False,
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 1, "media_type": "tv", "name": "同名真人剧", "genre_ids": [18]},
+        {"id": 2, "media_type": "tv", "name": "同名动画", "genre_ids": [16, 10759]},
+    ])
+
+    result = plugin._recognize_title(
+        "同名作品",
+        hints={"release_group_profile": {
+            "kind": "animation", "release_group": "喵萌奶茶屋", "matches": [],
+        }},
+        include_candidates=True,
+    )
+
+    assert result["best"]["tmdb_id"] == 2
+    assert result["release_group_preference"]["applied"] is True
+    assert result["best"]["score"] == 100.0
+
+
+def test_scored_mode_adds_release_group_genre_component(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "scored", "minimum_score": 0, "minimum_margin": 0,
+        "fetch_aliases": False, "release_group_type_weight": 20,
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 10, "media_type": "tv", "name": "Same Title", "genre_ids": [18]},
+        {"id": 20, "media_type": "tv", "name": "Same Title", "genre_ids": [16]},
+    ])
+
+    result = plugin._recognize_title(
+        "Same Title",
+        hints={"release_group_profile": {
+            "kind": "animation", "release_group": "AnimeGroup", "matches": [],
+        }},
+        recognition_mode="scored",
+        include_candidates=True,
+    )
+
+    scores = {item["tmdb_id"]: item for item in result["candidates"]}
+    assert scores[20]["components"]["release_group"] == 100.0
+    assert scores[10]["components"]["release_group"] == 0.0
+    assert scores[20]["score"] > scores[10]["score"]
+
+
 def test_scored_mode_hard_filters_candidates_to_explicit_tv_type(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

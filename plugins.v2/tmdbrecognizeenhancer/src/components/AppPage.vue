@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import StrategySettings from './StrategySettings.vue'
 import EpisodeNormalizer from './EpisodeNormalizer.vue'
+import MetadataTools from './MetadataTools.vue'
 import { cloneConfig, mediaTypeText, scoreColor, unwrapResponse } from '../utils'
 
 const props = defineProps({
@@ -140,6 +141,7 @@ onMounted(loadStatus)
           <VTab value="status" prepend-icon="mdi-view-dashboard-outline">状态与开关</VTab>
           <VTab value="settings" prepend-icon="mdi-database-search-outline">TMDB 搜索增强</VTab>
           <VTab value="episodes" prepend-icon="mdi-animation-outline">集数偏移</VTab>
+          <VTab value="metadata" prepend-icon="mdi-code-braces-box">字段与制作组</VTab>
           <VTab value="preview" prepend-icon="mdi-flask-outline">综合试跑</VTab>
           <VTab value="history" prepend-icon="mdi-text-box-search-outline">日志</VTab>
         </VTabs>
@@ -168,6 +170,14 @@ onMounted(loadStatus)
                   <VCardItem><template #prepend><VAvatar color="success" variant="tonal"><VIcon icon="mdi-swap-vertical-bold" /></VAvatar></template><VCardTitle>集数偏移</VCardTitle><VCardSubtitle>{{ modules.episode_offset?.status || '状态未知' }}</VCardSubtitle></VCardItem>
                   <VCardText><VSwitch v-model="config.episode_normalizer_enabled" color="success" label="启用模块" hide-details /><div class="status-line"><span>维护规则</span><strong>{{ normalizerStatus.rule_count || 0 }} 条</strong></div><div class="status-line"><span>MP 插件优先</span><strong>{{ normalizerStatus.plugin_first ? '已开启' : '未开启' }}</strong></div><div class="status-line"><span>运行时适配</span><strong>{{ normalizerStatus.runtime_compatible ? '兼容' : normalizerStatus.runtime_message || '不可用' }}</strong></div></VCardText>
                 </VCard>
+                <VCard variant="outlined" class="module-card">
+                  <VCardItem><template #prepend><VAvatar color="primary" variant="tonal"><VIcon icon="mdi-account-group-outline" /></VAvatar></template><VCardTitle>制作组辅助</VCardTitle><VCardSubtitle>{{ modules.release_group_assist?.status || '状态未知' }}</VCardSubtitle></VCardItem>
+                  <VCardText><VSwitch v-model="config.release_group_assist_enabled" color="primary" label="启用模块" hide-details /><div class="status-line"><span>分类范围</span><strong>动漫 / 真人电视剧</strong></div><div class="status-line"><span>作用阶段</span><strong>TMDB 候选选择</strong></div></VCardText>
+                </VCard>
+                <VCard variant="outlined" class="module-card">
+                  <VCardItem><template #prepend><VAvatar color="success" variant="tonal"><VIcon icon="mdi-code-braces" /></VAvatar></template><VCardTitle>自定义重命名字段</VCardTitle><VCardSubtitle>{{ modules.rename_fields?.status || '状态未知' }}</VCardSubtitle></VCardItem>
+                  <VCardText><VSwitch v-model="config.custom_rename_fields_enabled" color="success" label="启用模块" hide-details /><div class="status-line"><span>注入阶段</span><strong>MP 模板渲染前</strong></div><div class="status-line"><span>安全策略</span><strong>沙箱表达式</strong></div></VCardText>
+                </VCard>
               </div>
             </div>
           </section>
@@ -176,6 +186,12 @@ onMounted(loadStatus)
             <div class="tab-content">
               <StrategySettings v-model="config" :show-module-switches="false" />
               <div class="sticky-actions"><VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving" @click="saveConfig">保存并立即生效</VBtn></div>
+            </div>
+          </section>
+
+          <section v-if="tab === 'metadata'" class="workspace-panel">
+            <div class="tab-content">
+              <MetadataTools v-model="config" :api="api" :plugin-id="pluginId" :saving-config="saving" @save-config="saveConfig" />
             </div>
           </section>
 
@@ -245,7 +261,7 @@ onMounted(loadStatus)
                       </VAlert>
                       <VTable v-if="preview.candidates?.length" density="compact" class="candidate-table mt-4">
                         <thead><tr><th>候选</th><th>命中名称</th><th>得分</th></tr></thead>
-                        <tbody><tr v-for="candidate in preview.candidates" :key="`${candidate.media_type}-${candidate.tmdb_id}`" :class="{ 'candidate-suppressed': candidate.suppressed_as_duplicate || candidate.suppressed_as_shadow_season }"><td><strong>{{ candidate.name }}</strong><div class="text-caption text-medium-emphasis">{{ candidate.year || '—' }} · #{{ candidate.tmdb_id }}</div><VChip v-if="candidate.suppressed_as_duplicate" size="x-small" color="info" variant="tonal" class="mt-1">重复项，归入 #{{ candidate.duplicate_of }}</VChip><VChip v-else-if="candidate.suppressed_as_shadow_season" size="x-small" color="warning" variant="tonal" class="mt-1">平行单季项，归入 #{{ candidate.shadow_of }}</VChip></td><td class="text-caption">{{ candidate.matched_name || '—' }}<div class="text-medium-emphasis">查询来源 {{ candidate.query_confidence ?? 0 }}<span v-if="candidate.web_evidence"> · 外部证据 {{ candidate.web_evidence }}</span></div></td><td><VChip size="small" :color="scoreColor(candidate.score)">{{ preview.selection_mode === 'tmdb_first' ? '诊断 ' : '' }}{{ candidate.diagnostic_score ?? candidate.score }}</VChip></td></tr></tbody>
+                        <tbody><tr v-for="candidate in preview.candidates" :key="`${candidate.media_type}-${candidate.tmdb_id}`" :class="{ 'candidate-suppressed': candidate.suppressed_as_duplicate || candidate.suppressed_as_shadow_season }"><td><strong>{{ candidate.name }}</strong><div class="text-caption text-medium-emphasis">{{ candidate.year || '—' }} · #{{ candidate.tmdb_id }}</div><VChip v-if="candidate.suppressed_as_duplicate" size="x-small" color="info" variant="tonal" class="mt-1">重复项，归入 #{{ candidate.duplicate_of }}</VChip><VChip v-else-if="candidate.suppressed_as_shadow_season" size="x-small" color="warning" variant="tonal" class="mt-1">平行单季项，归入 #{{ candidate.shadow_of }}</VChip></td><td class="text-caption">{{ candidate.matched_name || '—' }}<div class="text-medium-emphasis">查询来源 {{ candidate.query_confidence ?? 0 }}<span v-if="candidate.web_evidence"> · 外部证据 {{ candidate.web_evidence }}</span></div><div v-if="candidate.release_group_evidence?.component !== null" class="text-medium-emphasis">制作组 {{ candidate.release_group_evidence.label }}：{{ candidate.release_group_evidence.component }} 分</div></td><td><VChip size="small" :color="scoreColor(candidate.score)">{{ preview.selection_mode === 'tmdb_first' ? '诊断 ' : '' }}{{ candidate.diagnostic_score ?? candidate.score }}</VChip></td></tr></tbody>
                       </VTable>
                     </VCardText>
                   </VCard>

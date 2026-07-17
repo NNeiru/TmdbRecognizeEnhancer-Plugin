@@ -26,6 +26,7 @@ from app.schemas.types import ChainEventType, MediaType
 from app.utils.http import RequestUtils
 
 from .episode_normalizer import EpisodeNormalizer
+from .metadata_tools import ReleaseGroupRegistry, RenameFieldRegistry
 from .runtime_adapter import MoviePilotRuntimeAdapter
 
 
@@ -35,7 +36,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.4.4"
+    plugin_version = "0.5.0-beta.1"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -45,6 +46,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
     DATA_KEY_HISTORY = "recognize_history"
     DATA_KEY_EPISODE_RULES = "episode_normalizer_rules"
     DATA_KEY_SEASON_CATALOG = "season_catalog"
+    DATA_KEY_RELEASE_GROUP_PROFILES = "release_group_profiles"
+    DATA_KEY_CUSTOM_RENAME_FIELDS = "custom_rename_fields"
     # 季度目录匹配使用独立策略，不继承整理识别的 max_queries、降级开关等参数。
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
@@ -84,6 +87,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "season_missing_penalty": 20.0,
         "history_limit": 30,
         "episode_normalizer_enabled": False,
+        "release_group_assist_enabled": True,
+        "custom_rename_fields_enabled": True,
+        "release_group_type_weight": 12.0,
     }
 
     _split_pattern = re.compile(r"\s*(?::|：|\||｜|/|／|—|–)\s*")
@@ -113,6 +119,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._tmdb_api: Optional[TmdbApi] = None
         self._episode_normalizer: Optional[EpisodeNormalizer] = None
         self._runtime_adapter = MoviePilotRuntimeAdapter()
+        self._release_group_registry = ReleaseGroupRegistry()
+        self._custom_rename_fields: List[Dict[str, Any]] = []
         self._history_lock = threading.RLock()
         self._web_cache_lock = threading.RLock()
         self._web_cache: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
@@ -126,6 +134,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self._close_tmdb_client()
         self._tmdb_api = TmdbApi()
         self._episode_normalizer = EpisodeNormalizer(self._tmdb_api)
+        self._refresh_metadata_tools()
         self._sync_runtime_adapter_state()
         self._sync_event_handler_state()
 
@@ -291,6 +300,41 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "auth": "bear",
                 "summary": "批量匹配季度动画并加入维护规则",
             },
+            {
+                "path": "/metadata-tools",
+                "endpoint": self.get_metadata_tools_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取制作组和重命名字段目录",
+            },
+            {
+                "path": "/metadata-tools/release-group",
+                "endpoint": self.save_release_group_profile_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "设置制作组类型",
+            },
+            {
+                "path": "/metadata-tools/custom-field",
+                "endpoint": self.save_custom_rename_field_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "保存自定义重命名字段",
+            },
+            {
+                "path": "/metadata-tools/custom-field/delete",
+                "endpoint": self.delete_custom_rename_field_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "删除自定义重命名字段",
+            },
+            {
+                "path": "/metadata-tools/custom-field/preview",
+                "endpoint": self.preview_custom_rename_fields_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "试算自定义重命名字段",
+            },
         ]
 
     def stop_service(self):
@@ -328,6 +372,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
                             if self.get_state() and self._config.get("episode_normalizer_enabled") else "已停用"
                         ),
                     },
+                    "release_group_assist": {
+                        "enabled": bool(self._config.get("release_group_assist_enabled")),
+                        "status": (
+                            "运行中" if self.get_state() and self._config.get("recognizer_enabled")
+                            and self._config.get("release_group_assist_enabled") else "已停用"
+                        ),
+                    },
+                    "rename_fields": {
+                        "enabled": bool(self._config.get("custom_rename_fields_enabled")),
+                        "status": (
+                            "运行中" if self.get_state() and self._config.get("custom_rename_fields_enabled")
+                            and self._rename_build_supported() else "当前 MP 不支持"
+                            if self.get_state() and self._config.get("custom_rename_fields_enabled") else "已停用"
+                        ),
+                    },
                 },
                 "history": history,
                 "episode_normalizer": {
@@ -349,9 +408,80 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """校验并保存联邦界面提交的插件配置。"""
         self._config = self._normalize_config(config or {})
         self.update_config(self._current_config())
+        self._refresh_metadata_tools()
         self._sync_runtime_adapter_state()
         self._sync_event_handler_state()
         return self.get_status()
+
+    def get_metadata_tools_api(self) -> schemas.Response:
+        """返回制作组目录、字段目录和当前扩展配置。"""
+        catalog = self._release_group_registry.catalog()
+        return schemas.Response(success=True, data={
+            "release_groups": catalog,
+            "release_group_profiles": self._read_release_group_profiles(),
+            "builtin_fields": RenameFieldRegistry.builtin_catalog(),
+            "custom_fields": deepcopy(self._custom_rename_fields),
+            "capabilities": {
+                "rename_build_event": self._rename_build_supported(),
+                "rename_build_message": (
+                    "支持在 MP 渲染前注入字段" if self._rename_build_supported()
+                    else "当前 MP 缺少 TransferRenameBuild 事件，自定义字段只能试算，不能用于实际整理"
+                ),
+            },
+        })
+
+    def save_release_group_profile_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """保存单条制作组的动漫、真人或未分类设置。"""
+        rule_id = str(payload.get("id") or "").strip()
+        kind = str(payload.get("kind") or "unknown").strip().lower()
+        valid_ids = {item.get("id") for item in self._release_group_registry.catalog().get("items") or []}
+        if not rule_id or rule_id not in valid_ids:
+            return schemas.Response(success=False, message="制作组规则不存在或已随 MP 更新变化")
+        if kind not in ("animation", "live_action", "unknown"):
+            return schemas.Response(success=False, message="制作组类型只支持动漫、真人电视剧或未分类")
+        profiles = self._read_release_group_profiles()
+        profiles[rule_id] = {
+            "kind": kind,
+            "display_name": str(payload.get("display_name") or "").strip()[:80],
+        }
+        self.save_data(self.DATA_KEY_RELEASE_GROUP_PROFILES, profiles)
+        self._release_group_registry.refresh(profiles)
+        return self.get_metadata_tools_api()
+
+    def save_custom_rename_field_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """新增或更新一个安全的自定义重命名字段。"""
+        key = str(payload.get("key") or "").strip()
+        original_key = str(payload.get("original_key") or key).strip()
+        fields = [
+            item for item in self._custom_rename_fields
+            if item.get("key") not in (key, original_key)
+        ]
+        fields.append(payload)
+        try:
+            normalized = RenameFieldRegistry.normalize_fields(fields)
+        except ValueError as err:
+            return schemas.Response(success=False, message=str(err))
+        self.save_data(self.DATA_KEY_CUSTOM_RENAME_FIELDS, normalized)
+        self._custom_rename_fields = normalized
+        return self.get_metadata_tools_api()
+
+    def delete_custom_rename_field_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """删除指定的自定义重命名字段。"""
+        key = str(payload.get("key") or "").strip()
+        fields = [item for item in self._custom_rename_fields if item.get("key") != key]
+        try:
+            fields = RenameFieldRegistry.normalize_fields(fields)
+        except ValueError as err:
+            return schemas.Response(success=False, message=str(err))
+        self.save_data(self.DATA_KEY_CUSTOM_RENAME_FIELDS, fields)
+        self._custom_rename_fields = fields
+        return self.get_metadata_tools_api()
+
+    def preview_custom_rename_fields_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """以用户提供的安全上下文试算全部自定义字段。"""
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        values, errors = RenameFieldRegistry.evaluate(self._custom_rename_fields, context)
+        return schemas.Response(success=True, data={"values": values, "errors": errors})
 
     def preview_api(self, payload: dict = Body(...)) -> schemas.Response:
         """使用当前策略试跑标题，但不向 MoviePilot 识别链注入结果。"""
@@ -397,6 +527,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "module": "MoviePilot 标题解析（识别前）",
                     "status": "completed",
                     "summary": f"{title} · 年份 {hints.get('year') or '未提供'} · S{hints.get('season') or '?'}E{hints.get('episode') or '?'}",
+                },
+                {
+                    "module": "制作组辅助",
+                    "status": "applied" if hints.get("release_group_profile") else "skipped",
+                    "summary": (
+                        f"{hints['release_group_profile'].get('release_group')} → "
+                        f"{'动漫' if hints['release_group_profile'].get('kind') == 'animation' else '真人电视剧'}"
+                        if hints.get("release_group_profile") else
+                        "未识别到已分类制作组，不参与本次候选判断"
+                    ),
                 },
                 {
                     "module": "TMDB 搜索增强",
@@ -1382,9 +1522,55 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if enabled:
             eventmanager.enable_event_handler(type(self))
             eventmanager.enable_event_handler(self.on_name_recognize)
+            if self._rename_build_supported():
+                eventmanager.enable_event_handler(self.on_transfer_rename_build)
         else:
             eventmanager.disable_event_handler(self.on_name_recognize)
+            if self._rename_build_supported():
+                eventmanager.disable_event_handler(self.on_transfer_rename_build)
             eventmanager.disable_event_handler(type(self))
+
+    @staticmethod
+    def _rename_build_supported() -> bool:
+        """判断当前 MP 是否提供重命名渲染前事件。"""
+        return getattr(ChainEventType, "TransferRenameBuild", None) is not None
+
+    def _refresh_metadata_tools(self) -> None:
+        """加载制作组档案和自定义字段，并对异常旧数据安全降级。"""
+        profiles = self._read_release_group_profiles()
+        self._release_group_registry.refresh(profiles)
+        try:
+            self._custom_rename_fields = RenameFieldRegistry.normalize_fields(
+                self.get_data(self.DATA_KEY_CUSTOM_RENAME_FIELDS) or []
+            )
+        except ValueError as err:
+            self._custom_rename_fields = []
+            logger.warning(f"[TMDB识别增强] 自定义重命名字段配置无效，已暂停使用：{err}")
+
+    def _read_release_group_profiles(self) -> Dict[str, Dict[str, str]]:
+        """读取制作组类型覆盖并兼容异常旧数据。"""
+        return ReleaseGroupRegistry.normalize_profiles(
+            self.get_data(self.DATA_KEY_RELEASE_GROUP_PROFILES) or {}
+        )
+
+    def on_transfer_rename_build(self, event: Event) -> None:
+        """在 MP 渲染文件名之前注入用户定义的重命名字段。"""
+        if not self.get_state() or not self._config.get("custom_rename_fields_enabled"):
+            return
+        if not event or not event.event_data or not self._custom_rename_fields:
+            return
+        event_data = event.event_data
+        rename_dict = self._event_get(event_data, "rename_dict")
+        if not isinstance(rename_dict, dict):
+            return
+        values, errors = RenameFieldRegistry.evaluate(self._custom_rename_fields, rename_dict)
+        rename_dict.update(values)
+        self._event_set(event_data, "rename_dict", rename_dict)
+        if errors:
+            logger.warning(
+                f"[TMDB识别增强] {len(errors)} 个自定义重命名字段使用了回退值："
+                + "；".join(f"{item['key']}={item['message']}" for item in errors[:3])
+            )
 
     def _sync_runtime_adapter_state(self) -> None:
         """只在插件启用期间安装运行时适配器。"""
@@ -1399,7 +1585,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         title = raw_title
         hints = self._extract_hints(raw_title)
         if not raw_title or not self._config.get("prefer_parsed_title", True):
-            return title, hints
+            return title, self._enrich_release_group_hints(hints)
 
         try:
             meta = MetaInfo(raw_title)
@@ -1416,6 +1602,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "original_title": self._clean_title(
                     getattr(meta, "original_name", "") or getattr(meta, "org_string", "")
                 ),
+                "release_group": self._clean_title(getattr(meta, "resource_team", "")),
             }
             hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "", 0)})
             if parsed_hints["media_type"]:
@@ -1424,7 +1611,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 logger.info(f"[TMDB识别增强] 使用 MoviePilot 解析标题：{raw_title} => {title}")
         except Exception as err:
             logger.warning(f"[TMDB识别增强] MoviePilot 标题解析失败，回退原标题：{raw_title}，{err}")
-        return title, hints
+        return title, self._enrich_release_group_hints(hints)
 
     def _prepare_event_recognition_input(
             self, event_data: Any, raw_title: str
@@ -1445,11 +1632,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     or getattr(runtime_meta, "org_string", "")
                     or raw_title
                 ),
+                "release_group": self._clean_title(getattr(runtime_meta, "resource_team", "")),
             }
             hints.update({key: value for key, value in runtime_hints.items() if value not in (None, "")})
             if runtime_hints["media_type"]:
                 hints["media_type_source"] = "moviepilot"
-            return parsed_name, hints
+            return parsed_name, self._enrich_release_group_hints(hints)
 
         parsed_name = self._clean_title(self._event_get(event_data, "parsed_name"))
         if not parsed_name:
@@ -1464,11 +1652,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "original_title": self._clean_title(
                 self._event_get(event_data, "original_title") or raw_title
             ),
+            "release_group": self._clean_title(self._event_get(event_data, "release_group")),
         }
         hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "")})
         if parsed_hints["media_type"]:
             hints["media_type_source"] = "moviepilot"
-        return parsed_name, hints
+        return parsed_name, self._enrich_release_group_hints(hints)
+
+    def _enrich_release_group_hints(self, hints: Dict[str, Any]) -> Dict[str, Any]:
+        """把制作组分类转换为 TMDB 候选选择可用的轻量证据。"""
+        if not self._config.get("release_group_assist_enabled", True):
+            return hints
+        profile = self._release_group_registry.classify(hints.get("release_group"))
+        if profile.get("kind") in ("animation", "live_action"):
+            hints["release_group_profile"] = profile
+        return hints
 
     def _apply_runtime_meta(
             self, best: Dict[str, Any], adjustment: Optional[Dict[str, Any]]
@@ -1688,6 +1886,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         candidates, type_constraint = self._filter_candidates_by_media_type(
             candidates, hints, type_constraint
         )
+        candidates, release_group_preference = self._prefer_candidates_by_release_group(
+            candidates, hints
+        )
         diagnostics = [self._score_candidate(title, queries, item, hints) for item in candidates]
         best = diagnostics[0] if diagnostics else None
         runner_up = diagnostics[1] if len(diagnostics) > 1 else None
@@ -1701,7 +1902,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "title": title,
             "reason": (
                 f"单次 TMDB Multi Search 已直接采用第一个{type_constraint.get('label') or '影视'}结果；"
-                "评分与分差未参与决策"
+                + (
+                    f"制作组标记为{release_group_preference['label']}，已优先符合题材的候选；"
+                    if release_group_preference.get("applied") else ""
+                )
+                + "评分与分差未参与决策"
                 if best else (
                     f"类型约束为{type_constraint['label']}，TMDB 未返回该类型候选"
                     if type_constraint.get("active") else
@@ -1715,11 +1920,52 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "margin": 0.0,
             "web_search": {"attempted": False, "reason": "首结果模式不执行外部兜底"},
             "type_constraint": type_constraint,
+            "release_group_preference": release_group_preference,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         if include_candidates:
             result["candidates"] = diagnostics
         return result
+
+    def _prefer_candidates_by_release_group(
+            self, candidates: List[Dict[str, Any]], hints: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """首结果模式中稳定优先制作组题材一致候选，无一致项时保持 TMDB 顺序。"""
+        profile = hints.get("release_group_profile") or {}
+        kind = str(profile.get("kind") or "unknown")
+        summary = {
+            "active": kind in ("animation", "live_action"),
+            "applied": False,
+            "kind": kind,
+            "label": "动漫" if kind == "animation" else (
+                "真人电视剧" if kind == "live_action" else "未分类"
+            ),
+            "release_group": profile.get("release_group") or "",
+        }
+        if not summary["active"] or len(candidates) < 2:
+            return candidates, summary
+
+        preferred: List[Dict[str, Any]] = []
+        unknown: List[Dict[str, Any]] = []
+        conflicting: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            genre_ids = {
+                self._safe_int(item.get("id") if isinstance(item, dict) else item, 0)
+                for item in (candidate.get("genres") or candidate.get("genre_ids") or [])
+            }
+            genre_ids.discard(0)
+            if not genre_ids:
+                unknown.append(candidate)
+                continue
+            is_animation = 16 in genre_ids
+            matched = (kind == "animation" and is_animation) or (kind == "live_action" and not is_animation)
+            (preferred if matched else conflicting).append(candidate)
+        if not preferred:
+            return candidates, summary
+        reordered = [*preferred, *unknown, *conflicting]
+        summary["applied"] = reordered[0] is not candidates[0]
+        summary["matching_count"] = len(preferred)
+        return reordered, summary
 
     def _resolve_media_type_constraint(self, hints: Dict[str, Any]) -> Dict[str, Any]:
         """把明确类型或季集坐标转成候选硬约束，避免电视剧被电影候选截胡。"""
@@ -2115,6 +2361,26 @@ class TmdbRecognizeEnhancer(_PluginBase):
             type_component = 100.0 if candidate_type == requested_type else 0.0
             weighted.append((type_component, float(self._config["type_weight"])))
 
+        candidate_genre_ids = {
+            genre_id for item in (candidate.get("genres") or candidate.get("genre_ids") or [])
+            if (genre_id := self._safe_int(
+                item.get("id") if isinstance(item, dict) else item, 0
+            ))
+        }
+        release_group_component = None
+        release_group_profile = hints.get("release_group_profile") or {}
+        release_group_kind = str(release_group_profile.get("kind") or "unknown")
+        if candidate_genre_ids and release_group_kind in ("animation", "live_action"):
+            is_animation = 16 in candidate_genre_ids
+            release_group_component = 100.0 if (
+                (release_group_kind == "animation" and is_animation)
+                or (release_group_kind == "live_action" and not is_animation)
+            ) else 0.0
+            weighted.append((
+                release_group_component,
+                float(self._config.get("release_group_type_weight") or 0),
+            ))
+
         weight_total = sum(weight for _, weight in weighted if weight > 0)
         score = sum(value * weight for value, weight in weighted if weight > 0) / weight_total if weight_total else 0
         if exact_original:
@@ -2166,12 +2432,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     best_components["matched_name"],
                 ) if (normalized := self._normalize_text(value))
             )),
-            "genre_ids": sorted({
-                genre_id for item in (candidate.get("genres") or candidate.get("genre_ids") or [])
-                if (genre_id := self._safe_int(
-                    item.get("id") if isinstance(item, dict) else item, 0
-                ))
-            }),
+            "genre_ids": sorted(candidate_genre_ids),
+            "release_group_evidence": {
+                "kind": release_group_kind,
+                "label": "动漫" if release_group_kind == "animation" else (
+                    "真人电视剧" if release_group_kind == "live_action" else "未分类"
+                ),
+                "component": release_group_component,
+                "release_group": release_group_profile.get("release_group") or "",
+                "matched_rules": release_group_profile.get("matches") or [],
+            },
             "season_numbers": sorted(season_numbers),
             "number_of_seasons": self._safe_int(candidate.get("number_of_seasons"), 0),
             "title_season": (
@@ -2200,6 +2470,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "anchor": anchor_score,
                 "year": year_component,
                 "type": type_component,
+                "release_group": release_group_component,
                 "web": web_evidence,
             },
             "queries": [hit.get("query") for hit in hits],
@@ -2583,6 +2854,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "use_year_hint", "use_original_title_evidence", "web_search_fallback",
             "main_title_fallback",
             "progressive_fallback", "fetch_aliases", "episode_normalizer_enabled",
+            "release_group_assist_enabled", "custom_rename_fields_enabled",
         )
         for key in bool_keys:
             merged[key] = bool(merged.get(key))
@@ -2609,6 +2881,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "fallback_anchor_min": (0.0, 100.0),
             "year_weight": (0.0, 100.0),
             "type_weight": (0.0, 100.0),
+            "release_group_type_weight": (0.0, 30.0),
             "season_missing_penalty": (0.0, 100.0),
             "web_search_min_evidence": (50.0, 100.0),
         }
@@ -3476,3 +3749,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         finally:
             self._tmdb_api = None
             self._episode_normalizer = None
+
+
+# TransferRenameBuild 并非所有 MP 版本都提供。动态注册可避免旧版本在导入
+# 插件时直接因枚举成员不存在而失败。
+_transfer_rename_build_event = getattr(ChainEventType, "TransferRenameBuild", None)
+if _transfer_rename_build_event is not None:
+    eventmanager.register(_transfer_rename_build_event, priority=5)(
+        TmdbRecognizeEnhancer.on_transfer_rename_build
+    )
