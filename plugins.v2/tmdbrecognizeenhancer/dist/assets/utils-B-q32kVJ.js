@@ -8,9 +8,13 @@ const _export_sfc = (sfc, props) => {
 
 const DEFAULT_CONFIG = {
   enabled: false,
+  recognizer_enabled: true,
   show_sidebar_nav: true,
   debug: false,
+  recognition_mode: 'tmdb_first',
   prefer_parsed_title: true,
+  use_year_hint: true,
+  use_original_title_evidence: true,
   web_search_fallback: false,
   web_search_engine: 'auto',
   web_search_max_results: 8,
@@ -30,6 +34,8 @@ const DEFAULT_CONFIG = {
   prefix_weight: 14,
   rank_weight: 10,
   query_confidence_weight: 18,
+  anchor_weight: 24,
+  fallback_anchor_min: 32,
   year_weight: 8,
   type_weight: 6,
   season_missing_penalty: 20,

@@ -16,6 +16,7 @@ const notice = ref('')
 const snackbar = ref(false)
 const rules = ref([])
 const rulesOpen = ref(true)
+const ruleView = ref('grid')
 const ruleSearch = ref('')
 const ruleQuarter = ref('all')
 const deleteRulesDialog = ref(false)
@@ -43,9 +44,7 @@ const board = ref({
   multiOnly: false,
 })
 const batchPreference = ref('default')
-const previewTitle = ref('')
-const previewLoading = ref(false)
-const previewResult = ref(null)
+const boardView = ref('grid')
 const editorOpen = ref(false)
 const editorLoading = ref(false)
 const inspection = ref(null)
@@ -216,23 +215,6 @@ function scheduleScanPoll(scanningCount) {
   scanTimer = null
   if (scanningCount > 0) {
     scanTimer = setTimeout(() => loadQuarter(false, true), 1800)
-  }
-}
-
-async function runPreview() {
-  if (!previewTitle.value.trim()) return
-  previewLoading.value = true
-  previewResult.value = null
-  error.value = ''
-  try {
-    previewResult.value = unwrapResponse(await props.api.post(
-      `${props.pluginBase}/episode-normalizer/preview`,
-      { title: previewTitle.value },
-    ))
-  } catch (err) {
-    error.value = err?.message || '归一化试跑失败'
-  } finally {
-    previewLoading.value = false
   }
 }
 
@@ -426,6 +408,8 @@ function restoreUiState() {
     if (typeof saved.ruleQuarter === 'string') ruleQuarter.value = saved.ruleQuarter
     if (typeof saved.batchPreference === 'string') batchPreference.value = saved.batchPreference
     if (typeof saved.rulesOpen === 'boolean') rulesOpen.value = saved.rulesOpen
+    if (['grid', 'list', 'compact'].includes(saved.ruleView)) ruleView.value = saved.ruleView
+    if (['grid', 'list', 'compact'].includes(saved.boardView)) boardView.value = saved.boardView
   } catch (_) {
     // 浏览器禁用存储或旧数据损坏时使用默认值。
   }
@@ -439,6 +423,8 @@ function persistUiState() {
       ruleQuarter: ruleQuarter.value,
       batchPreference: batchPreference.value,
       rulesOpen: rulesOpen.value,
+      ruleView: ruleView.value,
+      boardView: boardView.value,
     }))
   } catch (_) {
     // 无痕模式下存储失败不影响功能。
@@ -447,13 +433,13 @@ function persistUiState() {
 
 restoreUiState()
 watch(() => [board.value.year, board.value.quarter], () => loadQuarter(false))
-watch([board, ruleSearch, ruleQuarter, batchPreference, rulesOpen], persistUiState, { deep: true })
+watch([board, ruleSearch, ruleQuarter, batchPreference, rulesOpen, ruleView, boardView], persistUiState, { deep: true })
 onBeforeUnmount(() => { if (scanTimer) clearTimeout(scanTimer) })
 onMounted(async () => {
   try {
     await Promise.all([loadRules(), loadQuarter(false)])
   } catch (err) {
-    error.value = err?.message || '集数归一化数据加载失败'
+    error.value = err?.message || '集数偏移数据加载失败'
   }
 })
 </script>
@@ -465,39 +451,10 @@ onMounted(async () => {
       v-if="!runtimeStatus.runtime_compatible || !runtimeStatus.plugin_first"
       type="warning" variant="tonal" class="mb-4"
     >
-      <div class="font-weight-bold">归一化暂不能接管实际整理</div>
+      <div class="font-weight-bold">集数偏移暂不能接管实际整理</div>
       <div v-if="!runtimeStatus.runtime_compatible">{{ runtimeStatus.runtime_message }}</div>
       <div v-if="!runtimeStatus.plugin_first">请在 MoviePilot 中开启“识别插件优先”。</div>
     </VAlert>
-
-    <VCard variant="outlined" class="normalizer-card mb-4">
-      <VCardItem>
-        <template #prepend><VAvatar color="primary" variant="tonal"><VIcon icon="mdi-flask-outline" /></VAvatar></template>
-        <VCardTitle>标题试跑</VCardTitle>
-        <VCardSubtitle>粘贴原标题，自动解析季集、匹配 TMDB 并检查维护规则</VCardSubtitle>
-      </VCardItem>
-      <VCardText>
-        <div class="preview-line">
-          <VTextField
-            v-model="previewTitle" label="原标题或完整文件名" hide-details
-            prepend-inner-icon="mdi-file-video-outline" @keyup.enter="runPreview"
-          />
-          <VBtn color="primary" prepend-icon="mdi-play" :loading="previewLoading" @click="runPreview">开始试跑</VBtn>
-        </div>
-        <VAlert v-if="previewResult" :type="previewResult.result?.applied ? 'success' : 'info'" variant="tonal" class="mt-4">
-          <div class="font-weight-bold">
-            {{ previewResult.parsed_title || '未提取标题' }}
-            <span v-if="previewResult.recognition?.best"> · TMDB {{ previewResult.recognition.best.tmdb_id }}</span>
-          </div>
-          <div v-if="previewResult.result">
-            S{{ previewResult.result.season ?? '?' }}E{{ previewResult.result.episode ?? '?' }}
-            <span v-if="previewResult.result.end_episode">-E{{ previewResult.result.end_episode }}</span>
-            · {{ previewResult.result.reason }}
-          </div>
-          <div v-else>{{ previewResult.recognition?.reason || '没有获得可信 TMDB 候选' }}</div>
-        </VAlert>
-      </VCardText>
-    </VCard>
 
     <VCard variant="outlined" class="normalizer-card mb-4">
       <VCardItem>
@@ -519,6 +476,11 @@ onMounted(async () => {
               clearable hide-details density="compact"
             />
             <VSelect v-model="ruleQuarter" :items="ruleQuarterOptions" label="按季度查看" hide-details density="compact" />
+            <VBtnToggle v-model="ruleView" mandatory density="compact" variant="outlined" divided>
+              <VBtn value="grid" icon="mdi-view-grid-outline" title="平铺" />
+              <VBtn value="list" icon="mdi-view-list-outline" title="列表" />
+              <VBtn value="compact" icon="mdi-view-headline" title="紧凑" />
+            </VBtnToggle>
             <VBtn color="primary" variant="tonal" prepend-icon="mdi-plus" @click="openManualDialog">手动添加</VBtn>
             <VBtn
               color="error" variant="tonal" prepend-icon="mdi-delete-sweep-outline"
@@ -531,7 +493,7 @@ onMounted(async () => {
               <strong>{{ group.quarter }}</strong>
               <span class="text-caption text-medium-emphasis">{{ group.items.length }} 条</span>
             </div>
-            <div class="rules-grid">
+            <div :class="['rules-grid', `view-${ruleView}`]">
               <VCard v-for="rule in group.items" :key="rule.tmdb_id" variant="tonal" class="rule-card">
                 <VCardText class="d-flex align-center ga-3">
                   <VAvatar :color="rule.enabled ? 'success' : 'default'" variant="tonal"><VIcon icon="mdi-animation-outline" /></VAvatar>
@@ -561,7 +523,16 @@ onMounted(async () => {
         <template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-view-dashboard-outline" /></VAvatar></template>
         <VCardTitle>季度番剧看板</VCardTitle>
         <VCardSubtitle>AniList 日漫主目录 · Bangumi/TMDB 补充国漫与海外动画；当前仅显示 {{ quarterKey }}</VCardSubtitle>
-        <template #append><VBtn icon="mdi-refresh" variant="text" :loading="catalogLoading" @click="loadQuarter(true)" /></template>
+        <template #append>
+          <div class="d-flex align-center ga-2">
+            <VBtnToggle v-model="boardView" mandatory density="compact" variant="outlined" divided>
+              <VBtn value="grid" icon="mdi-view-grid-outline" title="平铺" />
+              <VBtn value="list" icon="mdi-view-list-outline" title="列表" />
+              <VBtn value="compact" icon="mdi-view-headline" title="紧凑" />
+            </VBtnToggle>
+            <VBtn icon="mdi-refresh" variant="text" :loading="catalogLoading" @click="loadQuarter(true)" />
+          </div>
+        </template>
       </VCardItem>
       <VCardText>
         <div class="board-controls mb-3">
@@ -602,7 +573,7 @@ onMounted(async () => {
           <span v-if="catalogMeta.scanning_count"> · {{ catalogMeta.scanning_count }} 条正在扫描</span>
           <span v-if="catalogMeta.updated_at"> · 更新于 {{ catalogMeta.updated_at }}</span>
         </div>
-        <div class="catalog-grid">
+        <div :class="['catalog-grid', `view-${boardView}`]">
           <VCard v-for="item in filteredCatalog" :key="item.id" variant="outlined" class="catalog-card">
             <div class="select-corner"><VCheckbox v-model="selectedIds" :value="item.id" hide-details density="compact" /></div>
             <VImg v-if="item.poster" :src="item.poster" height="170" cover />
@@ -689,7 +660,7 @@ onMounted(async () => {
           <VCardTitle>删除当前筛选结果？</VCardTitle>
           <VCardSubtitle>将删除 {{ filteredRules.length }} 条维护规则，季度看板数据不会被删除</VCardSubtitle>
         </VCardItem>
-        <VCardText>此操作会立即停止这些 TMDB 条目的集数归一化，请确认当前季度和搜索条件正确。</VCardText>
+        <VCardText>此操作会立即停止这些 TMDB 条目的集数偏移，请确认当前季度和搜索条件正确。</VCardText>
         <VCardActions class="pa-4">
           <VSpacer /><VBtn variant="text" @click="deleteRulesDialog = false">取消</VBtn>
           <VBtn color="error" :loading="deleteRulesLoading" @click="deleteFilteredRules">确认删除</VBtn>
@@ -813,16 +784,29 @@ onMounted(async () => {
 .episode-normalizer :deep(.v-card-title),
 .episode-normalizer :deep(.v-card-subtitle),
 .episode-normalizer :deep(.v-field-label) { overflow-wrap: anywhere; }
-.preview-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; }
 .board-controls { display: grid; grid-template-columns: 110px 100px minmax(210px, 1fr) 135px 135px 135px auto; gap: 10px; align-items: center; }
 .batch-bar { display: flex; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .055); }
 .batch-target { max-width: 280px; }
 .catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 14px; }
 .catalog-card { position: relative; overflow: hidden; }
 .catalog-card :deep(.v-card-actions) { flex-wrap: wrap; row-gap: 6px; }
+.catalog-grid.view-list { grid-template-columns: 1fr; }
+.catalog-grid.view-list .catalog-card { display: grid; grid-template-columns: 190px minmax(0, 1fr) auto; grid-template-rows: auto 1fr; align-items: center; }
+.catalog-grid.view-list .catalog-card :deep(.v-img) { grid-column: 1; grid-row: 1 / 3; height: 150px !important; }
+.catalog-grid.view-list .catalog-card :deep(.v-card-item) { grid-column: 2; grid-row: 1; }
+.catalog-grid.view-list .catalog-card :deep(.v-card-text) { grid-column: 2; grid-row: 2; }
+.catalog-grid.view-list .catalog-card :deep(.v-card-actions) { grid-column: 3; grid-row: 1 / 3; padding-inline-end: 16px; }
+.catalog-grid.view-compact { grid-template-columns: 1fr; gap: 7px; }
+.catalog-grid.view-compact .catalog-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
+.catalog-grid.view-compact .catalog-card :deep(.v-img), .catalog-grid.view-compact .catalog-card :deep(.v-card-text) { display: none; }
+.catalog-grid.view-compact .catalog-card :deep(.v-card-item) { padding-block: 9px; padding-inline-start: 48px; }
+.catalog-grid.view-compact .catalog-card :deep(.v-card-actions) { padding: 8px 12px; }
 .select-corner { position: absolute; z-index: 2; inset-block-start: 6px; inset-inline-start: 6px; border-radius: 10px; background: rgba(var(--v-theme-surface), .9); }
-.rules-controls { display: grid; grid-template-columns: minmax(220px, 1fr) 160px auto auto; gap: 10px; align-items: center; }
+.rules-controls { display: grid; grid-template-columns: minmax(220px, 1fr) 160px auto auto auto; gap: 10px; align-items: center; }
 .rules-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
+.rules-grid.view-list, .rules-grid.view-compact { grid-template-columns: 1fr; }
+.rules-grid.view-compact .rule-card :deep(.v-card-text) { padding-block: 8px; }
+.rules-grid.view-compact .rule-card :deep(.v-avatar) { width: 30px !important; height: 30px !important; }
 .rules-scroll { max-height: 480px; overflow-y: auto; }
 .rule-group-title { display: flex; align-items: center; gap: 7px; color: rgba(var(--v-theme-on-surface), .82); }
 .rule-card { border: 1px solid rgba(var(--v-theme-success), .1); }
@@ -843,7 +827,6 @@ onMounted(async () => {
   .board-controls > :nth-child(6), .board-controls > :nth-child(7) { grid-column: span 1; }
 }
 @media (max-width: 700px) {
-  .preview-line { grid-template-columns: 1fr; }
   .board-controls { grid-template-columns: 1fr; }
   .rules-controls { grid-template-columns: 1fr; }
   .batch-bar { align-items: stretch; flex-direction: column; }
@@ -851,5 +834,7 @@ onMounted(async () => {
   .rules-grid { grid-template-columns: 1fr; }
   .manual-match { grid-template-columns: 1fr; min-width: 160px; }
   .tmdb-correction { grid-template-columns: 1fr; }
+  .catalog-grid.view-list .catalog-card { grid-template-columns: 105px minmax(0, 1fr); }
+  .catalog-grid.view-list .catalog-card :deep(.v-card-actions) { grid-column: 1 / 3; grid-row: 3; padding-inline: 12px; }
 }
 </style>

@@ -28,7 +28,7 @@ onMounted(loadStatus)
     <VCardItem>
       <template #prepend><VAvatar color="primary" variant="tonal"><VIcon icon="mdi-database-search-outline" /></VAvatar></template>
       <VCardTitle>{{ attrs.title || 'TMDB 识别增强' }}</VCardTitle>
-      <VCardSubtitle>{{ summary.enabled ? '失败识别兜底运行中' : '插件当前未启用' }}</VCardSubtitle>
+      <VCardSubtitle>{{ summary.enabled ? '插件总开关已开启' : '插件当前未启用' }}</VCardSubtitle>
     </VCardItem>
     <VCardText>
       <div class="dashboard-metrics">

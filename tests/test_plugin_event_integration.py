@@ -136,6 +136,89 @@ def test_event_searches_post_word_meta_name(monkeypatch):
 
     searched_title = plugin._recognize_title.call_args.args[0]
     assert searched_title == "识别词处理后的标题"
+    assert plugin._recognize_title.call_args.kwargs["hints"]["year"] == "2026"
+
+
+def test_runtime_original_name_is_forwarded_as_anchor_evidence(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    runtime_meta = SimpleNamespace(
+        name="识别词处理后的标题", original_name="未应用识别词的标题", org_string="原标题",
+        year="2025", type=module.MediaType.TV, begin_season=1, begin_episode=2,
+        end_episode=None, tmdbid=None, doubanid=None, bangumiid=None,
+    )
+    plugin = _plugin_with_runtime(module, runtime_meta)
+    plugin._recognize_title = Mock(return_value={
+        "accepted": False, "title": runtime_meta.name, "reason": "test",
+        "queries": [], "best": None, "margin": 0,
+    })
+    plugin._append_history = Mock()
+
+    plugin.on_name_recognize(SimpleNamespace(event_data={"title": "[Group] Raw File.mkv"}))
+
+    hints = plugin._recognize_title.call_args.kwargs["hints"]
+    assert hints["year"] == "2025"
+    assert hints["original_title"] == "未应用识别词的标题"
+
+
+def test_tmdb_first_mode_uses_first_result_without_score_or_margin(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "enabled": True, "recognition_mode": "tmdb_first", "fetch_aliases": False,
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 20, "media_type": "tv", "name": "TMDB First", "first_air_date": "2020-01-01"},
+        {"id": 10, "media_type": "tv", "name": "Higher Text Match", "first_air_date": "2025-01-01"},
+    ])
+
+    result = plugin._recognize_title("Some Input", hints={"year": "2025"}, include_candidates=True)
+
+    assert result["accepted"] is True
+    assert result["selection_mode"] == "tmdb_first"
+    assert result["best"]["tmdb_id"] == 20
+    assert result["best"]["score"] == 100.0
+    assert result["margin"] == 0.0
+
+
+def test_scored_fallback_requires_relation_to_unshortened_title(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "scored", "fallback_anchor_min": 60,
+        "fetch_aliases": False,
+    })
+    candidate = {
+        "id": 99, "media_type": "tv", "name": "Completely Different Show",
+        "first_air_date": "2025-01-01", "_query_hits": [{
+            "query": "Different Show", "query_index": 2, "rank": 0,
+            "result_count": 1, "source": "tmdb",
+        }],
+    }
+
+    scored = plugin._score_candidate(
+        "Original Long Anime Title", ["Original Long Anime Title", "Different Show"],
+        candidate, {"original_title": "Original Long Anime Title"},
+    )
+
+    assert scored["fallback_anchor_ok"] is False
+    assert scored["anchor_score"] < 60
+
+
+def test_web_evidence_requires_direct_matching_tmdb_link(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    candidate = {"id": 123, "media_type": "tv", "name": "Original Anime Title"}
+    generic = plugin._best_web_evidence("Original Anime Title", candidate, [{
+        "title": "Original Anime Title TMDB", "snippet": "Original Anime Title",
+        "url": "https://example.com/article",
+    }])
+    direct = plugin._best_web_evidence("Original Anime Title", candidate, [{
+        "title": "Original Anime Title", "snippet": "Original Anime Title",
+        "url": "https://www.themoviedb.org/tv/123-original-anime-title",
+    }])
+
+    assert generic["score"] == 0
+    assert direct["score"] > 0
 
 
 def test_traditional_fixed_tmdb_id_is_never_researched_or_overwritten(monkeypatch):
@@ -160,6 +243,30 @@ def test_traditional_fixed_tmdb_id_is_never_researched_or_overwritten(monkeypatc
 
     plugin._recognize_title.assert_not_called()
     assert runtime_meta.tmdbid == 123456
+
+
+def test_recognizer_module_switch_does_not_disable_fixed_id_episode_stage(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    runtime_meta = SimpleNamespace(
+        name="固定 TMDB 标题", year="2026", type=module.MediaType.TV,
+        begin_season=1, begin_episode=13, end_episode=None, tmdbid=123456,
+        doubanid=None, bangumiid=None,
+    )
+    plugin = _plugin_with_runtime(module, runtime_meta)
+    plugin._config = plugin._normalize_config({
+        "enabled": True, "recognizer_enabled": False, "episode_normalizer_enabled": True,
+    })
+    plugin._recognize_title = Mock()
+    plugin._normalize_best_episode = Mock(return_value={
+        "applied": True, "season": 2, "episode": 1, "end_episode": None,
+        "episode_group": "group", "reason": "test",
+    })
+    plugin._append_history = Mock()
+
+    plugin.on_name_recognize(SimpleNamespace(event_data={"title": "Fixed Show E13.mkv"}))
+
+    plugin._recognize_title.assert_not_called()
+    assert (runtime_meta.begin_season, runtime_meta.begin_episode) == (2, 1)
 
 
 def test_anilist_quarter_import_reads_all_pages(monkeypatch):

@@ -33,9 +33,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
     """提供可解释的 TMDB 候选选择与目标编集季集归一化。"""
 
     plugin_name = "TMDB 识别增强"
-    plugin_desc = "增强 TMDB 候选识别，并将动漫季集归一化到默认编集或选定剧集组。"
+    plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.3.7"
+    plugin_version = "0.4.0"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -51,9 +51,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
     CATALOG_SCHEMA_VERSION = 2
     DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
+        "recognizer_enabled": True,
         "show_sidebar_nav": True,
         "debug": False,
+        "recognition_mode": "tmdb_first",
         "prefer_parsed_title": True,
+        "use_year_hint": True,
+        "use_original_title_evidence": True,
         "web_search_fallback": False,
         "web_search_engine": "auto",
         "web_search_max_results": 8,
@@ -73,6 +77,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "prefix_weight": 14.0,
         "rank_weight": 10.0,
         "query_confidence_weight": 18.0,
+        "anchor_weight": 24.0,
+        "fallback_anchor_min": 32.0,
         "year_weight": 8.0,
         "type_weight": 6.0,
         "season_missing_penalty": 20.0,
@@ -94,7 +100,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "series", "anime",
     }
     _web_search_engines = {"auto", "duckduckgo", "google", "brave", "yahoo", "yandex", "mojeek"}
-    _ddgs_auto_backend = "duckduckgo,google,brave,yahoo,yandex,mojeek"
+    # 多后端聚合每次返回顺序都可能不同。“自动”固定使用单一后端，用户仍可
+    # 显式选择其它引擎；外部搜索仅提供 TMDB 直链交叉证据，不直接决定结果。
+    _ddgs_auto_backend = "duckduckgo"
 
     def __init__(self):
         """初始化运行时对象，网络客户端延迟到插件初始化阶段创建。"""
@@ -104,6 +112,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._episode_normalizer: Optional[EpisodeNormalizer] = None
         self._runtime_adapter = MoviePilotRuntimeAdapter()
         self._history_lock = threading.RLock()
+        self._web_cache_lock = threading.RLock()
+        self._web_cache: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
         self._catalog_lock = threading.RLock()
         self._catalog_scans: set = set()
 
@@ -302,6 +312,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "rejected": len(history) - accepted,
                     "acceptance_rate": round(accepted * 100 / len(history), 1) if history else 0,
                 },
+                "modules": {
+                    "recognizer": {
+                        "enabled": bool(self._config.get("recognizer_enabled")),
+                        "mode": self._config.get("recognition_mode"),
+                        "status": "运行中" if self.get_state() and self._config.get("recognizer_enabled") else "已停用",
+                    },
+                    "episode_offset": {
+                        "enabled": bool(self._config.get("episode_normalizer_enabled")),
+                        "status": (
+                            "运行中" if self.get_state() and self._config.get("episode_normalizer_enabled")
+                            and self._runtime_adapter.compatible else "等待运行时适配"
+                            if self.get_state() and self._config.get("episode_normalizer_enabled") else "已停用"
+                        ),
+                    },
+                },
                 "history": history,
                 "episode_normalizer": {
                     "enabled": bool(self._config.get("episode_normalizer_enabled")),
@@ -342,10 +367,80 @@ class TmdbRecognizeEnhancer(_PluginBase):
         try:
             result = self._recognize_title(title, hints=hints, include_candidates=True)
             result["original_title"] = raw_title if raw_title != title else ""
+            episode_preview = self._preview_episode_pipeline(
+                best=result.get("best") if result.get("accepted") else None,
+                hints=hints,
+                raw_title=raw_title,
+                parsed_title=title,
+            )
+            result["episode_rule"] = episode_preview.get("rule")
+            result["episode_adjustment"] = episode_preview.get("result")
+            result["pipeline"] = [
+                {
+                    "module": "MoviePilot 解析",
+                    "status": "completed",
+                    "summary": f"{title} · 年份 {hints.get('year') or '未提供'} · S{hints.get('season') or '?'}E{hints.get('episode') or '?'}",
+                },
+                {
+                    "module": "TMDB 搜索增强",
+                    "status": "accepted" if result.get("accepted") else "rejected",
+                    "summary": result.get("reason"),
+                },
+                {
+                    "module": "集数偏移",
+                    "status": (
+                        "applied" if (episode_preview.get("result") or {}).get("applied") else "skipped"
+                    ),
+                    "summary": (episode_preview.get("result") or {}).get("reason"),
+                },
+            ]
             return schemas.Response(success=True, data=result)
         except Exception as err:
             logger.error(f"[TMDB识别增强] 试跑失败：{err}")
             return schemas.Response(success=False, message=f"试跑失败：{err}")
+
+    def _preview_episode_pipeline(
+            self,
+            best: Optional[Dict[str, Any]],
+            hints: Dict[str, Any],
+            raw_title: str,
+            parsed_title: str,
+    ) -> Dict[str, Any]:
+        """综合试跑中的集数偏移阶段，不依赖运行时适配器，也不写入 MP。"""
+        if not self._config.get("episode_normalizer_enabled"):
+            return {"rule": None, "result": {
+                "applied": False, "strategy": "module-disabled", "reason": "集数偏移模块未启用",
+                "season": hints.get("season"), "episode": hints.get("episode"),
+            }}
+        if not best:
+            return {"rule": None, "result": {
+                "applied": False, "strategy": "recognition-missing", "reason": "TMDB 未通过，无法检查偏移",
+                "season": hints.get("season"), "episode": hints.get("episode"),
+            }}
+        if self._normalize_media_type(best.get("media_type")) != MediaType.TV:
+            return {"rule": None, "result": {
+                "applied": False, "strategy": "not-tv", "reason": "电影不执行集数偏移",
+                "season": hints.get("season"), "episode": hints.get("episode"),
+            }}
+        tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
+        rule = next((
+            item for item in self._read_episode_rules()
+            if item.get("enabled", True) and self._safe_int(item.get("tmdb_id"), 0) == tmdb_id
+        ), None)
+        if not rule:
+            return {"rule": None, "result": {
+                "applied": False, "strategy": "rule-missing", "reason": f"TMDB {tmdb_id} 没有维护偏移规则",
+                "season": hints.get("season"), "episode": hints.get("episode"),
+            }}
+        result = self._normalizer().normalize(
+            rule=rule,
+            season=self._optional_int(hints.get("season")),
+            episode=self._optional_int(hints.get("episode")),
+            end_episode=self._optional_int(hints.get("end_episode")),
+            raw_title=raw_title,
+            parsed_name=parsed_title,
+        )
+        return {"rule": rule, "result": result}
 
     def clear_history_api(self) -> schemas.Response:
         """清空插件保存的最近识别历史。"""
@@ -1190,6 +1285,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return
         if other_fixed_id:
             return
+        if not self._config.get("recognizer_enabled", True):
+            return
 
         try:
             result = self._recognize_title(title, hints=hints, include_candidates=False)
@@ -1289,6 +1386,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "season": self._safe_int(getattr(meta, "begin_season", 0), 0),
                 "episode": self._safe_int(getattr(meta, "begin_episode", 0), 0),
                 "end_episode": self._optional_int(getattr(meta, "end_episode", None)),
+                "original_title": self._clean_title(
+                    getattr(meta, "original_name", "") or getattr(meta, "org_string", "")
+                ),
             }
             hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "", 0)})
             if self._config.get("debug") and title != raw_title:
@@ -1311,6 +1411,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "season": self._optional_int(getattr(runtime_meta, "begin_season", None)),
                 "episode": self._optional_int(getattr(runtime_meta, "begin_episode", None)),
                 "end_episode": self._optional_int(getattr(runtime_meta, "end_episode", None)),
+                "original_title": self._clean_title(
+                    getattr(runtime_meta, "original_name", "")
+                    or getattr(runtime_meta, "org_string", "")
+                    or raw_title
+                ),
             }
             hints.update({key: value for key, value in runtime_hints.items() if value not in (None, "")})
             return parsed_name, hints
@@ -1325,6 +1430,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "season": self._optional_int(self._event_get(event_data, "parsed_season")),
             "episode": self._optional_int(self._event_get(event_data, "parsed_episode")),
             "end_episode": self._optional_int(self._event_get(event_data, "parsed_end_episode")),
+            "original_title": self._clean_title(
+                self._event_get(event_data, "original_title") or raw_title
+            ),
         }
         hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "")})
         return parsed_name, hints
@@ -1421,6 +1529,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             if value not in (None, "", 0):
                 merged_hints[key] = value
         hints = merged_hints
+        if not self._config.get("use_year_hint", True):
+            hints.pop("year", None)
+        if not self._config.get("use_original_title_evidence", True):
+            hints.pop("original_title", None)
+        if self._config.get("recognition_mode") == "tmdb_first":
+            return self._recognize_tmdb_first_result(title, hints, include_candidates)
+
         queries = self._build_queries(title)
         candidates = self._search_candidates(queries)
         scored = [self._score_candidate(title, queries, candidate, hints) for candidate in candidates]
@@ -1460,6 +1575,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
         result = {
             "accepted": accepted,
+            "selection_mode": "scored",
             "title": title,
             "reason": reason,
             "queries": queries,
@@ -1472,6 +1588,43 @@ class TmdbRecognizeEnhancer(_PluginBase):
         }
         if include_candidates:
             result["candidates"] = scored
+        return result
+
+    def _recognize_tmdb_first_result(
+            self,
+            title: str,
+            hints: Dict[str, Any],
+            include_candidates: bool,
+    ) -> Dict[str, Any]:
+        """独立执行一次 TMDB Multi Search，并直接采用第一个影视候选。"""
+        query = self._clean_title(title)
+        queries = [query] if query else []
+        candidates = self._search_candidates(queries)
+        diagnostics = [self._score_candidate(title, queries, item, hints) for item in candidates]
+        best = diagnostics[0] if diagnostics else None
+        runner_up = diagnostics[1] if len(diagnostics) > 1 else None
+        if best:
+            # 评分仅保留为诊断信息，不参与该模式的选择。
+            best["diagnostic_score"] = best.get("score")
+            best["score"] = 100.0
+        result = {
+            "accepted": bool(best),
+            "selection_mode": "tmdb_first",
+            "title": title,
+            "reason": (
+                "单次 TMDB Multi Search 已直接采用第一个影视结果；评分与分差未参与决策"
+                if best else "单次 TMDB Multi Search 未返回电影或电视剧结果"
+            ),
+            "queries": queries,
+            "hints": self._serialize_hints(hints),
+            "best": best,
+            "runner_up": runner_up,
+            "margin": 0.0,
+            "web_search": {"attempted": False, "reason": "首结果模式不执行外部兜底"},
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if include_candidates:
+            result["candidates"] = diagnostics
         return result
 
     def _search_candidates(self, queries: List[str]) -> List[Dict[str, Any]]:
@@ -1526,12 +1679,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
             hints: Dict[str, Any],
             candidates: List[Dict[str, Any]],
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        """用搜索结果发现 TMDB ID，并以标题共现证据增强已有候选。"""
-        query = f"{title} TMDB"
-        results = self._search_web(query)
+        """用稳定的 TMDB 直链结果发现 ID，并以原标题/别名共现进行验证。"""
+        evidence_titles = list(dict.fromkeys(
+            self._clean_title(value) for value in (title, hints.get("original_title"))
+            if self._clean_title(value)
+        ))[:2]
+        queries = [f'"{value}" site:themoviedb.org' for value in evidence_titles]
+        results: List[Dict[str, str]] = []
+        for query in queries:
+            for item in self._search_web(query):
+                results.append({**item, "source_query": query})
         summary = {
             "attempted": True,
-            "query": query,
+            "query": queries[0] if queries else "",
+            "queries": queries,
             "engine": self._config.get("web_search_engine", "auto"),
             "result_count": len(results),
             "discovered": [],
@@ -1599,6 +1760,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
         engine = str(self._config.get("web_search_engine") or "auto").strip().lower()
         backend = self._ddgs_auto_backend if engine == "auto" else engine
+        cache_key = (backend, self._normalize_text(query))
+        with self._web_cache_lock:
+            cached = self._web_cache.get(cache_key)
+            if cached is not None:
+                return deepcopy(cached)
         kwargs: Dict[str, Any] = {"timeout": int(self._config["web_search_timeout"])}
         proxy = self._proxy_url(getattr(settings, "PROXY", None))
         if proxy:
@@ -1610,7 +1776,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     max_results=int(self._config["web_search_max_results"]),
                     backend=backend,
                 ) or []
-                return [
+                results = [
                     {
                         "title": str(item.get("title") or "").strip(),
                         "snippet": str(item.get("body") or item.get("snippet") or "").strip(),
@@ -1619,6 +1785,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     for item in raw_results
                     if isinstance(item, dict)
                 ]
+                with self._web_cache_lock:
+                    self._web_cache[cache_key] = deepcopy(results)
+                return results
         except Exception as err:
             logger.warning(f"[TMDB识别增强] 搜索引擎兜底失败：{err}")
             return []
@@ -1637,6 +1806,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         best = {"score": 0.0, "title": "", "url": ""}
         candidate_type = self._normalize_media_type(candidate.get("media_type"))
         candidate_id = self._safe_int(candidate.get("id"), 0)
+        direct_occurrences = sum(
+            self._extract_tmdb_reference(item.get("url")) == (candidate_type, candidate_id)
+            for item in results
+        )
 
         for rank, result in enumerate(results):
             text = f"{result.get('title', '')} {result.get('snippet', '')}".strip()
@@ -1656,15 +1829,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
             direct_match = bool(
                 direct_reference and direct_reference == (candidate_type, candidate_id)
             )
+            if not direct_match:
+                # 普通网页中的同名文本不具备稳定身份，禁止给候选加证据。
+                continue
             if query_coverage >= 0.55 and alias_coverage >= 0.45:
                 score = (query_coverage * 0.45 + alias_coverage * 0.55) * 100
-                score += 4.0 if direct_match else 0.0
+                score += 4.0 + min(8.0, max(0, direct_occurrences - 1) * 4.0)
                 score -= rank * 3.0
-            elif direct_match:
+            else:
                 # 仅有搜索排名而无罗马音/别名共现时，不足以越过默认外部证据阈值。
                 score = 60.0 - rank * 4.0
-            else:
-                score = 0.0
             score = round(max(0.0, min(score, 98.0)), 2)
             if score > best["score"]:
                 best = {"score": score, "title": result.get("title", ""), "url": result.get("url", "")}
@@ -1721,7 +1895,30 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """计算单个候选的标题、排名和元数据综合得分。"""
         aliases = self._candidate_aliases(candidate)
         original_normalized = self._normalize_text(original_title)
-        exact_original = any(self._normalize_text(alias) == original_normalized for alias in aliases)
+        anchor_titles = list(dict.fromkeys(value for value in (
+            original_title,
+            self._clean_title(hints.get("original_title")),
+        ) if value))
+        anchor_components = {"token": 0.0, "similarity": 0.0, "prefix": 0.0, "matched_name": ""}
+        for anchor_title in anchor_titles:
+            for alias in aliases:
+                components = self._title_components(anchor_title, alias)
+                value = components["token"] * .45 + components["similarity"] * .35 + components["prefix"] * .2
+                previous = (
+                    anchor_components["token"] * .45 + anchor_components["similarity"] * .35
+                    + anchor_components["prefix"] * .2
+                )
+                if value > previous:
+                    anchor_components = {**components, "matched_name": alias}
+        anchor_score = round(
+            anchor_components["token"] * .45 + anchor_components["similarity"] * .35
+            + anchor_components["prefix"] * .2,
+            2,
+        )
+        exact_original = any(
+            self._normalize_text(alias) == self._normalize_text(anchor)
+            for anchor in anchor_titles for alias in aliases
+        ) if original_normalized else False
         best_components = {"token": 0.0, "similarity": 0.0, "prefix": 0.0, "matched_name": ""}
         for query in queries:
             for alias in aliases:
@@ -1749,6 +1946,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             (best_components["prefix"], float(self._config["prefix_weight"])),
             (rank_component, float(self._config["rank_weight"])),
             (query_confidence, float(self._config["query_confidence_weight"])),
+            (anchor_score, float(self._config["anchor_weight"])),
         ]
 
         candidate_year = self._candidate_year(candidate)
@@ -1773,6 +1971,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
         score = sum(value * weight for value, weight in weighted if weight > 0) / weight_total if weight_total else 0
         if exact_original:
             score = 100.0
+        best_query_index = min(
+            (self._safe_int(hit.get("query_index"), 99) for hit in tmdb_hits),
+            default=99,
+        )
+        fallback_anchor_ok = True
+        if best_query_index > 0:
+            minimum_anchor = float(self._config["fallback_anchor_min"])
+            fallback_anchor_ok = anchor_score >= minimum_anchor
+            if not fallback_anchor_ok:
+                # 降级词能搜到不代表它属于原始标题。锚点关联不足时按差距
+                # 扣分，避免逐词缩短后的宽泛候选反客为主。
+                score -= min(55.0, 25.0 + (minimum_anchor - anchor_score))
         requested_season = self._safe_int(hints.get("season"), 0)
         season_exists = None
         if requested_season and candidate_type == MediaType.TV:
@@ -1803,12 +2013,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "web_evidence_url": candidate.get("_web_evidence_url") or "",
             "query_confidence": query_confidence,
             "query_evidence": query_evidence,
+            "anchor_score": anchor_score,
+            "fallback_anchor_ok": fallback_anchor_ok,
             "components": {
                 "token": round(best_components["token"], 1),
                 "similarity": round(best_components["similarity"], 1),
                 "prefix": round(best_components["prefix"], 1),
                 "rank": round(rank_component, 1),
                 "query": query_confidence,
+                "anchor": anchor_score,
                 "year": year_component,
                 "type": type_component,
                 "web": web_evidence,
@@ -2033,7 +2246,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """合并默认值并限制数值配置范围。"""
         merged = {**self.DEFAULT_CONFIG, **(config or {})}
         bool_keys = (
-            "enabled", "show_sidebar_nav", "debug", "prefer_parsed_title", "web_search_fallback",
+            "enabled", "recognizer_enabled", "show_sidebar_nav", "debug", "prefer_parsed_title",
+            "use_year_hint", "use_original_title_evidence", "web_search_fallback",
             "main_title_fallback",
             "progressive_fallback", "fetch_aliases", "episode_normalizer_enabled",
         )
@@ -2058,6 +2272,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "prefix_weight": (0.0, 100.0),
             "rank_weight": (0.0, 100.0),
             "query_confidence_weight": (0.0, 100.0),
+            "anchor_weight": (0.0, 100.0),
+            "fallback_anchor_min": (0.0, 100.0),
             "year_weight": (0.0, 100.0),
             "type_weight": (0.0, 100.0),
             "season_missing_penalty": (0.0, 100.0),
@@ -2068,13 +2284,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
             merged[key] = max(minimum, min(maximum, value))
         scoring_keys = (
             "token_weight", "similarity_weight", "prefix_weight", "rank_weight",
-            "query_confidence_weight",
+            "query_confidence_weight", "anchor_weight",
         )
         if not any(merged.get(key) for key in scoring_keys):
             for key in scoring_keys:
                 merged[key] = self.DEFAULT_CONFIG[key]
         engine = str(merged.get("web_search_engine") or "auto").strip().lower()
         merged["web_search_engine"] = engine if engine in self._web_search_engines else "auto"
+        mode = str(merged.get("recognition_mode") or "tmdb_first").strip().lower()
+        merged["recognition_mode"] = mode if mode in ("tmdb_first", "scored") else "tmdb_first"
         return merged
 
     def _current_config(self) -> Dict[str, Any]:
@@ -2096,14 +2314,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return records if isinstance(records, list) else []
 
     def _append_history(self, result: Dict[str, Any]) -> None:
-        """保存精简后的识别结论，避免候选详情无限增长。"""
+        """保存跨模块运行日志摘要，避免完整响应无限增长。"""
+        adjustment = result.get("episode_adjustment")
+        has_search = bool(result.get("queries"))
         record = {
             key: result.get(key)
             for key in (
                 "accepted", "title", "original_title", "reason", "queries", "hints",
-                "best", "runner_up", "margin", "web_search", "episode_adjustment", "created_at",
+                "best", "runner_up", "margin", "web_search", "episode_adjustment", "selection_mode", "created_at",
             )
         }
+        record["module"] = (
+            "TMDB 搜索增强 + 集数偏移" if has_search and adjustment is not None
+            else "集数偏移" if adjustment is not None else "TMDB 搜索增强"
+        )
+        record["level"] = "success" if result.get("accepted") else "warning"
         with self._history_lock:
             records = self._read_history()
             records.insert(0, record)

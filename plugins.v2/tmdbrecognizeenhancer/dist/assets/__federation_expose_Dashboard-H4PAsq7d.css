@@ -1,0 +1,13 @@
+
+.dashboard-card[data-v-58851c44] { height: 100%;
+}
+.dashboard-metrics[data-v-58851c44] { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+}
+.dashboard-metrics div[data-v-58851c44] { padding: 10px; border-radius: 10px; background: rgba(var(--v-theme-primary),.05);
+}
+.dashboard-metrics span[data-v-58851c44], .dashboard-metrics strong[data-v-58851c44] { display: block;
+}
+.dashboard-metrics span[data-v-58851c44] { font-size: .72rem; color: rgba(var(--v-theme-on-surface),.58);
+}
+.dashboard-metrics strong[data-v-58851c44] { margin-top: 3px; font-size: 1.15rem;
+}

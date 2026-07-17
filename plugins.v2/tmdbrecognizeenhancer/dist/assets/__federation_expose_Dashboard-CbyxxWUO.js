@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, u as unwrapResponse } from './utils-DaBy4w3m.js';
+import { _ as _export_sfc, u as unwrapResponse } from './utils-B-q32kVJ.js';
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,createElementVNode:_createElementVNode,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode} = await importShared('vue');
 
@@ -75,7 +75,7 @@ return (_ctx, _cache) => {
           }),
           _createVNode(_component_VCardSubtitle, null, {
             default: _withCtx(() => [
-              _createTextVNode(_toDisplayString(summary.value.enabled ? '失败识别兜底运行中' : '插件当前未启用'), 1)
+              _createTextVNode(_toDisplayString(summary.value.enabled ? '插件总开关已开启' : '插件当前未启用'), 1)
             ]),
             _: 1
           })
@@ -126,6 +126,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Dashboard = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-be78abdb"]]);
+const Dashboard = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-58851c44"]]);
 
 export { Dashboard as default };
