@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { unwrapResponse } from '../utils'
 
 const props = defineProps({
@@ -29,6 +29,8 @@ const manualForm = ref({
   year: now.getFullYear(), quarter: Math.floor(now.getMonth() / 3) + 1,
 })
 const catalog = ref([])
+const catalogPageSize = 36
+const catalogDisplayLimit = ref(catalogPageSize)
 const catalogLoading = ref(false)
 const batchLoading = ref(false)
 const busyId = ref('')
@@ -53,6 +55,9 @@ const failureDialog = ref(false)
 const failures = ref([])
 const manualTmdb = ref({})
 let scanTimer = null
+let persistTimer = null
+let initialized = false
+let componentActive = true
 
 const quarterKey = computed(() => `${board.value.year}-Q${board.value.quarter}`)
 const platforms = computed(() => [
@@ -75,9 +80,14 @@ const filteredCatalog = computed(() => {
       .includes(keyword)
   })
 })
+const visibleCatalog = computed(() => filteredCatalog.value.slice(0, catalogDisplayLimit.value))
+const selectedIdSet = computed(() => new Set(selectedIds.value))
 const allFilteredSelected = computed(() => (
   filteredCatalog.value.length > 0
-  && filteredCatalog.value.every(item => selectedIds.value.includes(item.id))
+  && filteredCatalog.value.every(item => selectedIdSet.value.has(item.id))
+))
+const ruleByTmdbId = computed(() => new Map(
+  rules.value.map(rule => [Number(rule.tmdb_id), rule]),
 ))
 const selectedGroup = computed(() => inspection.value?.groups?.find(
   item => item.id === editForm.value?.episode_group_id,
@@ -192,7 +202,10 @@ async function deleteFilteredRules() {
 async function loadQuarter(refresh = false, background = false) {
   if (!background) catalogLoading.value = true
   error.value = ''
-  if (!background) selectedIds.value = []
+  if (!background) {
+    selectedIds.value = []
+    catalogDisplayLimit.value = catalogPageSize
+  }
   try {
     const data = unwrapResponse(await props.api.post(
       `${props.pluginBase}/episode-normalizer/catalog/query`,
@@ -213,8 +226,8 @@ async function loadQuarter(refresh = false, background = false) {
 function scheduleScanPoll(scanningCount) {
   if (scanTimer) clearTimeout(scanTimer)
   scanTimer = null
-  if (scanningCount > 0) {
-    scanTimer = setTimeout(() => loadQuarter(false, true), 1800)
+  if (componentActive && scanningCount > 0) {
+    scanTimer = setTimeout(() => loadQuarter(false, true), 3200)
   }
 }
 
@@ -292,12 +305,20 @@ async function retryFailure(failure) {
 }
 
 function toggleAllFiltered() {
-  const visible = filteredCatalog.value.map(item => item.id)
+  const filteredIds = filteredCatalog.value.map(item => item.id)
+  const filteredIdSet = new Set(filteredIds)
   if (allFilteredSelected.value) {
-    selectedIds.value = selectedIds.value.filter(id => !visible.includes(id))
+    selectedIds.value = selectedIds.value.filter(id => !filteredIdSet.has(id))
   } else {
-    selectedIds.value = Array.from(new Set([...selectedIds.value, ...visible]))
+    selectedIds.value = Array.from(new Set([...selectedIds.value, ...filteredIds]))
   }
+}
+
+function showMoreCatalog() {
+  catalogDisplayLimit.value = Math.min(
+    catalogDisplayLimit.value + catalogPageSize,
+    filteredCatalog.value.length,
+  )
 }
 
 function ignoreFailure(failure) {
@@ -431,13 +452,45 @@ function persistUiState() {
   }
 }
 
+function schedulePersistUiState() {
+  if (persistTimer) clearTimeout(persistTimer)
+  persistTimer = setTimeout(() => {
+    persistTimer = null
+    persistUiState()
+  }, 220)
+}
+
 restoreUiState()
 watch(() => [board.value.year, board.value.quarter], () => loadQuarter(false))
-watch([board, ruleSearch, ruleQuarter, batchPreference, rulesOpen, ruleView, boardView], persistUiState, { deep: true })
-onBeforeUnmount(() => { if (scanTimer) clearTimeout(scanTimer) })
+watch(
+  () => [
+    board.value.search, board.value.region, board.value.platform,
+    board.value.scanStatus, board.value.multiOnly,
+  ],
+  () => { catalogDisplayLimit.value = catalogPageSize },
+)
+watch(
+  [board, ruleSearch, ruleQuarter, batchPreference, rulesOpen, ruleView, boardView],
+  schedulePersistUiState,
+  { deep: true },
+)
+onActivated(() => {
+  componentActive = true
+  if (initialized) loadQuarter(false, true)
+})
+onDeactivated(() => {
+  componentActive = false
+  if (scanTimer) clearTimeout(scanTimer)
+  scanTimer = null
+})
+onBeforeUnmount(() => {
+  if (scanTimer) clearTimeout(scanTimer)
+  if (persistTimer) clearTimeout(persistTimer)
+})
 onMounted(async () => {
   try {
     await Promise.all([loadRules(), loadQuarter(false)])
+    initialized = true
   } catch (err) {
     error.value = err?.message || '集数偏移数据加载失败'
   }
@@ -469,7 +522,7 @@ onMounted(async () => {
         </template>
       </VCardItem>
       <VExpandTransition>
-        <div v-show="rulesOpen" class="rules-scroll">
+        <div v-if="rulesOpen" class="rules-scroll">
           <div class="rules-controls pa-4 pt-4">
             <VTextField
               v-model="ruleSearch" label="搜索标题、别名或 TMDBID" prepend-inner-icon="mdi-magnify"
@@ -570,11 +623,12 @@ onMounted(async () => {
         <VProgressLinear v-if="catalogLoading" indeterminate color="secondary" class="mb-4" />
         <div class="text-caption text-medium-emphasis mb-3">
           当前 {{ filteredCatalog.length }} / {{ catalog.length }} 条
+          <span v-if="visibleCatalog.length < filteredCatalog.length"> · 已渲染 {{ visibleCatalog.length }} 条</span>
           <span v-if="catalogMeta.scanning_count"> · {{ catalogMeta.scanning_count }} 条正在扫描</span>
           <span v-if="catalogMeta.updated_at"> · 更新于 {{ catalogMeta.updated_at }}</span>
         </div>
         <div :class="['catalog-grid', `view-${boardView}`]">
-          <VCard v-for="item in filteredCatalog" :key="item.id" variant="outlined" class="catalog-card">
+          <VCard v-for="item in visibleCatalog" :key="item.id" variant="outlined" class="catalog-card">
             <div class="select-corner"><VCheckbox v-model="selectedIds" :value="item.id" hide-details density="compact" /></div>
             <VImg v-if="item.poster" :src="item.poster" height="170" cover />
             <VCardItem>
@@ -610,13 +664,21 @@ onMounted(async () => {
               <VBtn v-else-if="item.rule_eligible === false" variant="text" disabled prepend-icon="mdi-movie-open-outline">电影条目无需集数规则</VBtn>
               <VBtn
                 v-else variant="text" prepend-icon="mdi-pencil-outline"
-                @click="openEditor(rules.find(rule => Number(rule.tmdb_id) === Number(item.tmdb_match?.best?.tmdb_id)))"
+                @click="openEditor(ruleByTmdbId.get(Number(item.tmdb_match?.best?.tmdb_id)))"
               >编辑规则</VBtn>
             </VCardActions>
           </VCard>
           <div v-if="!catalogLoading && !filteredCatalog.length" class="empty-catalog">
             <VIcon icon="mdi-calendar-search" size="48" /><div>当前筛选条件没有番剧</div>
           </div>
+        </div>
+        <div v-if="visibleCatalog.length < filteredCatalog.length" class="catalog-load-more mt-5">
+          <VBtn variant="tonal" color="secondary" prepend-icon="mdi-chevron-down" @click="showMoreCatalog">
+            再显示 {{ Math.min(catalogPageSize, filteredCatalog.length - visibleCatalog.length) }} 条
+          </VBtn>
+          <span class="text-caption text-medium-emphasis">
+            批量选择仍会作用于全部 {{ filteredCatalog.length }} 条筛选结果
+          </span>
         </div>
       </VCardText>
     </VCard>
@@ -788,7 +850,8 @@ onMounted(async () => {
 .batch-bar { display: flex; gap: 12px; align-items: center; padding: 10px 12px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .055); }
 .batch-target { max-width: 280px; }
 .catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 14px; }
-.catalog-card { position: relative; overflow: hidden; }
+.catalog-card { position: relative; overflow: hidden; content-visibility: auto; contain-intrinsic-size: 320px; }
+.catalog-load-more { display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .catalog-card :deep(.v-card-actions) { flex-wrap: wrap; row-gap: 6px; }
 .catalog-grid.view-list { grid-template-columns: 1fr; }
 .catalog-grid.view-list .catalog-card { display: grid; grid-template-columns: 190px minmax(0, 1fr) auto; grid-template-rows: auto 1fr; align-items: center; }

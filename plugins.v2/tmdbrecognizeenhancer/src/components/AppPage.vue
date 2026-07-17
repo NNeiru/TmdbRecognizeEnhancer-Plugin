@@ -146,7 +146,7 @@ onMounted(loadStatus)
         <VDivider />
 
         <div class="workspace-panels">
-          <section v-show="tab === 'status'" class="workspace-panel">
+          <section v-if="tab === 'status'" class="workspace-panel">
             <div class="tab-content">
               <div class="d-flex align-center flex-wrap ga-3 mb-5">
                 <div><div class="text-h6">插件与模块状态</div><div class="text-body-2 text-medium-emphasis">总开关关闭时所有接管停止；模块开关可独立控制功能。</div></div>
@@ -172,14 +172,14 @@ onMounted(loadStatus)
             </div>
           </section>
 
-          <section v-show="tab === 'settings'" class="workspace-panel">
+          <section v-if="tab === 'settings'" class="workspace-panel">
             <div class="tab-content">
               <StrategySettings v-model="config" :show-module-switches="false" />
               <div class="sticky-actions"><VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving" @click="saveConfig">保存并立即生效</VBtn></div>
             </div>
           </section>
 
-          <section v-show="tab === 'preview'" class="workspace-panel">
+          <section v-if="tab === 'preview'" class="workspace-panel">
             <div class="tab-content">
               <VRow>
                 <VCol cols="12" md="5">
@@ -255,7 +255,7 @@ onMounted(loadStatus)
             </div>
           </section>
 
-          <section v-show="tab === 'history'" class="workspace-panel">
+          <section v-if="tab === 'history'" class="workspace-panel">
             <div class="tab-content">
               <div class="d-flex align-center mb-4"><div><div class="text-h6">模块运行日志</div><div class="text-body-2 text-medium-emphasis">汇总 TMDB 搜索增强与集数偏移的运行结论，不保存完整响应</div></div><VSpacer /><VBtn variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" :disabled="!history.length" @click="clearHistory">清空</VBtn><VBtn icon="mdi-refresh" variant="text" :loading="loading" @click="loadStatus" /></div>
               <div v-if="history.length" class="history-list">
@@ -272,7 +272,12 @@ onMounted(loadStatus)
 
           <section v-show="tab === 'episodes'" class="workspace-panel">
             <div class="tab-content">
-              <EpisodeNormalizer :api="api" :plugin-base="pluginBase" :runtime-status="normalizerStatus" />
+              <KeepAlive>
+                <EpisodeNormalizer
+                  v-if="tab === 'episodes'"
+                  :api="api" :plugin-base="pluginBase" :runtime-status="normalizerStatus"
+                />
+              </KeepAlive>
             </div>
           </section>
 
