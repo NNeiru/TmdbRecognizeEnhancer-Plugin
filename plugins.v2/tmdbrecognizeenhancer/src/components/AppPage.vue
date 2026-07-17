@@ -63,7 +63,10 @@ async function runPreview() {
   error.value = ''
   preview.value = null
   try {
-    const response = await props.api.post(`${pluginBase.value}/preview`, { ...previewInput.value })
+    const response = await props.api.post(`${pluginBase.value}/preview`, {
+      ...previewInput.value,
+      recognition_mode: config.value.recognition_mode,
+    })
     preview.value = unwrapResponse(response)
   } catch (err) {
     error.value = err?.message || '试跑失败'
@@ -192,9 +195,26 @@ onMounted(loadStatus)
                       <template #prepend><VAvatar :color="preview.accepted ? 'success' : 'warning'" variant="tonal"><VIcon :icon="preview.accepted ? 'mdi-check-decagram' : 'mdi-shield-alert-outline'" /></VAvatar></template>
                       <VCardTitle>{{ preview.accepted ? '候选已通过' : '本次安全拒绝' }}</VCardTitle>
                       <VCardSubtitle>{{ preview.reason }}</VCardSubtitle>
+                      <template #append>
+                        <VChip size="small" :color="preview.selection_mode === 'tmdb_first' ? 'primary' : 'secondary'" variant="tonal">
+                          实际：{{ preview.selection_mode === 'tmdb_first' ? '单次首结果' : '可解释评分' }}
+                        </VChip>
+                      </template>
                     </VCardItem>
                     <VCardText>
+                      <VAlert v-if="preview.mode_mismatch" type="warning" variant="tonal" density="compact" class="mb-4">
+                        页面请求模式与插件已保存模式不同：本次按页面选择执行；请重新保存配置，确保实际整理使用相同模式。
+                      </VAlert>
                       <VAlert v-if="preview.original_title" type="info" variant="tonal" density="compact" class="mb-4">解析后标题：{{ preview.title }}</VAlert>
+                      <VAlert v-if="preview.title_recovery" type="info" variant="tonal" density="compact" class="mb-4">
+                        检测到 MP 标题截断：{{ preview.title_recovery.from }} → {{ preview.title_recovery.to }}
+                      </VAlert>
+                      <VAlert v-if="preview.duplicate_summary?.suppressed_count" type="info" variant="tonal" density="compact" class="mb-4">
+                        已归并 {{ preview.duplicate_summary.suppressed_count }} 个同名、同年、同类型的重复候选；分差只比较不同作品。
+                      </VAlert>
+                      <VAlert v-if="preview.duplicate_summary?.shadow_season_count" type="info" variant="tonal" density="compact" class="mb-4">
+                        已排除 {{ preview.duplicate_summary.shadow_season_count }} 个平行单季条目：目标季已存在于更早创建的总系列条目中。
+                      </VAlert>
                       <div v-if="preview.pipeline?.length" class="pipeline-list mb-4">
                         <div v-for="step in preview.pipeline" :key="step.module" class="pipeline-item">
                           <VIcon :icon="step.status === 'applied' || step.status === 'accepted' || step.status === 'completed' ? 'mdi-check-circle-outline' : 'mdi-minus-circle-outline'" :color="step.status === 'rejected' ? 'warning' : step.status === 'skipped' ? 'medium-emphasis' : 'success'" />
@@ -216,7 +236,7 @@ onMounted(loadStatus)
                       </VAlert>
                       <VTable v-if="preview.candidates?.length" density="compact" class="candidate-table mt-4">
                         <thead><tr><th>候选</th><th>命中名称</th><th>得分</th></tr></thead>
-                        <tbody><tr v-for="candidate in preview.candidates" :key="`${candidate.media_type}-${candidate.tmdb_id}`"><td><strong>{{ candidate.name }}</strong><div class="text-caption text-medium-emphasis">{{ candidate.year || '—' }} · #{{ candidate.tmdb_id }}</div></td><td class="text-caption">{{ candidate.matched_name || '—' }}<div class="text-medium-emphasis">查询来源 {{ candidate.query_confidence ?? 0 }}<span v-if="candidate.web_evidence"> · 外部证据 {{ candidate.web_evidence }}</span></div></td><td><VChip size="small" :color="scoreColor(candidate.score)">{{ candidate.score }}</VChip></td></tr></tbody>
+                        <tbody><tr v-for="candidate in preview.candidates" :key="`${candidate.media_type}-${candidate.tmdb_id}`" :class="{ 'candidate-suppressed': candidate.suppressed_as_duplicate || candidate.suppressed_as_shadow_season }"><td><strong>{{ candidate.name }}</strong><div class="text-caption text-medium-emphasis">{{ candidate.year || '—' }} · #{{ candidate.tmdb_id }}</div><VChip v-if="candidate.suppressed_as_duplicate" size="x-small" color="info" variant="tonal" class="mt-1">重复项，归入 #{{ candidate.duplicate_of }}</VChip><VChip v-else-if="candidate.suppressed_as_shadow_season" size="x-small" color="warning" variant="tonal" class="mt-1">平行单季项，归入 #{{ candidate.shadow_of }}</VChip></td><td class="text-caption">{{ candidate.matched_name || '—' }}<div class="text-medium-emphasis">查询来源 {{ candidate.query_confidence ?? 0 }}<span v-if="candidate.web_evidence"> · 外部证据 {{ candidate.web_evidence }}</span></div></td><td><VChip size="small" :color="scoreColor(candidate.score)">{{ preview.selection_mode === 'tmdb_first' ? '诊断 ' : '' }}{{ candidate.diagnostic_score ?? candidate.score }}</VChip></td></tr></tbody>
                       </VTable>
                     </VCardText>
                   </VCard>
@@ -289,6 +309,7 @@ onMounted(loadStatus)
 .pipeline-list { display: grid; gap: 8px; }
 .pipeline-item { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 12px; border-radius: 10px; background: rgba(var(--v-theme-primary),.035); }
 .candidate-table { border-radius: 12px; border: 1px solid rgba(var(--v-theme-on-surface),.08); overflow: hidden; }
+.candidate-suppressed { opacity: .62; background: rgba(var(--v-theme-info),.035); }
 .empty-preview { min-height: 390px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: rgba(var(--v-theme-on-surface),.52); }
 .history-list { display: flex; flex-direction: column; gap: 16px; }
 .history-row { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; align-items: stretch; }

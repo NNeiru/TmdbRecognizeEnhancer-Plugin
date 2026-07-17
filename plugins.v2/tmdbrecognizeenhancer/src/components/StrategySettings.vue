@@ -75,6 +75,7 @@ function applyBalancedPreset() {
             <VSwitch v-model="config.prefer_parsed_title" color="primary" label="优先使用 MP 解析标题" hint="原标题进入事件后，复用识别词与 Rust 解析结果作为搜索标题" persistent-hint />
             <VSwitch v-model="config.use_year_hint" color="primary" label="使用 MP 年份提示" hint="MP MetaBase 已包含识别词处理后的年份；仅在存在年份时参与评分" persistent-hint />
             <VSwitch v-model="config.use_original_title_evidence" color="primary" label="使用原标题交叉验证" hint="将 MP 未应用识别词时的名称作为锚点，验证降级候选仍与原片相关" persistent-hint />
+            <VSwitch v-model="config.recover_truncated_title" color="primary" label="恢复异常截断标题" hint="当 MP 只解析出原标题的短前缀时，在季集与发布参数之前保守恢复完整英文标题" persistent-hint />
             <VSwitch v-model="config.fetch_aliases" color="primary" label="拉取候选别名与译名" :hint="tmdbFirstMode ? '首结果模式中不影响选择，只用于展示和诊断' : '用于标题、原标题和罗马音交叉验证'" persistent-hint />
             <template v-if="!tmdbFirstMode">
               <VSwitch v-model="config.main_title_fallback" color="primary" label="启用主体名称降级" hint="例如 Mushoku Tensei: ... → Mushoku Tensei" persistent-hint />

@@ -180,6 +180,123 @@ def test_tmdb_first_mode_uses_first_result_without_score_or_margin(monkeypatch):
     assert result["margin"] == 0.0
 
 
+def test_preview_mode_override_cannot_fall_into_saved_scoring_thresholds(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "scored", "minimum_margin": 50, "fetch_aliases": False,
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 1, "media_type": "tv", "name": "Same", "first_air_date": "2020-01-01"},
+        {"id": 2, "media_type": "tv", "name": "Same", "first_air_date": "2020-01-01"},
+    ])
+
+    result = plugin._recognize_title(
+        "Same", include_candidates=True, recognition_mode="tmdb_first",
+    )
+
+    assert result["accepted"] is True
+    assert result["selection_mode"] == "tmdb_first"
+    assert "低于分差阈值" not in result["reason"]
+
+
+def test_duplicate_tmdb_entries_share_one_decision_slot(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    candidates = [
+        {
+            "tmdb_id": 65942, "name": "Re:Zero", "year": "2016", "media_type": "电视剧",
+            "score": 98, "popularity": 10, "vote_count": 20, "query_index": 0,
+            "tmdb_rank": 0, "identity_names": ["re zero"], "genre_ids": [16],
+        },
+        {
+            "tmdb_id": 328386, "name": "Re:Zero", "year": "2016", "media_type": "电视剧",
+            "score": 100, "popularity": 30, "vote_count": 10, "query_index": 0,
+            "tmdb_rank": 1, "identity_names": ["re zero"], "genre_ids": [16],
+        },
+        {
+            "tmdb_id": 3, "name": "Different", "year": "2016", "media_type": "电视剧",
+            "score": 80, "popularity": 1, "vote_count": 1, "query_index": 0,
+            "tmdb_rank": 2, "identity_names": ["different"], "genre_ids": [16],
+        },
+    ]
+
+    ranked, summary = plugin._collapse_duplicate_candidates(candidates)
+
+    assert [item["tmdb_id"] for item in ranked] == [65942, 3]
+    assert summary["suppressed_count"] == 1
+    assert candidates[1]["duplicate_of"] == 65942
+
+
+def test_parallel_single_season_entry_is_suppressed_when_parent_contains_target_season(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    parent = {
+        "tmdb_id": 100, "year": "2020", "tmdb_rank": 0,
+        "season_numbers": [0, 1, 2, 3, 4], "number_of_seasons": 4,
+        "title_season": None, "franchise_base": "exampleanime",
+    }
+    standalone = {
+        "tmdb_id": 104, "year": "2026", "tmdb_rank": 1,
+        "season_numbers": [0, 1], "number_of_seasons": 1,
+        "title_season": 4, "franchise_base": "exampleanime",
+    }
+
+    ranked, count = plugin._suppress_shadow_season_entries(
+        [standalone, parent], {"season": 4},
+    )
+
+    assert [item["tmdb_id"] for item in ranked] == [100]
+    assert count == 1
+    assert standalone["shadow_of"] == 100
+
+
+def test_exact_year_can_decide_between_same_title_adaptations(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "scored", "minimum_score": 72, "minimum_margin": 8,
+    })
+    raw_candidates = [{"id": 263121}, {"id": 123249}]
+    scored = {
+        263121: {
+            "tmdb_id": 263121, "name": "Sono Bisque Doll", "year": "2024",
+            "media_type": "电视剧", "score": 83.88, "popularity": 1,
+            "identity_names": ["sono bisque doll wa koi o suru"], "genre_ids": [],
+            "query_index": 0, "tmdb_rank": 0, "vote_count": 0,
+        },
+        123249: {
+            "tmdb_id": 123249, "name": "Sono Bisque Doll", "year": "2022",
+            "media_type": "电视剧", "score": 82.11, "popularity": 1,
+            "identity_names": ["sono bisque doll wa koi o suru"], "genre_ids": [16],
+            "query_index": 0, "tmdb_rank": 1, "vote_count": 0,
+        },
+    }
+    plugin._search_candidates = Mock(return_value=raw_candidates)
+    plugin._score_candidate = Mock(side_effect=lambda title, queries, item, hints: dict(scored[item["id"]]))
+
+    result = plugin._recognize_title(
+        "Sono Bisque Doll Wa Koi O Suru", hints={"year": "2022"},
+        recognition_mode="scored",
+    )
+
+    assert result["accepted"] is True
+    assert result["best"]["tmdb_id"] == 123249
+    assert result["margin_waived"] is True
+    assert result["decisive_evidence"]["kind"] == "exact_year"
+
+
+def test_recovers_title_truncated_by_single_letter_roman_token(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    filename = "That.Time.I.Got.Reincarnated.as.a.Slime.S04E14.2026.1080p.LINETV.WEB-DL.H264.AAC-ADWeb.mkv"
+
+    title, evidence = plugin._recover_search_title("That Time", {"source_title": filename})
+
+    assert title == "That Time I Got Reincarnated as a Slime"
+    assert evidence["from"] == "That Time"
+
+
 def test_scored_fallback_requires_relation_to_unshortened_title(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

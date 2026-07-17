@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc } from './utils-B-q32kVJ.js';
+import { _ as _export_sfc } from './utils-oR-EWyhQ.js';
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,Fragment:_Fragment,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createElementVNode:_createElementVNode,toDisplayString:_toDisplayString,createBlock:_createBlock,renderList:_renderList} = await importShared('vue');
 
@@ -97,7 +97,7 @@ return (_ctx, _cache) => {
       class: "mb-5",
       icon: "mdi-database-search-outline"
     }, {
-      default: _withCtx(() => [...(_cache[26] || (_cache[26] = [
+      default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
         _createTextVNode(" 首结果模式完全按 TMDB 一次搜索的顺序选择；评分模式才使用标题、原标题、年份、类型、查询来源和双阈值。 ", -1)
       ]))]),
       _: 1
@@ -123,13 +123,13 @@ return (_ctx, _cache) => {
                   ]),
                   default: _withCtx(() => [
                     _createVNode(_component_VCardTitle, null, {
-                      default: _withCtx(() => [...(_cache[27] || (_cache[27] = [
+                      default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
                         _createTextVNode("运行方式", -1)
                       ]))]),
                       _: 1
                     }),
                     _createVNode(_component_VCardSubtitle, null, {
-                      default: _withCtx(() => [...(_cache[28] || (_cache[28] = [
+                      default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
                         _createTextVNode("控制接管范围与搜索成本", -1)
                       ]))]),
                       _: 1
@@ -206,8 +206,16 @@ return (_ctx, _cache) => {
                       "persistent-hint": ""
                     }, null, 8, ["modelValue"]),
                     _createVNode(_component_VSwitch, {
+                      modelValue: config.value.recover_truncated_title,
+                      "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((config.value.recover_truncated_title) = $event)),
+                      color: "primary",
+                      label: "恢复异常截断标题",
+                      hint: "当 MP 只解析出原标题的短前缀时，在季集与发布参数之前保守恢复完整英文标题",
+                      "persistent-hint": ""
+                    }, null, 8, ["modelValue"]),
+                    _createVNode(_component_VSwitch, {
                       modelValue: config.value.fetch_aliases,
-                      "onUpdate:modelValue": _cache[8] || (_cache[8] = $event => ((config.value.fetch_aliases) = $event)),
+                      "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((config.value.fetch_aliases) = $event)),
                       color: "primary",
                       label: "拉取候选别名与译名",
                       hint: tmdbFirstMode.value ? '首结果模式中不影响选择，只用于展示和诊断' : '用于标题、原标题和罗马音交叉验证',
@@ -217,7 +225,7 @@ return (_ctx, _cache) => {
                       ? (_openBlock(), _createElementBlock(_Fragment, { key: 1 }, [
                           _createVNode(_component_VSwitch, {
                             modelValue: config.value.main_title_fallback,
-                            "onUpdate:modelValue": _cache[9] || (_cache[9] = $event => ((config.value.main_title_fallback) = $event)),
+                            "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((config.value.main_title_fallback) = $event)),
                             color: "primary",
                             label: "启用主体名称降级",
                             hint: "例如 Mushoku Tensei: ... → Mushoku Tensei",
@@ -225,7 +233,7 @@ return (_ctx, _cache) => {
                           }, null, 8, ["modelValue"]),
                           _createVNode(_component_VSwitch, {
                             modelValue: config.value.progressive_fallback,
-                            "onUpdate:modelValue": _cache[10] || (_cache[10] = $event => ((config.value.progressive_fallback) = $event)),
+                            "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((config.value.progressive_fallback) = $event)),
                             color: "warning",
                             label: "启用逐词缩短（实验性）",
                             hint: "每次降级均须通过未缩减标题锚点验证",
@@ -233,7 +241,7 @@ return (_ctx, _cache) => {
                           }, null, 8, ["modelValue"]),
                           _createVNode(_component_VSwitch, {
                             modelValue: config.value.web_search_fallback,
-                            "onUpdate:modelValue": _cache[11] || (_cache[11] = $event => ((config.value.web_search_fallback) = $event)),
+                            "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((config.value.web_search_fallback) = $event)),
                             color: "warning",
                             label: "启用搜索引擎交叉验证",
                             hint: "仅接受指向具体 TMDB 条目的直链，并缓存同一查询结果",
@@ -251,14 +259,14 @@ return (_ctx, _cache) => {
                                 density: "compact",
                                 class: "mb-3"
                               }, {
-                                default: _withCtx(() => [...(_cache[29] || (_cache[29] = [
+                                default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
                                   _createTextVNode("自动模式固定使用 DuckDuckGo，避免聚合多引擎造成结果漂移；外部结果只有 TMDB 直链与原标题/候选别名共现时才形成证据。", -1)
                                 ]))]),
                                 _: 1
                               }),
                               _createVNode(_component_VSelect, {
                                 modelValue: config.value.web_search_engine,
-                                "onUpdate:modelValue": _cache[12] || (_cache[12] = $event => ((config.value.web_search_engine) = $event)),
+                                "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.value.web_search_engine) = $event)),
                                 items: [
                   { title: '自动选择', value: 'auto' },
                   { title: 'DuckDuckGo', value: 'duckduckgo' },
@@ -277,7 +285,7 @@ return (_ctx, _cache) => {
                                     default: _withCtx(() => [
                                       _createVNode(_component_VTextField, {
                                         modelValue: config.value.web_search_max_results,
-                                        "onUpdate:modelValue": _cache[13] || (_cache[13] = $event => ((config.value.web_search_max_results) = $event)),
+                                        "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((config.value.web_search_max_results) = $event)),
                                         modelModifiers: { number: true },
                                         type: "number",
                                         min: "3",
@@ -291,7 +299,7 @@ return (_ctx, _cache) => {
                                     default: _withCtx(() => [
                                       _createVNode(_component_VTextField, {
                                         modelValue: config.value.web_search_timeout,
-                                        "onUpdate:modelValue": _cache[14] || (_cache[14] = $event => ((config.value.web_search_timeout) = $event)),
+                                        "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((config.value.web_search_timeout) = $event)),
                                         modelModifiers: { number: true },
                                         type: "number",
                                         min: "5",
@@ -306,7 +314,7 @@ return (_ctx, _cache) => {
                                     default: _withCtx(() => [
                                       _createVNode(_component_VTextField, {
                                         modelValue: config.value.web_search_min_evidence,
-                                        "onUpdate:modelValue": _cache[15] || (_cache[15] = $event => ((config.value.web_search_min_evidence) = $event)),
+                                        "onUpdate:modelValue": _cache[16] || (_cache[16] = $event => ((config.value.web_search_min_evidence) = $event)),
                                         modelModifiers: { number: true },
                                         type: "number",
                                         min: "50",
@@ -328,7 +336,7 @@ return (_ctx, _cache) => {
                     }),
                     _createVNode(_component_VSwitch, {
                       modelValue: config.value.debug,
-                      "onUpdate:modelValue": _cache[16] || (_cache[16] = $event => ((config.value.debug) = $event)),
+                      "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((config.value.debug) = $event)),
                       color: "primary",
                       label: "输出详细调试日志",
                       "hide-details": ""
@@ -363,13 +371,13 @@ return (_ctx, _cache) => {
                       ]),
                       default: _withCtx(() => [
                         _createVNode(_component_VCardTitle, null, {
-                          default: _withCtx(() => [...(_cache[30] || (_cache[30] = [
+                          default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
                             _createTextVNode("接纳门槛", -1)
                           ]))]),
                           _: 1
                         }),
                         _createVNode(_component_VCardSubtitle, null, {
-                          default: _withCtx(() => [...(_cache[31] || (_cache[31] = [
+                          default: _withCtx(() => [...(_cache[32] || (_cache[32] = [
                             _createTextVNode("宁可拒绝，也不把资源整理到错误作品", -1)
                           ]))]),
                           _: 1
@@ -380,12 +388,12 @@ return (_ctx, _cache) => {
                     _createVNode(_component_VCardText, null, {
                       default: _withCtx(() => [
                         _createElementVNode("div", _hoisted_3, [
-                          _cache[32] || (_cache[32] = _createElementVNode("span", null, "最低得分", -1)),
+                          _cache[33] || (_cache[33] = _createElementVNode("span", null, "最低得分", -1)),
                           _createElementVNode("strong", null, _toDisplayString(config.value.minimum_score), 1)
                         ]),
                         _createVNode(_component_VSlider, {
                           modelValue: config.value.minimum_score,
-                          "onUpdate:modelValue": _cache[17] || (_cache[17] = $event => ((config.value.minimum_score) = $event)),
+                          "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((config.value.minimum_score) = $event)),
                           min: 40,
                           max: 95,
                           step: 1,
@@ -393,12 +401,12 @@ return (_ctx, _cache) => {
                           "thumb-label": ""
                         }, null, 8, ["modelValue"]),
                         _createElementVNode("div", _hoisted_4, [
-                          _cache[33] || (_cache[33] = _createElementVNode("span", null, "第一名领先分差", -1)),
+                          _cache[34] || (_cache[34] = _createElementVNode("span", null, "第一名领先分差", -1)),
                           _createElementVNode("strong", null, _toDisplayString(config.value.minimum_margin), 1)
                         ]),
                         _createVNode(_component_VSlider, {
                           modelValue: config.value.minimum_margin,
-                          "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((config.value.minimum_margin) = $event)),
+                          "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((config.value.minimum_margin) = $event)),
                           min: 0,
                           max: 30,
                           step: 1,
@@ -411,7 +419,7 @@ return (_ctx, _cache) => {
                               default: _withCtx(() => [
                                 _createVNode(_component_VTextField, {
                                   modelValue: config.value.max_queries,
-                                  "onUpdate:modelValue": _cache[19] || (_cache[19] = $event => ((config.value.max_queries) = $event)),
+                                  "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((config.value.max_queries) = $event)),
                                   modelModifiers: { number: true },
                                   type: "number",
                                   min: "1",
@@ -425,7 +433,7 @@ return (_ctx, _cache) => {
                               default: _withCtx(() => [
                                 _createVNode(_component_VTextField, {
                                   modelValue: config.value.minimum_query_length,
-                                  "onUpdate:modelValue": _cache[20] || (_cache[20] = $event => ((config.value.minimum_query_length) = $event)),
+                                  "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((config.value.minimum_query_length) = $event)),
                                   modelModifiers: { number: true },
                                   type: "number",
                                   min: "2",
@@ -439,7 +447,7 @@ return (_ctx, _cache) => {
                               default: _withCtx(() => [
                                 _createVNode(_component_VTextField, {
                                   modelValue: config.value.candidate_limit,
-                                  "onUpdate:modelValue": _cache[21] || (_cache[21] = $event => ((config.value.candidate_limit) = $event)),
+                                  "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((config.value.candidate_limit) = $event)),
                                   modelModifiers: { number: true },
                                   type: "number",
                                   min: "1",
@@ -453,7 +461,7 @@ return (_ctx, _cache) => {
                               default: _withCtx(() => [
                                 _createVNode(_component_VTextField, {
                                   modelValue: config.value.detail_limit,
-                                  "onUpdate:modelValue": _cache[22] || (_cache[22] = $event => ((config.value.detail_limit) = $event)),
+                                  "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((config.value.detail_limit) = $event)),
                                   modelModifiers: { number: true },
                                   type: "number",
                                   min: "0",
@@ -486,7 +494,7 @@ return (_ctx, _cache) => {
           variant: "tonal",
           class: "mt-4"
         }, {
-          default: _withCtx(() => [...(_cache[34] || (_cache[34] = [
+          default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
             _createTextVNode(" 当前只提交一次完整解析标题并采用 TMDB 返回的第一个影视结果。最低分、领先分差和评分权重全部不参与选择；年份与别名仍会显示在试跑诊断中。 ", -1)
           ]))]),
           _: 1
@@ -506,7 +514,7 @@ return (_ctx, _cache) => {
               ]),
               default: _withCtx(() => [
                 _createVNode(_component_VCardTitle, null, {
-                  default: _withCtx(() => [...(_cache[35] || (_cache[35] = [
+                  default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
                     _createTextVNode("评分权重", -1)
                   ]))]),
                   _: 1
@@ -530,7 +538,7 @@ return (_ctx, _cache) => {
                 }, {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_5, [
-                      _cache[38] || (_cache[38] = _createElementVNode("div", { class: "flex-grow-1" }, "评分模式会验证降级候选与未缩减标题、MP 原标题之间的关联；关联不足会额外扣分。", -1)),
+                      _cache[39] || (_cache[39] = _createElementVNode("div", { class: "flex-grow-1" }, "评分模式会验证降级候选与未缩减标题、MP 原标题之间的关联；关联不足会额外扣分。", -1)),
                       _createVNode(_component_VBtn, {
                         size: "small",
                         color: "primary",
@@ -538,7 +546,7 @@ return (_ctx, _cache) => {
                         "prepend-icon": "mdi-numeric-1-circle",
                         onClick: applyTmdbFirstPreset
                       }, {
-                        default: _withCtx(() => [...(_cache[36] || (_cache[36] = [
+                        default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
                           _createTextVNode("切换单次首结果", -1)
                         ]))]),
                         _: 1
@@ -549,7 +557,7 @@ return (_ctx, _cache) => {
                         "prepend-icon": "mdi-restore",
                         onClick: applyBalancedPreset
                       }, {
-                        default: _withCtx(() => [...(_cache[37] || (_cache[37] = [
+                        default: _withCtx(() => [...(_cache[38] || (_cache[38] = [
                           _createTextVNode("恢复均衡预设", -1)
                         ]))]),
                         _: 1
@@ -609,7 +617,7 @@ return (_ctx, _cache) => {
                       default: _withCtx(() => [
                         _createVNode(_component_VTextField, {
                           modelValue: config.value.season_missing_penalty,
-                          "onUpdate:modelValue": _cache[23] || (_cache[23] = $event => ((config.value.season_missing_penalty) = $event)),
+                          "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((config.value.season_missing_penalty) = $event)),
                           modelModifiers: { number: true },
                           type: "number",
                           min: "0",
@@ -628,7 +636,7 @@ return (_ctx, _cache) => {
                       default: _withCtx(() => [
                         _createVNode(_component_VTextField, {
                           modelValue: config.value.fallback_anchor_min,
-                          "onUpdate:modelValue": _cache[24] || (_cache[24] = $event => ((config.value.fallback_anchor_min) = $event)),
+                          "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((config.value.fallback_anchor_min) = $event)),
                           modelModifiers: { number: true },
                           type: "number",
                           min: "0",
@@ -646,7 +654,7 @@ return (_ctx, _cache) => {
                       default: _withCtx(() => [
                         _createVNode(_component_VTextField, {
                           modelValue: config.value.history_limit,
-                          "onUpdate:modelValue": _cache[25] || (_cache[25] = $event => ((config.value.history_limit) = $event)),
+                          "onUpdate:modelValue": _cache[26] || (_cache[26] = $event => ((config.value.history_limit) = $event)),
                           modelModifiers: { number: true },
                           type: "number",
                           min: "5",
@@ -671,6 +679,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const StrategySettings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ce8a6819"]]);
+const StrategySettings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-a38fe76a"]]);
 
 export { StrategySettings as S };

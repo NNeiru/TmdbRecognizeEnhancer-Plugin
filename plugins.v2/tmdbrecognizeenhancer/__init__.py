@@ -35,7 +35,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.4.0"
+    plugin_version = "0.4.1"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -58,6 +58,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "prefer_parsed_title": True,
         "use_year_hint": True,
         "use_original_title_evidence": True,
+        "recover_truncated_title": True,
         "web_search_fallback": False,
         "web_search_engine": "auto",
         "web_search_max_results": 8,
@@ -364,8 +365,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "episode": self._safe_int(payload.get("episode"), 0),
         }
         hints.update({key: value for key, value in supplied_hints.items() if value not in (None, "", 0)})
+        requested_mode = str(payload.get("recognition_mode") or "").strip().lower()
+        if requested_mode not in ("tmdb_first", "scored"):
+            requested_mode = None
         try:
-            result = self._recognize_title(title, hints=hints, include_candidates=True)
+            result = self._recognize_title(
+                title,
+                hints=hints,
+                include_candidates=True,
+                recognition_mode=requested_mode,
+            )
+            result["requested_mode"] = requested_mode or ""
+            result["saved_mode"] = self._config.get("recognition_mode")
+            result["mode_mismatch"] = bool(
+                requested_mode and requested_mode != self._config.get("recognition_mode")
+            )
             result["original_title"] = raw_title if raw_title != title else ""
             episode_preview = self._preview_episode_pipeline(
                 best=result.get("best") if result.get("accepted") else None,
@@ -384,7 +398,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 {
                     "module": "TMDB 搜索增强",
                     "status": "accepted" if result.get("accepted") else "rejected",
-                    "summary": result.get("reason"),
+                    "summary": (
+                        f"{result.get('reason')}（实际模式："
+                        f"{'单次首结果' if result.get('selection_mode') == 'tmdb_first' else '可解释评分'}）"
+                    ),
                 },
                 {
                     "module": "集数偏移",
@@ -1371,6 +1388,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         raw_title = self._clean_title(raw_title)
         title = raw_title
         hints = self._extract_hints(raw_title)
+        hints["source_title"] = raw_title
         if not raw_title or not self._config.get("prefer_parsed_title", True):
             return title, hints
 
@@ -1389,6 +1407,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "original_title": self._clean_title(
                     getattr(meta, "original_name", "") or getattr(meta, "org_string", "")
                 ),
+                "source_title": raw_title,
             }
             hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "", 0)})
             if self._config.get("debug") and title != raw_title:
@@ -1416,6 +1435,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     or getattr(runtime_meta, "org_string", "")
                     or raw_title
                 ),
+                "source_title": raw_title,
             }
             hints.update({key: value for key, value in runtime_hints.items() if value not in (None, "")})
             return parsed_name, hints
@@ -1433,6 +1453,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "original_title": self._clean_title(
                 self._event_get(event_data, "original_title") or raw_title
             ),
+            "source_title": raw_title,
         }
         hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "")})
         return parsed_name, hints
@@ -1522,6 +1543,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             title: str,
             hints: Optional[Dict[str, Any]] = None,
             include_candidates: bool = False,
+            recognition_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """生成降级搜索词、检索并评分候选，返回可解释的选择结果。"""
         merged_hints = self._extract_hints(title)
@@ -1533,36 +1555,69 @@ class TmdbRecognizeEnhancer(_PluginBase):
             hints.pop("year", None)
         if not self._config.get("use_original_title_evidence", True):
             hints.pop("original_title", None)
-        if self._config.get("recognition_mode") == "tmdb_first":
-            return self._recognize_tmdb_first_result(title, hints, include_candidates)
+        mode = recognition_mode if recognition_mode in ("tmdb_first", "scored") \
+            else self._config.get("recognition_mode")
+        search_title, title_recovery = self._recover_search_title(title, hints)
+        if mode == "tmdb_first":
+            result = self._recognize_tmdb_first_result(search_title, hints, include_candidates)
+            result.update({
+                "title": title,
+                "search_title": search_title,
+                "title_recovery": title_recovery,
+            })
+            return result
 
-        queries = self._build_queries(title)
+        queries = self._build_queries(search_title)
         candidates = self._search_candidates(queries)
-        scored = [self._score_candidate(title, queries, candidate, hints) for candidate in candidates]
+        scored = [self._score_candidate(search_title, queries, candidate, hints) for candidate in candidates]
         scored.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
 
-        best = scored[0] if scored else None
-        runner_up = scored[1] if len(scored) > 1 else None
+        ranked, duplicate_summary = self._collapse_duplicate_candidates(scored)
+        ranked, shadow_count = self._suppress_shadow_season_entries(ranked, hints)
+        duplicate_summary["shadow_season_count"] = shadow_count
+        ranked, decisive = self._apply_decisive_year_evidence(ranked, hints)
+        best = ranked[0] if ranked else None
+        runner_up = ranked[1] if len(ranked) > 1 else None
         margin = round(best["score"] - runner_up["score"], 2) if best and runner_up else (100.0 if best else 0.0)
+        raw_margin = margin
+        if decisive and margin < 0:
+            margin = 0.0
         minimum_score = float(self._config["minimum_score"])
         minimum_margin = float(self._config["minimum_margin"])
-        accepted = bool(best and best["score"] >= minimum_score and margin >= minimum_margin)
+        margin_waived = bool(decisive and best and best["score"] >= minimum_score)
+        accepted = bool(
+            best and best["score"] >= minimum_score
+            and (margin >= minimum_margin or margin_waived)
+        )
         web_search = {"attempted": False}
 
         if self._config.get("web_search_fallback") and not accepted:
-            candidates, web_search = self._apply_web_search_fallback(title, hints, candidates)
-            scored = [self._score_candidate(title, queries, candidate, hints) for candidate in candidates]
+            candidates, web_search = self._apply_web_search_fallback(search_title, hints, candidates)
+            scored = [self._score_candidate(search_title, queries, candidate, hints) for candidate in candidates]
             scored.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
-            best = scored[0] if scored else None
-            runner_up = scored[1] if len(scored) > 1 else None
+            ranked, duplicate_summary = self._collapse_duplicate_candidates(scored)
+            ranked, shadow_count = self._suppress_shadow_season_entries(ranked, hints)
+            duplicate_summary["shadow_season_count"] = shadow_count
+            ranked, decisive = self._apply_decisive_year_evidence(ranked, hints)
+            best = ranked[0] if ranked else None
+            runner_up = ranked[1] if len(ranked) > 1 else None
             margin = round(best["score"] - runner_up["score"], 2) if best and runner_up else (100.0 if best else 0.0)
-            accepted = bool(best and best["score"] >= minimum_score and margin >= minimum_margin)
+            raw_margin = margin
+            if decisive and margin < 0:
+                margin = 0.0
+            margin_waived = bool(decisive and best and best["score"] >= minimum_score)
+            accepted = bool(
+                best and best["score"] >= minimum_score
+                and (margin >= minimum_margin or margin_waived)
+            )
 
         if not best:
             reason = "TMDB 与搜索引擎兜底均未返回可验证候选" if web_search.get("attempted") \
                 else "所有降级搜索词均未返回 TMDB 候选"
         elif best["score"] < minimum_score:
             reason = f"最佳候选 {best['score']} 分，低于阈值 {minimum_score:g}"
+        elif decisive:
+            reason = decisive["reason"]
         elif margin < minimum_margin:
             reason = f"前两名仅相差 {margin:g} 分，低于分差阈值 {minimum_margin:g}"
         elif best.get("web_evidence", 0) >= float(self._config["web_search_min_evidence"]):
@@ -1577,18 +1632,77 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "accepted": accepted,
             "selection_mode": "scored",
             "title": title,
+            "search_title": search_title,
+            "title_recovery": title_recovery,
             "reason": reason,
             "queries": queries,
             "hints": self._serialize_hints(hints),
             "best": best,
             "runner_up": runner_up,
             "margin": margin,
+            "raw_margin": raw_margin,
+            "margin_waived": margin_waived,
+            "decisive_evidence": decisive,
+            "duplicate_summary": duplicate_summary,
             "web_search": web_search,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         if include_candidates:
             result["candidates"] = scored
         return result
+
+    def _recover_search_title(
+            self, parsed_title: str, hints: Dict[str, Any]
+    ) -> Tuple[str, Optional[Dict[str, str]]]:
+        """从原标题保守恢复被 MP 解析器误截断的英文标题，仅影响 TMDB 查询。"""
+        if not self._config.get("recover_truncated_title", True):
+            return parsed_title, None
+        source = self._clean_title(hints.get("source_title") or hints.get("original_title"))
+        if not source or source == parsed_title:
+            return parsed_title, None
+
+        candidate = re.sub(r"(?i)\.(?:mkv|mp4|avi|mov|wmv|ts|m2ts)$", "", source).strip()
+        candidate = re.sub(r"^\s*(?:\[[^\]]{1,80}\]\s*)+", "", candidate)
+        candidate = re.sub(r"[._]+", " ", candidate)
+        candidate = re.sub(r"\s+", " ", candidate).strip()
+        boundary_patterns = (
+            r"(?i)\bS\d{1,3}E\d{1,4}(?:-E?\d{1,4})?\b",
+            r"(?i)\b(?:EP?|Episode)\s*\d{1,4}\b",
+            r"(?i)\b(?:2160|1080|720|480)[pi]\b",
+            r"(?i)\b(?:WEB[ -]?DL|WEBRip|BluRay|BDRip|HDTV|REMUX)\b",
+            r"(?i)\b(?:19|20)\d{2}\b",
+            r"\s+\[[^\]]+\]",
+        )
+        positions = []
+        for pattern in boundary_patterns:
+            match = re.search(pattern, candidate)
+            if match and match.start() > 2:
+                positions.append(match.start())
+        if positions:
+            candidate = candidate[:min(positions)].strip(" -._")
+        candidate = re.sub(r"\s+-\s+\d{1,4}\s*$", "", candidate).strip()
+
+        parsed_tokens = self._tokens(parsed_title)
+        recovered_tokens = self._tokens(candidate)
+        if len(parsed_tokens) < 2 or len(recovered_tokens) < len(parsed_tokens) + 2:
+            return parsed_title, None
+        prefix_matches = sum(
+            left == right for left, right in zip(parsed_tokens, recovered_tokens)
+        )
+        if prefix_matches / len(parsed_tokens) < .8:
+            return parsed_title, None
+        next_token = recovered_tokens[len(parsed_tokens)]
+        # 当前已确认的异常来自英文代词 I 被当作罗马数字。只对这一类明确边界
+        # 自动恢复，避免把 MP 有意提取的主体名又扩展成副标题或发布说明。
+        if next_token not in {"i", "v", "x", "ii", "iii", "iv", "vi"}:
+            return parsed_title, None
+        if len(parsed_tokens) > 4 and len(recovered_tokens) < len(parsed_tokens) * 1.35:
+            return parsed_title, None
+        return candidate, {
+            "from": parsed_title,
+            "to": candidate,
+            "reason": "MP 解析标题是原标题的异常短前缀，已在季集或发布参数前恢复完整名称",
+        }
 
     def _recognize_tmdb_first_result(
             self,
@@ -1658,7 +1772,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         ordered = sorted(
             collected.values(),
             key=lambda item: min(
-                (hit["rank"], hit["query_index"]) for hit in item.get("_query_hits", [])
+                (hit["query_index"], hit["rank"]) for hit in item.get("_query_hits", [])
             ),
         )
         if self._config.get("fetch_aliases"):
@@ -1970,7 +2084,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         weight_total = sum(weight for _, weight in weighted if weight > 0)
         score = sum(value * weight for value, weight in weighted if weight > 0) / weight_total if weight_total else 0
         if exact_original:
-            score = 100.0
+            # 完全同名是强标题证据，但不能抹掉年份、类型、TMDB 排名和原标题锚点。
+            # 直接赋 100 会令重复条目永久形成 100/100，制造假分差。
+            score = min(100.0, score + 6.0)
         best_query_index = min(
             (self._safe_int(hit.get("query_index"), 99) for hit in tmdb_hits),
             default=99,
@@ -1985,12 +2101,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 score -= min(55.0, 25.0 + (minimum_anchor - anchor_score))
         requested_season = self._safe_int(hints.get("season"), 0)
         season_exists = None
+        season_numbers = {
+            self._safe_int(season.get("season_number"), -1)
+            for season in candidate.get("seasons") or []
+            if isinstance(season, dict)
+            and self._safe_int(season.get("season_number"), -1) >= 0
+        }
         if requested_season and candidate_type == MediaType.TV:
-            season_numbers = {
-                self._safe_int(season.get("season_number"), -1)
-                for season in candidate.get("seasons") or []
-                if isinstance(season, dict)
-            }
             if season_numbers:
                 season_exists = requested_season in season_numbers
                 if not season_exists:
@@ -2005,6 +2122,31 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "media_type": candidate_type.value if candidate_type else "",
             "score": score,
             "popularity": round(float(candidate.get("popularity") or 0), 2),
+            "vote_count": self._safe_int(candidate.get("vote_count"), 0),
+            "query_index": best_query_index,
+            "tmdb_rank": best_rank,
+            "identity_names": list(dict.fromkeys(
+                normalized for value in (
+                    display_name,
+                    candidate.get("original_title") or candidate.get("original_name"),
+                    best_components["matched_name"],
+                ) if (normalized := self._normalize_text(value))
+            )),
+            "genre_ids": sorted({
+                genre_id for item in (candidate.get("genres") or candidate.get("genre_ids") or [])
+                if (genre_id := self._safe_int(
+                    item.get("id") if isinstance(item, dict) else item, 0
+                ))
+            }),
+            "season_numbers": sorted(season_numbers),
+            "number_of_seasons": self._safe_int(candidate.get("number_of_seasons"), 0),
+            "title_season": (
+                self._infer_title_season(display_name)
+                or self._infer_title_season(candidate.get("original_title") or candidate.get("original_name") or "")
+            ),
+            "franchise_base": self._franchise_base_title(
+                candidate.get("original_title") or candidate.get("original_name") or display_name
+            ),
             "matched_name": best_components["matched_name"],
             "exact_original": exact_original,
             "season_exists": season_exists,
@@ -2028,6 +2170,162 @@ class TmdbRecognizeEnhancer(_PluginBase):
             },
             "queries": [hit.get("query") for hit in hits],
         }
+
+    def _collapse_duplicate_candidates(
+            self, scored: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """同名同年同类型候选先归组，避免重复条目占据前两名制造假分差。"""
+        groups: List[List[Dict[str, Any]]] = []
+        for candidate in scored:
+            group = next(
+                (items for items in groups if self._same_work_identity(candidate, items[0])),
+                None,
+            )
+            if group is None:
+                groups.append([candidate])
+            else:
+                group.append(candidate)
+
+        representatives: List[Dict[str, Any]] = []
+        suppressed = 0
+        for group in groups:
+            winner = min(group, key=lambda item: (
+                self._safe_int(item.get("query_index"), 99),
+                self._safe_int(item.get("tmdb_rank"), 99),
+                -self._safe_int(item.get("vote_count"), 0),
+                -self._safe_float(item.get("popularity"), 0),
+            ))
+            winner["duplicate_count"] = len(group)
+            representatives.append(winner)
+            for candidate in group:
+                if candidate is winner:
+                    continue
+                candidate["suppressed_as_duplicate"] = True
+                candidate["duplicate_of"] = winner.get("tmdb_id")
+                candidate["suppressed_reason"] = (
+                    f"与 TMDB {winner.get('tmdb_id')} 同名、同年且类型一致；"
+                    "按完整查询中的 TMDB 原始排名保留代表条目"
+                )
+                suppressed += 1
+        representatives.sort(
+            key=lambda item: (item["score"], item.get("popularity") or 0),
+            reverse=True,
+        )
+        return representatives, {
+            "group_count": len(groups),
+            "suppressed_count": suppressed,
+        }
+
+    def _suppress_shadow_season_entries(
+            self, ranked: List[Dict[str, Any]], hints: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """目标季已存在于总条目时，保守排除同系列的私人单季平行条目。"""
+        requested_season = self._safe_int(hints.get("season"), 0)
+        if requested_season <= 1:
+            return ranked, 0
+        parents = [
+            item for item in ranked
+            if requested_season in set(item.get("season_numbers") or [])
+        ]
+        if not parents:
+            return ranked, 0
+        suppressed_ids = set()
+        for child in ranked:
+            if self._safe_int(child.get("title_season"), 0) != requested_season:
+                continue
+            child_base = child.get("franchise_base")
+            if not child_base:
+                continue
+            child_regular_seasons = {
+                value for value in child.get("season_numbers") or [] if self._safe_int(value, 0) > 0
+            }
+            if self._safe_int(child.get("number_of_seasons"), 0) > 1 or len(child_regular_seasons) > 1:
+                continue
+            parent = next((item for item in parents if (
+                item is not child
+                and item.get("franchise_base") == child_base
+                and self._safe_int(item.get("tmdb_rank"), 99)
+                <= self._safe_int(child.get("tmdb_rank"), 99)
+                and self._safe_int(item.get("year"), 9999) < self._safe_int(child.get("year"), 0)
+            )), None)
+            if not parent:
+                continue
+            child["suppressed_as_shadow_season"] = True
+            child["suppressed_reason"] = (
+                f"TMDB {parent.get('tmdb_id')} 已包含第 {requested_season} 季；"
+                f"当前条目只描述同系列第 {requested_season} 季，按平行单季条目排除"
+            )
+            child["shadow_of"] = parent.get("tmdb_id")
+            suppressed_ids.add(child.get("tmdb_id"))
+        return [item for item in ranked if item.get("tmdb_id") not in suppressed_ids], len(suppressed_ids)
+
+    @classmethod
+    def _franchise_base_title(cls, value: Any) -> str:
+        text = str(value or "")
+        text = re.sub(
+            r"(?i)(?:\bseason\s*\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)\s+season\b|"
+            r"\bS\d{1,2}\b|第\s*[一二三四五六七八九十\d]{1,3}\s*季)",
+            " ",
+            text,
+        )
+        return cls._normalize_text(text)
+
+    def _same_work_identity(self, left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+        """只合并具有共享身份名、同年、同媒体类型且题材不冲突的保守重复项。"""
+        if left.get("media_type") != right.get("media_type"):
+            return False
+        if not left.get("year") or left.get("year") != right.get("year"):
+            return False
+        left_names = set(left.get("identity_names") or [])
+        right_names = set(right.get("identity_names") or [])
+        if not left_names or not right_names or not (left_names & right_names):
+            return False
+        left_genres = set(left.get("genre_ids") or [])
+        right_genres = set(right.get("genre_ids") or [])
+        return not left_genres or not right_genres or bool(left_genres & right_genres)
+
+    def _apply_decisive_year_evidence(
+            self, ranked: List[Dict[str, Any]], hints: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """标题身份一致时由精确年份裁决同名改编，不再依赖微小权重差。"""
+        requested_year = self._normalize_year(hints.get("year"))
+        if not requested_year or len(ranked) < 2:
+            return ranked, None
+        current = ranked[0]
+        if current.get("year") == requested_year:
+            return ranked, None
+        exact = [item for item in ranked if item.get("year") == requested_year]
+        if not exact:
+            return ranked, None
+        chosen = max(exact, key=lambda item: (
+            self._safe_float(item.get("score"), 0),
+            -self._safe_int(item.get("tmdb_rank"), 99),
+        ))
+        if not self._same_title_family(current, chosen):
+            return ranked, None
+        if self._safe_float(chosen.get("score"), 0) + 12 \
+                < self._safe_float(current.get("score"), 0):
+            return ranked, None
+        current["year_conflict"] = True
+        reordered = [chosen, *[item for item in ranked if item is not chosen]]
+        return reordered, {
+            "kind": "exact_year",
+            "requested_year": requested_year,
+            "excluded_tmdb_id": current.get("tmdb_id"),
+            "reason": (
+                f"年份强证据裁决：TMDB {chosen.get('tmdb_id')} 与提示年份 {requested_year} 精确一致；"
+                f"同名候选 TMDB {current.get('tmdb_id')} 为 {current.get('year') or '未知年份'}，"
+                "因此不再要求二者满足普通分差门槛"
+            ),
+        }
+
+    @staticmethod
+    def _same_title_family(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+        if left.get("media_type") != right.get("media_type"):
+            return False
+        left_names = set(left.get("identity_names") or [])
+        right_names = set(right.get("identity_names") or [])
+        return bool(left_names and right_names and left_names & right_names)
 
     def _query_confidence(self, hits: List[Dict[str, Any]]) -> Tuple[float, Dict[str, Any]]:
         """评价候选来自完整查询还是宽泛降级词，并奖励唯一与重复命中。"""
@@ -2247,7 +2545,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged = {**self.DEFAULT_CONFIG, **(config or {})}
         bool_keys = (
             "enabled", "recognizer_enabled", "show_sidebar_nav", "debug", "prefer_parsed_title",
-            "use_year_hint", "use_original_title_evidence", "web_search_fallback",
+            "use_year_hint", "use_original_title_evidence", "recover_truncated_title",
+            "web_search_fallback",
             "main_title_fallback",
             "progressive_fallback", "fetch_aliases", "episode_normalizer_enabled",
         )

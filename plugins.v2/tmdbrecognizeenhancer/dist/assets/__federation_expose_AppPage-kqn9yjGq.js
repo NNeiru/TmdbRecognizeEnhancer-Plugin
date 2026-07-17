@@ -1,6 +1,6 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { S as StrategySettings } from './StrategySettings-yIwMDGG4.js';
-import { _ as _export_sfc, u as unwrapResponse, c as cloneConfig, m as mediaTypeText, s as scoreColor } from './utils-B-q32kVJ.js';
+import { S as StrategySettings } from './StrategySettings-OR2zlu7c.js';
+import { _ as _export_sfc, u as unwrapResponse, c as cloneConfig, m as mediaTypeText, s as scoreColor } from './utils-oR-EWyhQ.js';
 
 const {toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,createElementVNode:_createElementVNode$1,createElementBlock:_createElementBlock$1,createVNode:_createVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,normalizeClass:_normalizeClass$1,vShow:_vShow$1,withDirectives:_withDirectives$1,unref:_unref$1,mergeProps:_mergeProps} = await importShared('vue');
 
@@ -1947,13 +1947,13 @@ const _hoisted_20 = { class: "sticky-actions" };
 const _hoisted_21 = { class: "workspace-panel" };
 const _hoisted_22 = { class: "tab-content" };
 const _hoisted_23 = {
-  key: 1,
+  key: 5,
   class: "pipeline-list mb-4"
 };
 const _hoisted_24 = { class: "text-caption text-medium-emphasis" };
 const _hoisted_25 = { class: "d-flex flex-wrap ga-2 mb-4" };
 const _hoisted_26 = {
-  key: 3,
+  key: 7,
   class: "best-result"
 };
 const _hoisted_27 = { class: "text-h6" };
@@ -2060,7 +2060,10 @@ async function runPreview() {
   error.value = '';
   preview.value = null;
   try {
-    const response = await props.api.post(`${pluginBase.value}/preview`, { ...previewInput.value });
+    const response = await props.api.post(`${pluginBase.value}/preview`, {
+      ...previewInput.value,
+      recognition_mode: config.value.recognition_mode,
+    });
     preview.value = unwrapResponse(response);
   } catch (err) {
     error.value = err?.message || '试跑失败';
@@ -2644,6 +2647,18 @@ return (_ctx, _cache) => {
                                       _: 1
                                     }, 8, ["color"])
                                   ]),
+                                  append: _withCtx(() => [
+                                    _createVNode(_component_VChip, {
+                                      size: "small",
+                                      color: preview.value.selection_mode === 'tmdb_first' ? 'primary' : 'secondary',
+                                      variant: "tonal"
+                                    }, {
+                                      default: _withCtx(() => [
+                                        _createTextVNode(" 实际：" + _toDisplayString(preview.value.selection_mode === 'tmdb_first' ? '单次首结果' : '可解释评分'), 1)
+                                      ]),
+                                      _: 1
+                                    }, 8, ["color"])
+                                  ]),
                                   default: _withCtx(() => [
                                     _createVNode(_component_VCardTitle, null, {
                                       default: _withCtx(() => [
@@ -2662,9 +2677,23 @@ return (_ctx, _cache) => {
                                 }),
                                 _createVNode(_component_VCardText, null, {
                                   default: _withCtx(() => [
-                                    (preview.value.original_title)
+                                    (preview.value.mode_mismatch)
                                       ? (_openBlock(), _createBlock(_component_VAlert, {
                                           key: 0,
+                                          type: "warning",
+                                          variant: "tonal",
+                                          density: "compact",
+                                          class: "mb-4"
+                                        }, {
+                                          default: _withCtx(() => [...(_cache[39] || (_cache[39] = [
+                                            _createTextVNode(" 页面请求模式与插件已保存模式不同：本次按页面选择执行；请重新保存配置，确保实际整理使用相同模式。 ", -1)
+                                          ]))]),
+                                          _: 1
+                                        }))
+                                      : _createCommentVNode("", true),
+                                    (preview.value.original_title)
+                                      ? (_openBlock(), _createBlock(_component_VAlert, {
+                                          key: 1,
                                           type: "info",
                                           variant: "tonal",
                                           density: "compact",
@@ -2672,6 +2701,48 @@ return (_ctx, _cache) => {
                                         }, {
                                           default: _withCtx(() => [
                                             _createTextVNode("解析后标题：" + _toDisplayString(preview.value.title), 1)
+                                          ]),
+                                          _: 1
+                                        }))
+                                      : _createCommentVNode("", true),
+                                    (preview.value.title_recovery)
+                                      ? (_openBlock(), _createBlock(_component_VAlert, {
+                                          key: 2,
+                                          type: "info",
+                                          variant: "tonal",
+                                          density: "compact",
+                                          class: "mb-4"
+                                        }, {
+                                          default: _withCtx(() => [
+                                            _createTextVNode(" 检测到 MP 标题截断：" + _toDisplayString(preview.value.title_recovery.from) + " → " + _toDisplayString(preview.value.title_recovery.to), 1)
+                                          ]),
+                                          _: 1
+                                        }))
+                                      : _createCommentVNode("", true),
+                                    (preview.value.duplicate_summary?.suppressed_count)
+                                      ? (_openBlock(), _createBlock(_component_VAlert, {
+                                          key: 3,
+                                          type: "info",
+                                          variant: "tonal",
+                                          density: "compact",
+                                          class: "mb-4"
+                                        }, {
+                                          default: _withCtx(() => [
+                                            _createTextVNode(" 已归并 " + _toDisplayString(preview.value.duplicate_summary.suppressed_count) + " 个同名、同年、同类型的重复候选；分差只比较不同作品。 ", 1)
+                                          ]),
+                                          _: 1
+                                        }))
+                                      : _createCommentVNode("", true),
+                                    (preview.value.duplicate_summary?.shadow_season_count)
+                                      ? (_openBlock(), _createBlock(_component_VAlert, {
+                                          key: 4,
+                                          type: "info",
+                                          variant: "tonal",
+                                          density: "compact",
+                                          class: "mb-4"
+                                        }, {
+                                          default: _withCtx(() => [
+                                            _createTextVNode(" 已排除 " + _toDisplayString(preview.value.duplicate_summary.shadow_season_count) + " 个平行单季条目：目标季已存在于更早创建的总系列条目中。 ", 1)
                                           ]),
                                           _: 1
                                         }))
@@ -2697,7 +2768,7 @@ return (_ctx, _cache) => {
                                       : _createCommentVNode("", true),
                                     (preview.value.web_search?.attempted)
                                       ? (_openBlock(), _createBlock(_component_VAlert, {
-                                          key: 2,
+                                          key: 6,
                                           type: "info",
                                           variant: "tonal",
                                           density: "compact",
@@ -2709,7 +2780,7 @@ return (_ctx, _cache) => {
                                           _: 1
                                         }))
                                       : _createCommentVNode("", true),
-                                    _cache[41] || (_cache[41] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-2" }, "实际搜索词", -1)),
+                                    _cache[42] || (_cache[42] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-2" }, "实际搜索词", -1)),
                                     _createElementVNode("div", _hoisted_25, [
                                       (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(preview.value.queries, (query) => {
                                         return (_openBlock(), _createBlock(_component_VChip, {
@@ -2746,14 +2817,14 @@ return (_ctx, _cache) => {
                                       : _createCommentVNode("", true),
                                     (preview.value.episode_adjustment)
                                       ? (_openBlock(), _createBlock(_component_VAlert, {
-                                          key: 4,
+                                          key: 8,
                                           type: preview.value.episode_adjustment.applied ? 'success' : 'info',
                                           variant: "tonal",
                                           density: "compact",
                                           class: "mt-4"
                                         }, {
                                           default: _withCtx(() => [
-                                            _cache[39] || (_cache[39] = _createElementVNode("strong", null, "集数偏移：", -1)),
+                                            _cache[40] || (_cache[40] = _createElementVNode("strong", null, "集数偏移：", -1)),
                                             _createTextVNode(_toDisplayString(preview.value.episode_adjustment.reason) + " ", 1),
                                             (preview.value.episode_adjustment.season != null && preview.value.episode_adjustment.episode != null)
                                               ? (_openBlock(), _createElementBlock("span", _hoisted_29, " · 最终 S" + _toDisplayString(String(preview.value.episode_adjustment.season).padStart(2, '0')) + "E" + _toDisplayString(String(preview.value.episode_adjustment.episode).padStart(2, '0')), 1))
@@ -2764,12 +2835,12 @@ return (_ctx, _cache) => {
                                       : _createCommentVNode("", true),
                                     (preview.value.candidates?.length)
                                       ? (_openBlock(), _createBlock(_component_VTable, {
-                                          key: 5,
+                                          key: 9,
                                           density: "compact",
                                           class: "candidate-table mt-4"
                                         }, {
                                           default: _withCtx(() => [
-                                            _cache[40] || (_cache[40] = _createElementVNode("thead", null, [
+                                            _cache[41] || (_cache[41] = _createElementVNode("thead", null, [
                                               _createElementVNode("tr", null, [
                                                 _createElementVNode("th", null, "候选"),
                                                 _createElementVNode("th", null, "命中名称"),
@@ -2779,11 +2850,39 @@ return (_ctx, _cache) => {
                                             _createElementVNode("tbody", null, [
                                               (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(preview.value.candidates, (candidate) => {
                                                 return (_openBlock(), _createElementBlock("tr", {
-                                                  key: `${candidate.media_type}-${candidate.tmdb_id}`
+                                                  key: `${candidate.media_type}-${candidate.tmdb_id}`,
+                                                  class: _normalizeClass({ 'candidate-suppressed': candidate.suppressed_as_duplicate || candidate.suppressed_as_shadow_season })
                                                 }, [
                                                   _createElementVNode("td", null, [
                                                     _createElementVNode("strong", null, _toDisplayString(candidate.name), 1),
-                                                    _createElementVNode("div", _hoisted_30, _toDisplayString(candidate.year || '—') + " · #" + _toDisplayString(candidate.tmdb_id), 1)
+                                                    _createElementVNode("div", _hoisted_30, _toDisplayString(candidate.year || '—') + " · #" + _toDisplayString(candidate.tmdb_id), 1),
+                                                    (candidate.suppressed_as_duplicate)
+                                                      ? (_openBlock(), _createBlock(_component_VChip, {
+                                                          key: 0,
+                                                          size: "x-small",
+                                                          color: "info",
+                                                          variant: "tonal",
+                                                          class: "mt-1"
+                                                        }, {
+                                                          default: _withCtx(() => [
+                                                            _createTextVNode("重复项，归入 #" + _toDisplayString(candidate.duplicate_of), 1)
+                                                          ]),
+                                                          _: 2
+                                                        }, 1024))
+                                                      : (candidate.suppressed_as_shadow_season)
+                                                        ? (_openBlock(), _createBlock(_component_VChip, {
+                                                            key: 1,
+                                                            size: "x-small",
+                                                            color: "warning",
+                                                            variant: "tonal",
+                                                            class: "mt-1"
+                                                          }, {
+                                                            default: _withCtx(() => [
+                                                              _createTextVNode("平行单季项，归入 #" + _toDisplayString(candidate.shadow_of), 1)
+                                                            ]),
+                                                            _: 2
+                                                          }, 1024))
+                                                        : _createCommentVNode("", true)
                                                   ]),
                                                   _createElementVNode("td", _hoisted_31, [
                                                     _createTextVNode(_toDisplayString(candidate.matched_name || '—'), 1),
@@ -2800,12 +2899,12 @@ return (_ctx, _cache) => {
                                                       color: _unref(scoreColor)(candidate.score)
                                                     }, {
                                                       default: _withCtx(() => [
-                                                        _createTextVNode(_toDisplayString(candidate.score), 1)
+                                                        _createTextVNode(_toDisplayString(preview.value.selection_mode === 'tmdb_first' ? '诊断 ' : '') + _toDisplayString(candidate.diagnostic_score ?? candidate.score), 1)
                                                       ]),
                                                       _: 2
                                                     }, 1032, ["color"])
                                                   ])
-                                                ]))
+                                                ], 2))
                                               }), 128))
                                             ])
                                           ]),
@@ -2824,8 +2923,8 @@ return (_ctx, _cache) => {
                                 size: "64",
                                 color: "primary"
                               }),
-                              _cache[42] || (_cache[42] = _createElementVNode("div", { class: "text-h6 mt-3" }, "等待一次综合试跑", -1)),
-                              _cache[43] || (_cache[43] = _createElementVNode("div", { class: "text-body-2 text-medium-emphasis" }, "结果会同时解释 TMDB 候选与最终季集坐标", -1))
+                              _cache[43] || (_cache[43] = _createElementVNode("div", { class: "text-h6 mt-3" }, "等待一次综合试跑", -1)),
+                              _cache[44] || (_cache[44] = _createElementVNode("div", { class: "text-body-2 text-medium-emphasis" }, "结果会同时解释 TMDB 候选与最终季集坐标", -1))
                             ]))
                       ]),
                       _: 1
@@ -2840,7 +2939,7 @@ return (_ctx, _cache) => {
             _withDirectives(_createElementVNode("section", _hoisted_35, [
               _createElementVNode("div", _hoisted_36, [
                 _createElementVNode("div", _hoisted_37, [
-                  _cache[45] || (_cache[45] = _createElementVNode("div", null, [
+                  _cache[46] || (_cache[46] = _createElementVNode("div", null, [
                     _createElementVNode("div", { class: "text-h6" }, "模块运行日志"),
                     _createElementVNode("div", { class: "text-body-2 text-medium-emphasis" }, "汇总 TMDB 搜索增强与集数偏移的运行结论，不保存完整响应")
                   ], -1)),
@@ -2852,7 +2951,7 @@ return (_ctx, _cache) => {
                     disabled: !history.value.length,
                     onClick: clearHistory
                   }, {
-                    default: _withCtx(() => [...(_cache[44] || (_cache[44] = [
+                    default: _withCtx(() => [...(_cache[45] || (_cache[45] = [
                       _createTextVNode("清空", -1)
                     ]))]),
                     _: 1
@@ -2873,7 +2972,7 @@ return (_ctx, _cache) => {
                         }, [
                           _createElementVNode("div", {
                             class: _normalizeClass(["history-marker", item.accepted ? 'history-marker-success' : 'history-marker-warning'])
-                          }, [...(_cache[46] || (_cache[46] = [
+                          }, [...(_cache[47] || (_cache[47] = [
                             _createElementVNode("span", null, null, -1)
                           ]))], 2),
                           _createVNode(_component_VCard, {
@@ -2967,7 +3066,7 @@ return (_ctx, _cache) => {
                         icon: "mdi-text-box-search-outline",
                         size: "60"
                       }),
-                      _cache[47] || (_cache[47] = _createElementVNode("div", { class: "text-h6 mt-3" }, "尚无模块日志", -1))
+                      _cache[48] || (_cache[48] = _createElementVNode("div", { class: "text-h6 mt-3" }, "尚无模块日志", -1))
                     ]))
               ])
             ], 512), [
@@ -2994,6 +3093,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b8f2c2ae"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-06231d9c"]]);
 
 export { AppPage as default };
