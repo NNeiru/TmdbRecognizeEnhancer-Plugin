@@ -512,7 +512,7 @@ onMounted(async () => {
       </VCardItem>
       <VExpandTransition>
         <div v-show="rulesOpen" class="rules-scroll">
-          <div class="rules-controls pa-4 pt-0">
+          <div class="rules-controls pa-4 pt-4">
             <VTextField
               v-model="ruleSearch" label="搜索标题、别名或 TMDBID" prepend-inner-icon="mdi-magnify"
               clearable hide-details density="compact"
@@ -734,8 +734,28 @@ onMounted(async () => {
             :items="(inspection?.groups || []).map(group => ({ title: `${group.recommended ? '推荐 · ' : ''}${group.name} · ${groupType(group.type)} · ${group.episode_count} 集`, value: group.id }))"
             label="目标剧集组"
           />
-          <div v-if="selectedGroup" class="text-caption text-medium-emphasis mb-4">
-            <span v-for="season in selectedGroup.seasons || []" :key="season.season" class="me-3">S{{ season.season }} · {{ season.episode_count }} 集</span>
+          <div v-if="selectedGroup" class="group-preview mb-4">
+            <div class="d-flex align-center flex-wrap ga-2 mb-2">
+              <strong>分季预览</strong>
+              <VChip size="x-small" variant="tonal">{{ selectedGroup.seasons?.filter(item => !item.is_special).length || 0 }} 个常规季</VChip>
+              <VChip v-if="selectedGroup.seasons?.some(item => item.is_special)" size="x-small" color="secondary" variant="tonal">包含 Special</VChip>
+              <VChip v-if="selectedGroup.coverage" size="x-small" variant="outlined">正片覆盖 {{ selectedGroup.coverage }}%</VChip>
+            </div>
+            <div class="group-season-grid">
+              <div v-for="season in selectedGroup.seasons || []" :key="season.season" :class="['group-season-item', { special: season.is_special }]">
+                <div class="d-flex align-center ga-2">
+                  <strong>S{{ String(season.season).padStart(2, '0') }}</strong>
+                  <VChip v-if="season.is_special" size="x-small" color="secondary">Special</VChip>
+                  <span class="text-truncate">{{ season.name }}</span>
+                </div>
+                <div class="text-caption text-medium-emphasis mt-1">
+                  {{ season.episode_count }} 集 · E{{ String(season.first_episode || 1).padStart(2, '0') }}–E{{ String(season.last_episode || season.episode_count).padStart(2, '0') }}
+                </div>
+                <div v-if="season.first_air_date || season.last_air_date" class="text-caption text-medium-emphasis">
+                  {{ season.first_air_date || '日期未知' }}<span v-if="season.last_air_date && season.last_air_date !== season.first_air_date"> → {{ season.last_air_date }}</span>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="d-flex align-center mb-2"><strong>季度片段</strong><VSpacer /><VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="addInstallment">添加</VBtn></div>
           <VExpansionPanels variant="accordion">
@@ -801,6 +821,10 @@ onMounted(async () => {
 .rules-scroll { max-height: 480px; overflow-y: auto; }
 .rule-group-title { display: flex; align-items: center; gap: 7px; color: rgba(var(--v-theme-on-surface), .82); }
 .rule-card { border: 1px solid rgba(var(--v-theme-success), .1); }
+.group-preview { padding: 12px; border: 1px solid rgba(var(--v-theme-primary), .16); border-radius: 12px; background: rgba(var(--v-theme-primary), .035); }
+.group-season-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; }
+.group-season-item { min-width: 0; padding: 10px; border-radius: 9px; background: rgba(var(--v-theme-surface), .72); border: 1px solid rgba(var(--v-theme-on-surface), .08); }
+.group-season-item.special { border-color: rgba(var(--v-theme-secondary), .22); background: rgba(var(--v-theme-secondary), .055); }
 .empty-catalog, .empty-rules { grid-column: 1 / -1; min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: rgba(var(--v-theme-on-surface), .55); }
 .manual-match { display: grid; grid-template-columns: 120px auto auto; gap: 8px; align-items: center; min-width: 350px; }
 .tmdb-correction { display: grid; grid-template-columns: minmax(180px, 1fr) auto; gap: 10px; align-items: center; }

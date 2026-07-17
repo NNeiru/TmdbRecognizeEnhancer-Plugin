@@ -197,9 +197,49 @@ def test_group_preference_selects_production_layout():
 
     assert group["id"] == "production"
     assert group["type"] == 6
-    assert group["seasons"] == [
-        {"season": 1, "episode_count": 12},
-        {"season": 2, "episode_count": 12},
+    assert [(item["season"], item["episode_count"], item["is_special"]) for item in group["seasons"]] == [
+        (1, 12, False),
+        (2, 12, False),
+    ]
+
+
+def test_special_group_is_forced_to_s00_and_excluded_from_regular_sequence():
+    class SpecialBetweenSeasons(FakeTmdbApi):
+        @staticmethod
+        def get_info(mtype, tmdbid):
+            info = FakeTmdbApi.get_info(mtype, tmdbid)
+            info["episode_groups"] = {"results": [{
+                "id": "production", "name": "Production Seasons", "type": 6,
+                "group_count": 3, "episode_count": 26,
+            }]}
+            return info
+
+        @staticmethod
+        def get_tv_group_seasons(group_id):
+            return [
+                {"order": 0, "name": "Season One", "episodes": [
+                    {"id": index, "season_number": 1, "episode_number": index}
+                    for index in range(1, 13)
+                ]},
+                {"order": 1, "name": "特别篇", "episodes": [
+                    {"id": 100 + index, "season_number": 0, "episode_number": index}
+                    for index in range(1, 3)
+                ]},
+                {"order": 2, "name": "Season Two", "episodes": [
+                    {"id": 12 + index, "season_number": 1, "episode_number": 12 + index}
+                    for index in range(1, 13)
+                ]},
+            ]
+
+    normalizer = EpisodeNormalizer(SpecialBetweenSeasons())
+    layout = normalizer._group_layout(100, "production")
+    summary = normalizer._layout_summary(layout)
+
+    assert (layout["sequence"][0]["season"], layout["sequence"][0]["episode"]) == (1, 1)
+    assert all(item["season"] != 0 for item in layout["sequence"])
+    assert (layout["by_id"][101]["season"], layout["by_id"][101]["episode"]) == (0, 1)
+    assert [(item["season"], item["is_special"]) for item in summary["seasons"]] == [
+        (0, True), (1, False), (2, False),
     ]
 
 

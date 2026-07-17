@@ -16,7 +16,8 @@ class EpisodeNormalizer:
 
     _alias_space_re = re.compile(r"[\W_]+", re.UNICODE)
     _special_group_re = re.compile(
-        r"(?i)\b(?:specials?|ova|oad|extra|bonus|sp)\b|特别|特別|番外|特典|未放送"
+        r"(?i)\b(?:specials?|ova|oad|extra|bonus|sp|recap|pilot|shorts?)\b|"
+        r"特别|特別|番外|特典|未放送|总集|總集|総集|特别篇|特別編|スペシャル|外伝|短編"
     )
     TAIL_EXTENSION_LIMIT = 4
 
@@ -381,6 +382,7 @@ class EpisodeNormalizer:
         seasons = info.get("seasons") or []
         for season_info in sorted(seasons, key=lambda item: self._safe_int(item.get("season_number"), 0)):
             season_number = self._safe_int(season_info.get("season_number"), 0)
+            season_name = str(season_info.get("name") or ("Specials" if season_number == 0 else f"Season {season_number}"))
             detail = self._tmdb.get_tv_season_detail(tmdb_id, season_number) or {}
             episodes = detail.get("episodes") or []
             if episodes:
@@ -390,6 +392,8 @@ class EpisodeNormalizer:
                         "season": season_number,
                         "episode": self._safe_int(item.get("episode_number"), 0),
                         "air_date": item.get("air_date") or "",
+                        "group_name": season_name,
+                        "is_special": season_number == 0,
                     })
                 continue
             # TMDB 季详情暂不可用时仍可用 episode_count 构造同编集坐标。
@@ -399,6 +403,8 @@ class EpisodeNormalizer:
                 "season": season_number,
                 "episode": number,
                 "air_date": "",
+                "group_name": season_name,
+                "is_special": season_number == 0,
             } for number in range(1, episode_count + 1))
 
         layout = self._build_layout("default", entries, exclude_specials=True)
@@ -414,21 +420,55 @@ class EpisodeNormalizer:
 
         groups = self._tmdb.get_tv_group_seasons(group_id) or []
         entries: List[Dict[str, Any]] = []
+        regular_season = 0
+        special_episode = 0
         for group in sorted(groups, key=lambda item: self._safe_int(item.get("order"), 0)):
-            season_number = self._safe_int(group.get("order"), 0)
             group_name = str(group.get("name") or "")
-            for index, item in enumerate(group.get("episodes") or [], start=1):
+            episodes = group.get("episodes") or []
+            is_special = self._is_special_episode_group(group_name, episodes)
+            if is_special:
+                season_number = 0
+            else:
+                regular_season += 1
+                season_number = regular_season
+            for index, item in enumerate(episodes, start=1):
+                if is_special:
+                    special_episode += 1
+                    episode_number = special_episode
+                else:
+                    # 自定义剧集组中的 episode_number 仍可能是默认编集的累计编号；
+                    # 目标多季坐标必须以组内顺序重新从 E01 开始。
+                    episode_number = index
                 entries.append({
                     "id": self._optional_int(item.get("id")),
                     "season": season_number,
-                    "episode": self._safe_int(item.get("episode_number"), index),
+                    "episode": episode_number,
                     "air_date": item.get("air_date") or "",
-                    "group_name": group_name,
+                    "group_name": group_name or ("Specials" if is_special else f"Season {season_number}"),
+                    "is_special": is_special,
+                    "original_season": self._optional_int(item.get("season_number")),
+                    "original_episode": self._optional_int(item.get("episode_number")),
                 })
-        layout = self._build_layout(f"group:{group_id}", entries, exclude_specials=False)
+        # Special 保留在坐标/ID 索引中供显式 S00 使用，但绝不进入正片顺序，
+        # 否则累计集数和季度片段会从特别篇开始计算。
+        layout = self._build_layout(f"group:{group_id}", entries, exclude_specials=True)
         with self._lock:
             self._cache[key] = deepcopy(layout)
         return layout
+
+    @classmethod
+    def _is_special_episode_group(
+            cls, group_name: str, episodes: Iterable[Dict[str, Any]]
+    ) -> bool:
+        """不依赖组顺序，通过名称和原始 S00 占比识别 Special。"""
+        if cls._special_group_re.search(str(group_name or "")):
+            return True
+        values = [
+            cls._optional_int(item.get("season_number"))
+            for item in episodes if isinstance(item, dict)
+        ]
+        values = [value for value in values if value is not None]
+        return bool(values and sum(value == 0 for value in values) * 2 >= len(values))
 
     @staticmethod
     def _build_layout(name: str, entries: Iterable[Dict[str, Any]], exclude_specials: bool) -> Dict[str, Any]:
@@ -443,6 +483,7 @@ class EpisodeNormalizer:
         }
         return {
             "name": name,
+            "all_entries": all_entries,
             "sequence": sequence,
             "by_coord": by_coord,
             "by_id": by_id,
@@ -461,10 +502,10 @@ class EpisodeNormalizer:
         """提取分组数量、每组集数和 Special 覆盖等结构特征。"""
         regular: Dict[int, int] = {}
         specials: Dict[int, int] = {}
-        for item in layout.get("sequence") or []:
+        for item in layout.get("all_entries") or layout.get("sequence") or []:
             season = cls._safe_int(item.get("season"), 0)
             name = str(item.get("group_name") or "")
-            target = specials if name and cls._special_group_re.search(name) else regular
+            target = specials if item.get("is_special") or (name and cls._special_group_re.search(name)) else regular
             target[season] = max(target.get(season, 0), cls._safe_int(item.get("episode"), 0))
         return {
             "regular_group_count": len(regular),
@@ -560,6 +601,13 @@ class EpisodeNormalizer:
         if start_season is None or start_episode is None:
             return None
         start = target["by_coord"].get((start_season, start_episode))
+        if (
+                start_season == 0 and not self._installment_targets_special(installment)
+                and target["by_coord"].get((1, start_episode))
+        ):
+            # 兼容旧版本按 group.order=0 保存的第一常规季起点。
+            start_season = 1
+            start = target["by_coord"].get((start_season, start_episode))
         if not start:
             return None
         try:
@@ -599,7 +647,8 @@ class EpisodeNormalizer:
         last_index = (target.get("sequence") or []).index(last)
         later_regular = [
             item for item in (target.get("sequence") or [])[last_index + 1:]
-            if not cls._special_group_re.search(str(item.get("group_name") or ""))
+            if not item.get("is_special")
+            and not cls._special_group_re.search(str(item.get("group_name") or ""))
         ]
         if later_regular:
             return None
@@ -619,20 +668,36 @@ class EpisodeNormalizer:
             "provisional": True,
         }
 
-    @staticmethod
+    @classmethod
     def _is_at_or_after_installment_start(
-            target: Dict[str, Any], installment: Dict[str, Any], current: Dict[str, Any]
+            cls, target: Dict[str, Any], installment: Dict[str, Any], current: Dict[str, Any]
     ) -> bool:
         """判断当前目标坐标是否已经落在季度起点之后。"""
-        start_season = EpisodeNormalizer._optional_int(installment.get("target_start_season"))
-        start_episode = EpisodeNormalizer._optional_int(installment.get("target_start_episode"))
+        start_season = cls._optional_int(installment.get("target_start_season"))
+        start_episode = cls._optional_int(installment.get("target_start_episode"))
         start = target["by_coord"].get((start_season, start_episode))
+        if (
+                start_season == 0 and not cls._installment_targets_special(installment)
+                and target["by_coord"].get((1, start_episode))
+        ):
+            start = target["by_coord"].get((1, start_episode))
         if not start:
             return False
         try:
             return target["sequence"].index(current) >= target["sequence"].index(start)
         except ValueError:
             return False
+
+    @classmethod
+    def _installment_targets_special(cls, installment: Dict[str, Any]) -> bool:
+        aliases = installment.get("aliases") or []
+        if isinstance(aliases, str):
+            aliases = aliases.splitlines()
+        text = " ".join([
+            str(installment.get("title") or ""),
+            *(str(value or "") for value in aliases),
+        ])
+        return bool(cls._special_group_re.search(text))
 
     @staticmethod
     def _append_coordinate_candidate(
@@ -724,15 +789,29 @@ class EpisodeNormalizer:
 
     @staticmethod
     def _layout_summary(layout: Dict[str, Any]) -> Dict[str, Any]:
-        seasons: Dict[int, int] = {}
-        for item in layout.get("sequence") or []:
-            seasons[item["season"]] = max(seasons.get(item["season"], 0), item["episode"])
+        seasons: Dict[int, List[Dict[str, Any]]] = {}
+        for item in layout.get("all_entries") or layout.get("sequence") or []:
+            seasons.setdefault(item["season"], []).append(item)
+        summaries = []
+        for season, entries in sorted(seasons.items()):
+            episodes = [EpisodeNormalizer._safe_int(item.get("episode"), 0) for item in entries]
+            dates = sorted(str(item.get("air_date") or "") for item in entries if item.get("air_date"))
+            name = next((str(item.get("group_name") or "") for item in entries if item.get("group_name")), "")
+            is_special = any(item.get("is_special") for item in entries) or season == 0
+            summaries.append({
+                "season": season,
+                "name": name or ("Specials" if is_special else f"Season {season}"),
+                "episode_count": len(entries),
+                "first_episode": min(episodes) if episodes else 0,
+                "last_episode": max(episodes) if episodes else 0,
+                "first_air_date": dates[0] if dates else "",
+                "last_air_date": dates[-1] if dates else "",
+                "is_special": is_special,
+            })
         return {
             "episode_count": len(layout.get("sequence") or []),
-            "seasons": [
-                {"season": season, "episode_count": count}
-                for season, count in sorted(seasons.items())
-            ],
+            "special_episode_count": sum(item["episode_count"] for item in summaries if item["is_special"]),
+            "seasons": summaries,
         }
 
     @classmethod

@@ -2,7 +2,7 @@ import { importShared } from './__federation_fn_import-JrT3xvdd.js';
 import { S as StrategySettings } from './StrategySettings-D3MqvjgH.js';
 import { _ as _export_sfc, u as unwrapResponse, c as cloneConfig, m as mediaTypeText, s as scoreColor } from './utils-DaBy4w3m.js';
 
-const {toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,createElementVNode:_createElementVNode$1,createElementBlock:_createElementBlock$1,createVNode:_createVNode$1,withKeys:_withKeys,renderList:_renderList$1,Fragment:_Fragment$1,vShow:_vShow$1,withDirectives:_withDirectives$1,unref:_unref$1,mergeProps:_mergeProps} = await importShared('vue');
+const {toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,createElementVNode:_createElementVNode$1,createElementBlock:_createElementBlock$1,createVNode:_createVNode$1,withKeys:_withKeys,renderList:_renderList$1,Fragment:_Fragment$1,vShow:_vShow$1,withDirectives:_withDirectives$1,unref:_unref$1,mergeProps:_mergeProps,normalizeClass:_normalizeClass$1} = await importShared('vue');
 
 
 const _hoisted_1$1 = { class: "episode-normalizer" };
@@ -15,7 +15,7 @@ const _hoisted_7$1 = { key: 0 };
 const _hoisted_8$1 = { key: 0 };
 const _hoisted_9$1 = { key: 1 };
 const _hoisted_10$1 = { class: "rules-scroll" };
-const _hoisted_11$1 = { class: "rules-controls pa-4 pt-0" };
+const _hoisted_11$1 = { class: "rules-controls pa-4 pt-4" };
 const _hoisted_12$1 = { class: "rule-group-title mb-2" };
 const _hoisted_13$1 = { class: "text-caption text-medium-emphasis" };
 const _hoisted_14$1 = { class: "rules-grid" };
@@ -52,10 +52,20 @@ const _hoisted_32$1 = { class: "d-flex align-center flex-wrap ga-2" };
 const _hoisted_33$1 = { class: "flex-grow-1" };
 const _hoisted_34$1 = {
   key: 3,
-  class: "text-caption text-medium-emphasis mb-4"
+  class: "group-preview mb-4"
 };
-const _hoisted_35$1 = { class: "d-flex align-center mb-2" };
-const _hoisted_36$1 = { class: "manual-match" };
+const _hoisted_35$1 = { class: "d-flex align-center flex-wrap ga-2 mb-2" };
+const _hoisted_36$1 = { class: "group-season-grid" };
+const _hoisted_37$1 = { class: "d-flex align-center ga-2" };
+const _hoisted_38$1 = { class: "text-truncate" };
+const _hoisted_39$1 = { class: "text-caption text-medium-emphasis mt-1" };
+const _hoisted_40$1 = {
+  key: 0,
+  class: "text-caption text-medium-emphasis"
+};
+const _hoisted_41$1 = { key: 0 };
+const _hoisted_42$1 = { class: "d-flex align-center mb-2" };
+const _hoisted_43$1 = { class: "manual-match" };
 
 const {computed: computed$1,onBeforeUnmount,onMounted: onMounted$1,ref: ref$1,watch} = await importShared('vue');
 
@@ -1582,16 +1592,81 @@ return (_ctx, _cache) => {
                       : _createCommentVNode$1("", true),
                     (selectedGroup.value)
                       ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_34$1, [
-                          (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(selectedGroup.value.seasons || [], (season) => {
-                            return (_openBlock$1(), _createElementBlock$1("span", {
-                              key: season.season,
-                              class: "me-3"
-                            }, "S" + _toDisplayString$1(season.season) + " · " + _toDisplayString$1(season.episode_count) + " 集", 1))
-                          }), 128))
+                          _createElementVNode$1("div", _hoisted_35$1, [
+                            _cache[65] || (_cache[65] = _createElementVNode$1("strong", null, "分季预览", -1)),
+                            _createVNode$1(_component_VChip, {
+                              size: "x-small",
+                              variant: "tonal"
+                            }, {
+                              default: _withCtx$1(() => [
+                                _createTextVNode$1(_toDisplayString$1(selectedGroup.value.seasons?.filter(item => !item.is_special).length || 0) + " 个常规季", 1)
+                              ]),
+                              _: 1
+                            }),
+                            (selectedGroup.value.seasons?.some(item => item.is_special))
+                              ? (_openBlock$1(), _createBlock$1(_component_VChip, {
+                                  key: 0,
+                                  size: "x-small",
+                                  color: "secondary",
+                                  variant: "tonal"
+                                }, {
+                                  default: _withCtx$1(() => [...(_cache[64] || (_cache[64] = [
+                                    _createTextVNode$1("包含 Special", -1)
+                                  ]))]),
+                                  _: 1
+                                }))
+                              : _createCommentVNode$1("", true),
+                            (selectedGroup.value.coverage)
+                              ? (_openBlock$1(), _createBlock$1(_component_VChip, {
+                                  key: 1,
+                                  size: "x-small",
+                                  variant: "outlined"
+                                }, {
+                                  default: _withCtx$1(() => [
+                                    _createTextVNode$1("正片覆盖 " + _toDisplayString$1(selectedGroup.value.coverage) + "%", 1)
+                                  ]),
+                                  _: 1
+                                }))
+                              : _createCommentVNode$1("", true)
+                          ]),
+                          _createElementVNode$1("div", _hoisted_36$1, [
+                            (_openBlock$1(true), _createElementBlock$1(_Fragment$1, null, _renderList$1(selectedGroup.value.seasons || [], (season) => {
+                              return (_openBlock$1(), _createElementBlock$1("div", {
+                                key: season.season,
+                                class: _normalizeClass$1(['group-season-item', { special: season.is_special }])
+                              }, [
+                                _createElementVNode$1("div", _hoisted_37$1, [
+                                  _createElementVNode$1("strong", null, "S" + _toDisplayString$1(String(season.season).padStart(2, '0')), 1),
+                                  (season.is_special)
+                                    ? (_openBlock$1(), _createBlock$1(_component_VChip, {
+                                        key: 0,
+                                        size: "x-small",
+                                        color: "secondary"
+                                      }, {
+                                        default: _withCtx$1(() => [...(_cache[66] || (_cache[66] = [
+                                          _createTextVNode$1("Special", -1)
+                                        ]))]),
+                                        _: 1
+                                      }))
+                                    : _createCommentVNode$1("", true),
+                                  _createElementVNode$1("span", _hoisted_38$1, _toDisplayString$1(season.name), 1)
+                                ]),
+                                _createElementVNode$1("div", _hoisted_39$1, _toDisplayString$1(season.episode_count) + " 集 · E" + _toDisplayString$1(String(season.first_episode || 1).padStart(2, '0')) + "–E" + _toDisplayString$1(String(season.last_episode || season.episode_count).padStart(2, '0')), 1),
+                                (season.first_air_date || season.last_air_date)
+                                  ? (_openBlock$1(), _createElementBlock$1("div", _hoisted_40$1, [
+                                      _createTextVNode$1(_toDisplayString$1(season.first_air_date || '日期未知'), 1),
+                                      (season.last_air_date && season.last_air_date !== season.first_air_date)
+                                        ? (_openBlock$1(), _createElementBlock$1("span", _hoisted_41$1, " → " + _toDisplayString$1(season.last_air_date), 1))
+                                        : _createCommentVNode$1("", true)
+                                    ]))
+                                  : _createCommentVNode$1("", true)
+                              ], 2))
+                            }), 128))
+                          ])
                         ]))
                       : _createCommentVNode$1("", true),
-                    _createElementVNode$1("div", _hoisted_35$1, [
-                      _cache[65] || (_cache[65] = _createElementVNode$1("strong", null, "季度片段", -1)),
+                    _createElementVNode$1("div", _hoisted_42$1, [
+                      _cache[68] || (_cache[68] = _createElementVNode$1("strong", null, "季度片段", -1)),
                       _createVNode$1(_component_VSpacer),
                       _createVNode$1(_component_VBtn, {
                         size: "small",
@@ -1599,7 +1674,7 @@ return (_ctx, _cache) => {
                         "prepend-icon": "mdi-plus",
                         onClick: addInstallment
                       }, {
-                        default: _withCtx$1(() => [...(_cache[64] || (_cache[64] = [
+                        default: _withCtx$1(() => [...(_cache[67] || (_cache[67] = [
                           _createTextVNode$1("添加", -1)
                         ]))]),
                         _: 1
@@ -1705,7 +1780,7 @@ return (_ctx, _cache) => {
                                     "prepend-icon": "mdi-delete-outline",
                                     onClick: $event => (editForm.value.installments.splice(index, 1))
                                   }, {
-                                    default: _withCtx$1(() => [...(_cache[66] || (_cache[66] = [
+                                    default: _withCtx$1(() => [...(_cache[69] || (_cache[69] = [
                                       _createTextVNode$1("删除片段", -1)
                                     ]))]),
                                     _: 1
@@ -1731,7 +1806,7 @@ return (_ctx, _cache) => {
                       variant: "text",
                       onClick: _cache[31] || (_cache[31] = $event => (editorOpen.value = false))
                     }, {
-                      default: _withCtx$1(() => [...(_cache[67] || (_cache[67] = [
+                      default: _withCtx$1(() => [...(_cache[70] || (_cache[70] = [
                         _createTextVNode$1("取消", -1)
                       ]))]),
                       _: 1
@@ -1741,7 +1816,7 @@ return (_ctx, _cache) => {
                       loading: editorLoading.value,
                       onClick: saveRule
                     }, {
-                      default: _withCtx$1(() => [...(_cache[68] || (_cache[68] = [
+                      default: _withCtx$1(() => [...(_cache[71] || (_cache[71] = [
                         _createTextVNode$1("保存规则", -1)
                       ]))]),
                       _: 1
@@ -1767,13 +1842,13 @@ return (_ctx, _cache) => {
             _createVNode$1(_component_VCardItem, null, {
               default: _withCtx$1(() => [
                 _createVNode$1(_component_VCardTitle, null, {
-                  default: _withCtx$1(() => [...(_cache[69] || (_cache[69] = [
+                  default: _withCtx$1(() => [...(_cache[72] || (_cache[72] = [
                     _createTextVNode$1("这些番剧未能自动匹配", -1)
                   ]))]),
                   _: 1
                 }),
                 _createVNode$1(_component_VCardSubtitle, null, {
-                  default: _withCtx$1(() => [...(_cache[70] || (_cache[70] = [
+                  default: _withCtx$1(() => [...(_cache[73] || (_cache[73] = [
                     _createTextVNode$1("补充正确 TMDBID 后重试，或直接放弃该条目", -1)
                   ]))]),
                   _: 1
@@ -1791,7 +1866,7 @@ return (_ctx, _cache) => {
                     subtitle: failure.reason
                   }, {
                     append: _withCtx$1(() => [
-                      _createElementVNode$1("div", _hoisted_36$1, [
+                      _createElementVNode$1("div", _hoisted_43$1, [
                         _createVNode$1(_component_VTextField, {
                           modelValue: manualTmdb.value[failure.id],
                           "onUpdate:modelValue": $event => ((manualTmdb.value[failure.id]) = $event),
@@ -1806,7 +1881,7 @@ return (_ctx, _cache) => {
                           loading: busyId.value === failure.id,
                           onClick: $event => (retryFailure(failure))
                         }, {
-                          default: _withCtx$1(() => [...(_cache[71] || (_cache[71] = [
+                          default: _withCtx$1(() => [...(_cache[74] || (_cache[74] = [
                             _createTextVNode$1("补充并加入", -1)
                           ]))]),
                           _: 1
@@ -1816,7 +1891,7 @@ return (_ctx, _cache) => {
                           color: "medium-emphasis",
                           onClick: $event => (ignoreFailure(failure))
                         }, {
-                          default: _withCtx$1(() => [...(_cache[72] || (_cache[72] = [
+                          default: _withCtx$1(() => [...(_cache[75] || (_cache[75] = [
                             _createTextVNode$1("忽略", -1)
                           ]))]),
                           _: 1
@@ -1835,7 +1910,7 @@ return (_ctx, _cache) => {
                 _createVNode$1(_component_VBtn, {
                   onClick: _cache[33] || (_cache[33] = $event => (failureDialog.value = false))
                 }, {
-                  default: _withCtx$1(() => [...(_cache[73] || (_cache[73] = [
+                  default: _withCtx$1(() => [...(_cache[76] || (_cache[76] = [
                     _createTextVNode$1("关闭", -1)
                   ]))]),
                   _: 1
@@ -1865,7 +1940,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const EpisodeNormalizer = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-453bc2e7"]]);
+const EpisodeNormalizer = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-13b62b15"]]);
 
 const {createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createBlock:_createBlock,renderList:_renderList,Fragment:_Fragment,vShow:_vShow,withDirectives:_withDirectives,unref:_unref,normalizeClass:_normalizeClass} = await importShared('vue');
 
