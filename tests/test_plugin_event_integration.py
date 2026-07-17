@@ -180,6 +180,129 @@ def test_tmdb_first_mode_uses_first_result_without_score_or_margin(monkeypatch):
     assert result["margin"] == 0.0
 
 
+def test_scored_mode_hard_filters_candidates_to_explicit_tv_type(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "scored", "minimum_score": 0, "minimum_margin": 0,
+        "fetch_aliases": False,
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 532321, "media_type": "movie", "title": "Re:Zero kara Hajimeru Isekai Seikatsu OVA"},
+        {"id": 65942, "media_type": "tv", "name": "Re:Zero kara Hajimeru Isekai Seikatsu"},
+    ])
+
+    result = plugin._recognize_title(
+        "Re Zero kara Hajimeru Isekai Seikatsu",
+        hints={"media_type": module.MediaType.TV, "media_type_source": "manual"},
+        recognition_mode="scored",
+        include_candidates=True,
+    )
+
+    assert result["accepted"] is True
+    assert result["best"]["tmdb_id"] == 65942
+    assert {item["media_type"] for item in result["candidates"]} == {module.MediaType.TV.value}
+    assert result["type_constraint"]["source"] == "manual"
+    assert result["type_constraint"]["removed_count"] == 1
+
+
+def test_season_episode_coordinates_infer_tv_hard_constraint(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "scored", "minimum_score": 0, "minimum_margin": 0,
+        "fetch_aliases": False,
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 532321, "media_type": "movie", "title": "Re:Zero OVA"},
+        {"id": 65942, "media_type": "tv", "name": "Re:Zero"},
+    ])
+
+    result = plugin._recognize_title(
+        "Re Zero", hints={"season": 4, "episode": 11}, recognition_mode="scored",
+    )
+
+    assert result["best"]["tmdb_id"] == 65942
+    assert result["type_constraint"]["media_type"] == module.MediaType.TV.value
+    assert result["type_constraint"]["source"] == "season_episode"
+
+
+def test_season_episode_coordinates_override_nonmanual_movie_guess(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    hints = {
+        "media_type": module.MediaType.MOVIE,
+        "media_type_source": "moviepilot",
+        "season": 4,
+        "episode": 11,
+    }
+
+    constraint = plugin._resolve_media_type_constraint(hints)
+
+    assert hints["media_type"] == module.MediaType.TV
+    assert constraint["media_type"] == module.MediaType.TV.value
+    assert constraint["source"] == "season_episode"
+
+
+def test_manual_movie_type_remains_authoritative_with_coordinates(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    hints = {
+        "media_type": module.MediaType.MOVIE,
+        "media_type_source": "manual",
+        "season": 1,
+        "episode": 1,
+    }
+
+    constraint = plugin._resolve_media_type_constraint(hints)
+
+    assert hints["media_type"] == module.MediaType.MOVIE
+    assert constraint["media_type"] == module.MediaType.MOVIE.value
+    assert constraint["source"] == "manual"
+
+
+def test_tmdb_first_mode_uses_first_result_within_type_constraint(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "tmdb_first", "fetch_aliases": False,
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 532321, "media_type": "movie", "title": "Movie First"},
+        {"id": 65942, "media_type": "tv", "name": "First TV"},
+        {"id": 99999, "media_type": "tv", "name": "Second TV"},
+    ])
+
+    result = plugin._recognize_title(
+        "Re Zero", hints={"media_type": "tv"}, recognition_mode="tmdb_first",
+        include_candidates=True,
+    )
+
+    assert result["accepted"] is True
+    assert result["best"]["tmdb_id"] == 65942
+    assert result["type_constraint"]["removed_count"] == 1
+    assert "第一个电视剧结果" in result["reason"]
+
+
+def test_type_constraint_rejects_instead_of_falling_back_to_wrong_type(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "tmdb_first", "fetch_aliases": False,
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 532321, "media_type": "movie", "title": "Only Movie"},
+    ])
+
+    result = plugin._recognize_title(
+        "Re Zero", hints={"season": 4, "episode": 11}, recognition_mode="tmdb_first",
+    )
+
+    assert result["accepted"] is False
+    assert result["best"] is None
+    assert "类型约束为电视剧" in result["reason"]
+
+
 def test_preview_mode_override_cannot_fall_into_saved_scoring_thresholds(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

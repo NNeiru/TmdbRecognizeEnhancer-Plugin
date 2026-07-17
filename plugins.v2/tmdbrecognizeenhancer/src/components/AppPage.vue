@@ -85,6 +85,15 @@ async function clearHistory() {
   }
 }
 
+function typeConstraintSourceText(source) {
+  return ({
+    manual: '手动指定',
+    moviepilot: 'MoviePilot 解析',
+    season_episode: '根据季集信息自动判断',
+    provided: '识别链提供',
+  })[source] || '标题信息'
+}
+
 defineExpose({ loadStatus, saveConfig, loading, saving })
 onMounted(loadStatus)
 </script>
@@ -206,6 +215,9 @@ onMounted(loadStatus)
                         页面请求模式与插件已保存模式不同：本次按页面选择执行；请重新保存配置，确保实际整理使用相同模式。
                       </VAlert>
                       <VAlert v-if="preview.original_title" type="info" variant="tonal" density="compact" class="mb-4">解析后标题：{{ preview.title }}</VAlert>
+                      <VAlert v-if="preview.type_constraint?.active" type="info" variant="tonal" density="compact" class="mb-4">
+                        类型约束：{{ preview.type_constraint.label }}（{{ typeConstraintSourceText(preview.type_constraint.source) }}）<span v-if="preview.type_constraint.removed_count">；已排除 {{ preview.type_constraint.removed_count }} 个类型冲突候选</span>
+                      </VAlert>
                       <VAlert v-if="preview.duplicate_summary?.suppressed_count" type="info" variant="tonal" density="compact" class="mb-4">
                         已归并 {{ preview.duplicate_summary.suppressed_count }} 个同名、同年、同类型的重复候选；分差只比较不同作品。
                       </VAlert>

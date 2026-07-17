@@ -35,7 +35,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.4.2"
+    plugin_version = "0.4.3"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -366,6 +366,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "episode": self._safe_int(payload.get("episode"), 0),
         }
         hints.update({key: value for key, value in supplied_hints.items() if value not in (None, "", 0)})
+        if supplied_hints["media_type"]:
+            hints["media_type_source"] = "manual"
         requested_mode = str(payload.get("recognition_mode") or "").strip().lower()
         if requested_mode not in ("tmdb_first", "scored"):
             requested_mode = None
@@ -1416,6 +1418,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 ),
             }
             hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "", 0)})
+            if parsed_hints["media_type"]:
+                hints["media_type_source"] = "moviepilot"
             if self._config.get("debug") and title != raw_title:
                 logger.info(f"[TMDB识别增强] 使用 MoviePilot 解析标题：{raw_title} => {title}")
         except Exception as err:
@@ -1443,6 +1447,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 ),
             }
             hints.update({key: value for key, value in runtime_hints.items() if value not in (None, "")})
+            if runtime_hints["media_type"]:
+                hints["media_type_source"] = "moviepilot"
             return parsed_name, hints
 
         parsed_name = self._clean_title(self._event_get(event_data, "parsed_name"))
@@ -1460,6 +1466,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             ),
         }
         hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "")})
+        if parsed_hints["media_type"]:
+            hints["media_type_source"] = "moviepilot"
         return parsed_name, hints
 
     def _apply_runtime_meta(
@@ -1552,9 +1560,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """生成降级搜索词、检索并评分候选，返回可解释的选择结果。"""
         merged_hints = self._extract_hints(title)
         for key, value in (hints or {}).items():
-            if value not in (None, "", 0):
+            if value not in (None, "") and (value != 0 or key in ("season", "episode", "end_episode")):
                 merged_hints[key] = value
         hints = merged_hints
+        type_constraint = self._resolve_media_type_constraint(hints)
         if not self._config.get("use_year_hint", True):
             hints.pop("year", None)
         if not self._config.get("use_original_title_evidence", True):
@@ -1572,6 +1581,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
         queries = self._build_queries(search_title)
         candidates = self._search_candidates(queries)
+        candidates, type_constraint = self._filter_candidates_by_media_type(
+            candidates, hints, type_constraint
+        )
         scored = [self._score_candidate(search_title, queries, candidate, hints) for candidate in candidates]
         scored.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
 
@@ -1596,6 +1608,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
         if self._config.get("web_search_fallback") and not accepted:
             candidates, web_search = self._apply_web_search_fallback(search_title, hints, candidates)
+            candidates, type_constraint = self._filter_candidates_by_media_type(
+                candidates, hints, type_constraint
+            )
             scored = [self._score_candidate(search_title, queries, candidate, hints) for candidate in candidates]
             scored.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
             ranked, duplicate_summary = self._collapse_duplicate_candidates(scored)
@@ -1615,8 +1630,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             )
 
         if not best:
-            reason = "TMDB 与搜索引擎兜底均未返回可验证候选" if web_search.get("attempted") \
-                else "所有降级搜索词均未返回 TMDB 候选"
+            if type_constraint.get("active") and type_constraint.get("removed_count"):
+                reason = (
+                    f"类型约束为{type_constraint['label']}，TMDB 返回的候选均为其他类型，已安全拒绝"
+                )
+            else:
+                reason = "TMDB 与搜索引擎兜底均未返回可验证候选" if web_search.get("attempted") \
+                    else "所有降级搜索词均未返回 TMDB 候选"
         elif best["score"] < minimum_score:
             reason = f"最佳候选 {best['score']} 分，低于阈值 {minimum_score:g}"
         elif decisive:
@@ -1647,6 +1667,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "decisive_evidence": decisive,
             "duplicate_summary": duplicate_summary,
             "web_search": web_search,
+            "type_constraint": type_constraint,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         if include_candidates:
@@ -1663,6 +1684,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         query = self._clean_title(title)
         queries = [query] if query else []
         candidates = self._search_candidates(queries)
+        type_constraint = self._resolve_media_type_constraint(hints)
+        candidates, type_constraint = self._filter_candidates_by_media_type(
+            candidates, hints, type_constraint
+        )
         diagnostics = [self._score_candidate(title, queries, item, hints) for item in candidates]
         best = diagnostics[0] if diagnostics else None
         runner_up = diagnostics[1] if len(diagnostics) > 1 else None
@@ -1675,8 +1700,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "selection_mode": "tmdb_first",
             "title": title,
             "reason": (
-                "单次 TMDB Multi Search 已直接采用第一个影视结果；评分与分差未参与决策"
-                if best else "单次 TMDB Multi Search 未返回电影或电视剧结果"
+                f"单次 TMDB Multi Search 已直接采用第一个{type_constraint.get('label') or '影视'}结果；"
+                "评分与分差未参与决策"
+                if best else (
+                    f"类型约束为{type_constraint['label']}，TMDB 未返回该类型候选"
+                    if type_constraint.get("active") else
+                    "单次 TMDB Multi Search 未返回电影或电视剧结果"
+                )
             ),
             "queries": queries,
             "hints": self._serialize_hints(hints),
@@ -1684,11 +1714,66 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "runner_up": runner_up,
             "margin": 0.0,
             "web_search": {"attempted": False, "reason": "首结果模式不执行外部兜底"},
+            "type_constraint": type_constraint,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         if include_candidates:
             result["candidates"] = diagnostics
         return result
+
+    def _resolve_media_type_constraint(self, hints: Dict[str, Any]) -> Dict[str, Any]:
+        """把明确类型或季集坐标转成候选硬约束，避免电视剧被电影候选截胡。"""
+        requested_type = self._normalize_media_type(hints.get("media_type"))
+        source = str(hints.get("media_type_source") or "").strip()
+        has_coordinates = any(
+            hints.get(key) not in (None, "") for key in ("season", "episode")
+        )
+        if has_coordinates and source != "manual" and requested_type != MediaType.TV:
+            requested_type = MediaType.TV
+            hints["media_type"] = requested_type
+            source = "season_episode"
+            hints["media_type_source"] = source
+        elif requested_type:
+            hints["media_type"] = requested_type
+            source = source or "provided"
+        elif has_coordinates:
+            requested_type = MediaType.TV
+            hints["media_type"] = requested_type
+            source = "season_episode"
+            hints["media_type_source"] = source
+        label = "电视剧" if requested_type == MediaType.TV else (
+            "电影" if requested_type == MediaType.MOVIE else ""
+        )
+        return {
+            "active": bool(requested_type),
+            "media_type": requested_type.value if requested_type else "",
+            "label": label,
+            "source": source,
+            "inferred": source == "season_episode",
+            "removed_count": 0,
+        }
+
+    def _filter_candidates_by_media_type(
+            self,
+            candidates: List[Dict[str, Any]],
+            hints: Dict[str, Any],
+            constraint: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """在评分和首结果选择之前剔除与明确媒体类型冲突的候选。"""
+        constraint = dict(constraint or self._resolve_media_type_constraint(hints))
+        requested_type = self._normalize_media_type(constraint.get("media_type"))
+        if not requested_type:
+            return candidates, constraint
+        filtered = [
+            candidate for candidate in candidates
+            if self._normalize_media_type(candidate.get("media_type")) == requested_type
+        ]
+        constraint["removed_count"] = max(
+            self._safe_int(constraint.get("removed_count"), 0),
+            len(candidates) - len(filtered),
+        )
+        constraint["candidate_count"] = len(filtered)
+        return filtered, constraint
 
     def _search_candidates(self, queries: List[str]) -> List[Dict[str, Any]]:
         """按查询词检索 TMDB，去重后为有限数量候选补充别名详情。"""
@@ -2401,6 +2486,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return {
             "year": year_match.group(1) if year_match else "",
             "media_type": MediaType.TV if season or episode else None,
+            "media_type_source": "season_episode" if season_match or episode_match else "",
             "season": season,
             "episode": episode,
         }
