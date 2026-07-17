@@ -1,6 +1,6 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { S as StrategySettings } from './StrategySettings-OR2zlu7c.js';
-import { _ as _export_sfc, u as unwrapResponse, c as cloneConfig, m as mediaTypeText, s as scoreColor } from './utils-oR-EWyhQ.js';
+import { S as StrategySettings } from './StrategySettings-yIwMDGG4.js';
+import { _ as _export_sfc, u as unwrapResponse, c as cloneConfig, m as mediaTypeText, s as scoreColor } from './utils-B-q32kVJ.js';
 
 const {toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,createElementVNode:_createElementVNode$1,createElementBlock:_createElementBlock$1,createVNode:_createVNode$1,renderList:_renderList$1,Fragment:_Fragment$1,normalizeClass:_normalizeClass$1,vShow:_vShow$1,withDirectives:_withDirectives$1,unref:_unref$1,mergeProps:_mergeProps} = await importShared('vue');
 
@@ -1947,13 +1947,13 @@ const _hoisted_20 = { class: "sticky-actions" };
 const _hoisted_21 = { class: "workspace-panel" };
 const _hoisted_22 = { class: "tab-content" };
 const _hoisted_23 = {
-  key: 5,
+  key: 4,
   class: "pipeline-list mb-4"
 };
 const _hoisted_24 = { class: "text-caption text-medium-emphasis" };
 const _hoisted_25 = { class: "d-flex flex-wrap ga-2 mb-4" };
 const _hoisted_26 = {
-  key: 7,
+  key: 6,
   class: "best-result"
 };
 const _hoisted_27 = { class: "text-h6" };
@@ -2705,23 +2705,9 @@ return (_ctx, _cache) => {
                                           _: 1
                                         }))
                                       : _createCommentVNode("", true),
-                                    (preview.value.title_recovery)
-                                      ? (_openBlock(), _createBlock(_component_VAlert, {
-                                          key: 2,
-                                          type: "info",
-                                          variant: "tonal",
-                                          density: "compact",
-                                          class: "mb-4"
-                                        }, {
-                                          default: _withCtx(() => [
-                                            _createTextVNode(" 检测到 MP 标题截断：" + _toDisplayString(preview.value.title_recovery.from) + " → " + _toDisplayString(preview.value.title_recovery.to), 1)
-                                          ]),
-                                          _: 1
-                                        }))
-                                      : _createCommentVNode("", true),
                                     (preview.value.duplicate_summary?.suppressed_count)
                                       ? (_openBlock(), _createBlock(_component_VAlert, {
-                                          key: 3,
+                                          key: 2,
                                           type: "info",
                                           variant: "tonal",
                                           density: "compact",
@@ -2735,7 +2721,7 @@ return (_ctx, _cache) => {
                                       : _createCommentVNode("", true),
                                     (preview.value.duplicate_summary?.shadow_season_count)
                                       ? (_openBlock(), _createBlock(_component_VAlert, {
-                                          key: 4,
+                                          key: 3,
                                           type: "info",
                                           variant: "tonal",
                                           density: "compact",
@@ -2768,7 +2754,7 @@ return (_ctx, _cache) => {
                                       : _createCommentVNode("", true),
                                     (preview.value.web_search?.attempted)
                                       ? (_openBlock(), _createBlock(_component_VAlert, {
-                                          key: 6,
+                                          key: 5,
                                           type: "info",
                                           variant: "tonal",
                                           density: "compact",
@@ -2817,7 +2803,7 @@ return (_ctx, _cache) => {
                                       : _createCommentVNode("", true),
                                     (preview.value.episode_adjustment)
                                       ? (_openBlock(), _createBlock(_component_VAlert, {
-                                          key: 8,
+                                          key: 7,
                                           type: preview.value.episode_adjustment.applied ? 'success' : 'info',
                                           variant: "tonal",
                                           density: "compact",
@@ -2835,7 +2821,7 @@ return (_ctx, _cache) => {
                                       : _createCommentVNode("", true),
                                     (preview.value.candidates?.length)
                                       ? (_openBlock(), _createBlock(_component_VTable, {
-                                          key: 9,
+                                          key: 8,
                                           density: "compact",
                                           class: "candidate-table mt-4"
                                         }, {
@@ -3093,6 +3079,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-06231d9c"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-c270bd04"]]);
 
 export { AppPage as default };

@@ -286,17 +286,6 @@ def test_exact_year_can_decide_between_same_title_adaptations(monkeypatch):
     assert result["decisive_evidence"]["kind"] == "exact_year"
 
 
-def test_recovers_title_truncated_by_single_letter_roman_token(monkeypatch):
-    module = _load_plugin(monkeypatch)
-    plugin = _plugin_with_runtime(module, SimpleNamespace())
-    filename = "That.Time.I.Got.Reincarnated.as.a.Slime.S04E14.2026.1080p.LINETV.WEB-DL.H264.AAC-ADWeb.mkv"
-
-    title, evidence = plugin._recover_search_title("That Time", {"source_title": filename})
-
-    assert title == "That Time I Got Reincarnated as a Slime"
-    assert evidence["from"] == "That Time"
-
-
 def test_scored_fallback_requires_relation_to_unshortened_title(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

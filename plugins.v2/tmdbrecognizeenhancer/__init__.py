@@ -58,7 +58,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "prefer_parsed_title": True,
         "use_year_hint": True,
         "use_original_title_evidence": True,
-        "recover_truncated_title": True,
         "web_search_fallback": False,
         "web_search_engine": "auto",
         "web_search_max_results": 8,
@@ -1388,7 +1387,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
         raw_title = self._clean_title(raw_title)
         title = raw_title
         hints = self._extract_hints(raw_title)
-        hints["source_title"] = raw_title
         if not raw_title or not self._config.get("prefer_parsed_title", True):
             return title, hints
 
@@ -1407,7 +1405,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "original_title": self._clean_title(
                     getattr(meta, "original_name", "") or getattr(meta, "org_string", "")
                 ),
-                "source_title": raw_title,
             }
             hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "", 0)})
             if self._config.get("debug") and title != raw_title:
@@ -1435,7 +1432,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     or getattr(runtime_meta, "org_string", "")
                     or raw_title
                 ),
-                "source_title": raw_title,
             }
             hints.update({key: value for key, value in runtime_hints.items() if value not in (None, "")})
             return parsed_name, hints
@@ -1453,7 +1449,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "original_title": self._clean_title(
                 self._event_get(event_data, "original_title") or raw_title
             ),
-            "source_title": raw_title,
         }
         hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "")})
         return parsed_name, hints
@@ -1557,13 +1552,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
             hints.pop("original_title", None)
         mode = recognition_mode if recognition_mode in ("tmdb_first", "scored") \
             else self._config.get("recognition_mode")
-        search_title, title_recovery = self._recover_search_title(title, hints)
+        search_title = title
         if mode == "tmdb_first":
             result = self._recognize_tmdb_first_result(search_title, hints, include_candidates)
             result.update({
                 "title": title,
                 "search_title": search_title,
-                "title_recovery": title_recovery,
             })
             return result
 
@@ -1633,7 +1627,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "selection_mode": "scored",
             "title": title,
             "search_title": search_title,
-            "title_recovery": title_recovery,
             "reason": reason,
             "queries": queries,
             "hints": self._serialize_hints(hints),
@@ -1650,59 +1643,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if include_candidates:
             result["candidates"] = scored
         return result
-
-    def _recover_search_title(
-            self, parsed_title: str, hints: Dict[str, Any]
-    ) -> Tuple[str, Optional[Dict[str, str]]]:
-        """从原标题保守恢复被 MP 解析器误截断的英文标题，仅影响 TMDB 查询。"""
-        if not self._config.get("recover_truncated_title", True):
-            return parsed_title, None
-        source = self._clean_title(hints.get("source_title") or hints.get("original_title"))
-        if not source or source == parsed_title:
-            return parsed_title, None
-
-        candidate = re.sub(r"(?i)\.(?:mkv|mp4|avi|mov|wmv|ts|m2ts)$", "", source).strip()
-        candidate = re.sub(r"^\s*(?:\[[^\]]{1,80}\]\s*)+", "", candidate)
-        candidate = re.sub(r"[._]+", " ", candidate)
-        candidate = re.sub(r"\s+", " ", candidate).strip()
-        boundary_patterns = (
-            r"(?i)\bS\d{1,3}E\d{1,4}(?:-E?\d{1,4})?\b",
-            r"(?i)\b(?:EP?|Episode)\s*\d{1,4}\b",
-            r"(?i)\b(?:2160|1080|720|480)[pi]\b",
-            r"(?i)\b(?:WEB[ -]?DL|WEBRip|BluRay|BDRip|HDTV|REMUX)\b",
-            r"(?i)\b(?:19|20)\d{2}\b",
-            r"\s+\[[^\]]+\]",
-        )
-        positions = []
-        for pattern in boundary_patterns:
-            match = re.search(pattern, candidate)
-            if match and match.start() > 2:
-                positions.append(match.start())
-        if positions:
-            candidate = candidate[:min(positions)].strip(" -._")
-        candidate = re.sub(r"\s+-\s+\d{1,4}\s*$", "", candidate).strip()
-
-        parsed_tokens = self._tokens(parsed_title)
-        recovered_tokens = self._tokens(candidate)
-        if len(parsed_tokens) < 2 or len(recovered_tokens) < len(parsed_tokens) + 2:
-            return parsed_title, None
-        prefix_matches = sum(
-            left == right for left, right in zip(parsed_tokens, recovered_tokens)
-        )
-        if prefix_matches / len(parsed_tokens) < .8:
-            return parsed_title, None
-        next_token = recovered_tokens[len(parsed_tokens)]
-        # 当前已确认的异常来自英文代词 I 被当作罗马数字。只对这一类明确边界
-        # 自动恢复，避免把 MP 有意提取的主体名又扩展成副标题或发布说明。
-        if next_token not in {"i", "v", "x", "ii", "iii", "iv", "vi"}:
-            return parsed_title, None
-        if len(parsed_tokens) > 4 and len(recovered_tokens) < len(parsed_tokens) * 1.35:
-            return parsed_title, None
-        return candidate, {
-            "from": parsed_title,
-            "to": candidate,
-            "reason": "MP 解析标题是原标题的异常短前缀，已在季集或发布参数前恢复完整名称",
-        }
 
     def _recognize_tmdb_first_result(
             self,
@@ -2545,8 +2485,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged = {**self.DEFAULT_CONFIG, **(config or {})}
         bool_keys = (
             "enabled", "recognizer_enabled", "show_sidebar_nav", "debug", "prefer_parsed_title",
-            "use_year_hint", "use_original_title_evidence", "recover_truncated_title",
-            "web_search_fallback",
+            "use_year_hint", "use_original_title_evidence", "web_search_fallback",
             "main_title_fallback",
             "progressive_fallback", "fetch_aliases", "episode_normalizer_enabled",
         )

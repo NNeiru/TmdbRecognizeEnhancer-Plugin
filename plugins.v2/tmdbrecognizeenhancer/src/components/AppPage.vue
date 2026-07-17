@@ -206,9 +206,6 @@ onMounted(loadStatus)
                         页面请求模式与插件已保存模式不同：本次按页面选择执行；请重新保存配置，确保实际整理使用相同模式。
                       </VAlert>
                       <VAlert v-if="preview.original_title" type="info" variant="tonal" density="compact" class="mb-4">解析后标题：{{ preview.title }}</VAlert>
-                      <VAlert v-if="preview.title_recovery" type="info" variant="tonal" density="compact" class="mb-4">
-                        检测到 MP 标题截断：{{ preview.title_recovery.from }} → {{ preview.title_recovery.to }}
-                      </VAlert>
                       <VAlert v-if="preview.duplicate_summary?.suppressed_count" type="info" variant="tonal" density="compact" class="mb-4">
                         已归并 {{ preview.duplicate_summary.suppressed_count }} 个同名、同年、同类型的重复候选；分差只比较不同作品。
                       </VAlert>
