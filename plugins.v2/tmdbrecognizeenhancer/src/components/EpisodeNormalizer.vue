@@ -29,8 +29,6 @@ const manualForm = ref({
   year: now.getFullYear(), quarter: Math.floor(now.getMonth() / 3) + 1,
 })
 const catalog = ref([])
-const catalogPageSize = 36
-const catalogDisplayLimit = ref(catalogPageSize)
 const catalogLoading = ref(false)
 const batchLoading = ref(false)
 const busyId = ref('')
@@ -80,7 +78,6 @@ const filteredCatalog = computed(() => {
       .includes(keyword)
   })
 })
-const visibleCatalog = computed(() => filteredCatalog.value.slice(0, catalogDisplayLimit.value))
 const selectedIdSet = computed(() => new Set(selectedIds.value))
 const allFilteredSelected = computed(() => (
   filteredCatalog.value.length > 0
@@ -204,7 +201,6 @@ async function loadQuarter(refresh = false, background = false) {
   error.value = ''
   if (!background) {
     selectedIds.value = []
-    catalogDisplayLimit.value = catalogPageSize
   }
   try {
     const data = unwrapResponse(await props.api.post(
@@ -227,7 +223,7 @@ function scheduleScanPoll(scanningCount) {
   if (scanTimer) clearTimeout(scanTimer)
   scanTimer = null
   if (componentActive && scanningCount > 0) {
-    scanTimer = setTimeout(() => loadQuarter(false, true), 3200)
+    scanTimer = setTimeout(() => loadQuarter(false, true), 1800)
   }
 }
 
@@ -312,13 +308,6 @@ function toggleAllFiltered() {
   } else {
     selectedIds.value = Array.from(new Set([...selectedIds.value, ...filteredIds]))
   }
-}
-
-function showMoreCatalog() {
-  catalogDisplayLimit.value = Math.min(
-    catalogDisplayLimit.value + catalogPageSize,
-    filteredCatalog.value.length,
-  )
 }
 
 function ignoreFailure(failure) {
@@ -462,13 +451,6 @@ function schedulePersistUiState() {
 
 restoreUiState()
 watch(() => [board.value.year, board.value.quarter], () => loadQuarter(false))
-watch(
-  () => [
-    board.value.search, board.value.region, board.value.platform,
-    board.value.scanStatus, board.value.multiOnly,
-  ],
-  () => { catalogDisplayLimit.value = catalogPageSize },
-)
 watch(
   [board, ruleSearch, ruleQuarter, batchPreference, rulesOpen, ruleView, boardView],
   schedulePersistUiState,
@@ -623,12 +605,11 @@ onMounted(async () => {
         <VProgressLinear v-if="catalogLoading" indeterminate color="secondary" class="mb-4" />
         <div class="text-caption text-medium-emphasis mb-3">
           当前 {{ filteredCatalog.length }} / {{ catalog.length }} 条
-          <span v-if="visibleCatalog.length < filteredCatalog.length"> · 已渲染 {{ visibleCatalog.length }} 条</span>
           <span v-if="catalogMeta.scanning_count"> · {{ catalogMeta.scanning_count }} 条正在扫描</span>
           <span v-if="catalogMeta.updated_at"> · 更新于 {{ catalogMeta.updated_at }}</span>
         </div>
         <div :class="['catalog-grid', `view-${boardView}`]">
-          <VCard v-for="item in visibleCatalog" :key="item.id" variant="outlined" class="catalog-card">
+          <VCard v-for="item in filteredCatalog" :key="item.id" variant="outlined" class="catalog-card">
             <div class="select-corner"><VCheckbox v-model="selectedIds" :value="item.id" hide-details density="compact" /></div>
             <VImg v-if="item.poster" :src="item.poster" height="170" cover />
             <VCardItem>
@@ -671,14 +652,6 @@ onMounted(async () => {
           <div v-if="!catalogLoading && !filteredCatalog.length" class="empty-catalog">
             <VIcon icon="mdi-calendar-search" size="48" /><div>当前筛选条件没有番剧</div>
           </div>
-        </div>
-        <div v-if="visibleCatalog.length < filteredCatalog.length" class="catalog-load-more mt-5">
-          <VBtn variant="tonal" color="secondary" prepend-icon="mdi-chevron-down" @click="showMoreCatalog">
-            再显示 {{ Math.min(catalogPageSize, filteredCatalog.length - visibleCatalog.length) }} 条
-          </VBtn>
-          <span class="text-caption text-medium-emphasis">
-            批量选择仍会作用于全部 {{ filteredCatalog.length }} 条筛选结果
-          </span>
         </div>
       </VCardText>
     </VCard>
@@ -851,7 +824,6 @@ onMounted(async () => {
 .batch-target { max-width: 280px; }
 .catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 14px; }
 .catalog-card { position: relative; overflow: hidden; content-visibility: auto; contain-intrinsic-size: 320px; }
-.catalog-load-more { display: flex; flex-direction: column; align-items: center; gap: 8px; }
 .catalog-card :deep(.v-card-actions) { flex-wrap: wrap; row-gap: 6px; }
 .catalog-grid.view-list { grid-template-columns: 1fr; }
 .catalog-grid.view-list .catalog-card { display: grid; grid-template-columns: 190px minmax(0, 1fr) auto; grid-template-rows: auto 1fr; align-items: center; }
