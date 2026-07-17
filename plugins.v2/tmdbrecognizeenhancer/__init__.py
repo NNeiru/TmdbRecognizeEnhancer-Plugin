@@ -35,7 +35,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选识别，并将动漫季集归一化到默认编集或选定剧集组。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.3.6"
+    plugin_version = "0.3.7"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -2593,6 +2593,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "quarter": item.get("quarter") or "",
                 "aliases": item.get("aliases") or [],
                 "source_season": season_hint or 1,
+                "source_start_episode": suggestion.get("source_start_episode"),
                 "target_start_season": suggestion.get("season"),
                 "target_start_episode": suggestion.get("episode"),
             })
@@ -2679,6 +2680,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "quarter": str(item.get("quarter") or "").strip(),
                 "aliases": list(dict.fromkeys(str(value).strip() for value in aliases if str(value).strip())),
                 "source_season": self._optional_int(item.get("source_season")),
+                "source_start_episode": self._optional_int(item.get("source_start_episode")),
                 "target_start_season": start_season,
                 "target_start_episode": start_episode,
             })

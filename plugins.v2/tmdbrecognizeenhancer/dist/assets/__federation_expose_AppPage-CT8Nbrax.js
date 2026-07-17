@@ -136,7 +136,7 @@ const platforms = computed$1(() => [
     .map(value => ({ title: value, value })),
 ]);
 const filteredCatalog = computed$1(() => {
-  const keyword = board.value.search.trim().toLocaleLowerCase();
+  const keyword = String(board.value.search || '').trim().toLocaleLowerCase();
   return catalog.value.filter(item => {
     if (board.value.region !== 'all' && item.region !== board.value.region) return false
     if (board.value.platform !== 'all' && item.platform !== board.value.platform) return false
@@ -168,7 +168,7 @@ const ruleQuarterOptions = computed$1(() => {
   ]
 });
 const filteredRules = computed$1(() => {
-  const keyword = ruleSearch.value.trim().toLocaleLowerCase();
+  const keyword = String(ruleSearch.value || '').trim().toLocaleLowerCase();
   return rules.value.filter(rule => {
     const quarters = Array.from(new Set((rule.installments || []).map(item => item.quarter).filter(Boolean)));
     if (ruleQuarter.value === 'unclassified' && quarters.length) return false
@@ -473,7 +473,8 @@ async function deleteRule(rule) {
 function addInstallment() {
   editForm.value.installments.push({
     id: `manual-${Date.now()}`,
-    title: '', quarter: '', aliases: '', source_season: '', target_start_season: 1, target_start_episode: 1,
+    title: '', quarter: '', aliases: '', source_season: '', source_start_episode: '',
+    target_start_season: 1, target_start_episode: 1,
   });
 }
 
@@ -1272,7 +1273,7 @@ return (_ctx, _cache) => {
               _: 1
             }),
             _createVNode$1(_component_VDivider),
-            _createVNode$1(_component_VCardText, null, {
+            _createVNode$1(_component_VCardText, { class: "manual-rule-form" }, {
               default: _withCtx$1(() => [
                 (manualMessage.value)
                   ? (_openBlock$1(), _createBlock$1(_component_VAlert, {
@@ -1294,13 +1295,15 @@ return (_ctx, _cache) => {
                   modelModifiers: { number: true },
                   label: "TMDBID",
                   type: "number",
-                  "prepend-inner-icon": "mdi-database-search"
+                  "prepend-inner-icon": "mdi-database-search",
+                  "hide-details": ""
                 }, null, 8, ["modelValue"]),
                 _createVNode$1(_component_VSelect, {
                   modelValue: manualForm.value.preference,
                   "onUpdate:modelValue": _cache[18] || (_cache[18] = $event => ((manualForm.value.preference) = $event)),
                   label: "目标编集",
-                  items: [{title:'使用 TMDB 默认编集',value:'default'},{title:'优先 Production/Season 剧集组',value:'group_preferred'}]
+                  items: [{title:'使用 TMDB 默认编集',value:'default'},{title:'优先 Production/Season 剧集组',value:'group_preferred'}],
+                  "hide-details": ""
                 }, null, 8, ["modelValue"]),
                 _createVNode$1(_component_VSwitch, {
                   modelValue: manualForm.value.specify_quarter,
@@ -1749,7 +1752,26 @@ return (_ctx, _cache) => {
                                         ]),
                                         _: 2
                                       }, 1024),
-                                      _createVNode$1(_component_VCol, { cols: "6" }, {
+                                      _createVNode$1(_component_VCol, {
+                                        cols: "12",
+                                        sm: "4"
+                                      }, {
+                                        default: _withCtx$1(() => [
+                                          _createVNode$1(_component_VTextField, {
+                                            modelValue: item.source_start_episode,
+                                            "onUpdate:modelValue": $event => ((item.source_start_episode) = $event),
+                                            label: "来源起始集（留空自动）",
+                                            type: "number",
+                                            hint: "累计编号拆入 Special 时会按 Episode ID 自动推导",
+                                            "persistent-hint": ""
+                                          }, null, 8, ["modelValue", "onUpdate:modelValue"])
+                                        ]),
+                                        _: 2
+                                      }, 1024),
+                                      _createVNode$1(_component_VCol, {
+                                        cols: "6",
+                                        sm: "4"
+                                      }, {
                                         default: _withCtx$1(() => [
                                           _createVNode$1(_component_VTextField, {
                                             modelValue: item.target_start_season,
@@ -1760,7 +1782,10 @@ return (_ctx, _cache) => {
                                         ]),
                                         _: 2
                                       }, 1024),
-                                      _createVNode$1(_component_VCol, { cols: "6" }, {
+                                      _createVNode$1(_component_VCol, {
+                                        cols: "6",
+                                        sm: "4"
+                                      }, {
                                         default: _withCtx$1(() => [
                                           _createVNode$1(_component_VTextField, {
                                             modelValue: item.target_start_episode,
@@ -1940,7 +1965,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const EpisodeNormalizer = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-13b62b15"]]);
+const EpisodeNormalizer = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-8428d097"]]);
 
 const {createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createBlock:_createBlock,renderList:_renderList,Fragment:_Fragment,vShow:_vShow,withDirectives:_withDirectives,unref:_unref,normalizeClass:_normalizeClass} = await importShared('vue');
 

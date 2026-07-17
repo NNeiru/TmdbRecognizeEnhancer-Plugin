@@ -93,7 +93,13 @@ class EpisodeNormalizer:
             }
 
         prepared = []
-        default_ids = set(default_layout.get("by_id") or {})
+        # 剧集组是否完整只比较正篇 Episode ID。TMDB 默认编集可能收录大量
+        # S00 小剧场，而 Production/Season 组只负责正篇；缺少这些 Special
+        # 不应降低多季剧集组的可信度。
+        default_ids = {
+            item.get("id") for item in default_layout.get("sequence") or []
+            if item.get("id") is not None
+        }
         default_count = len(default_layout.get("sequence") or [])
         for group in self._group_metadata(info):
             group_id = str(group.get("id") or "").strip()
@@ -106,7 +112,10 @@ class EpisodeNormalizer:
             profile = self._layout_profile(layout)
             if profile["regular_group_count"] < 2:
                 continue
-            layout_ids = set(layout.get("by_id") or {})
+            layout_ids = {
+                item.get("id") for item in layout.get("sequence") or []
+                if item.get("id") is not None
+            }
             overlap = len(default_ids & layout_ids)
             coverage = overlap / len(default_ids) if default_ids else 0.0
             if not default_ids:
@@ -264,16 +273,56 @@ class EpisodeNormalizer:
         if not target.get("sequence"):
             return {**base_result, "reason": "目标编集没有可用正片集数据"}
 
+        default_layout = self._default_layout(tmdb_id, info)
+
+        # 当文件使用 TMDB 默认编集的累计编号，而目标剧集组把其中若干集拆到
+        # Special 时，Episode ID 是比标题片段偏移更强的证据。例如默认 E16
+        # 与剧集组 S00E04 是同一 Episode，必须先完成这次精确映射，不能把 16
+        # 当作某个季度片段的第 16 集。
+        special_candidates: List[Dict[str, Any]] = []
+        self._append_coordinate_candidate(
+            special_candidates, default_layout, target, season, episode, end_episode,
+            "tmdb-default-special",
+        )
+        special_candidates = [
+            item for item in self._unique_candidates(special_candidates)
+            if (target.get("by_coord") or {}).get(
+                (item.get("season"), item.get("episode")), {}
+            ).get("is_special")
+        ]
+        if len(special_candidates) == 1:
+            return self._result_from_mapping(
+                base_result, special_candidates[0], "tmdb-default-special",
+                "通过 TMDB Episode ID 映射到目标编集 Special",
+            )
+
         # 季度条目/续作别名明确命中时优先。它能解决“第三期 - 01”被解析为 S01E01 的歧义。
         installment = self._match_installment(rule.get("installments") or [], raw_title, parsed_name, season)
         if installment:
+            source_start_episode = self._resolve_source_start_episode(
+                tmdb_id, info, target, installment,
+            )
+            default_source = (default_layout.get("by_coord") or {}).get((season, episode))
+            installment_start_season = self._optional_int(installment.get("target_start_season"))
+            if (
+                    installment_start_season == 0
+                    and default_source and default_source.get("id") is not None
+                    and default_source.get("id") not in (target.get("by_id") or {})
+            ):
+                return {
+                    **base_result,
+                    "reason": "目标剧集组未收录该 Special，已安全保留原坐标",
+                    "strategy": "special-missing-from-target",
+                }
             current = target["by_coord"].get((season, episode))
             # MP 传统识别词可能已经把累计集数偏移到了该季度在目标编集中的
             # 起点或其后。此时目标坐标本身可信，不能再把 E13 当成相对第 13 集
             # 二次偏移；只有当前坐标位于季度目标起点之前时才按相对集数映射。
             if current and self._is_at_or_after_installment_start(target, installment, current):
                 if end_episode is not None and (season, end_episode) not in target["by_coord"]:
-                    mapped = self._map_installment(target, installment, episode, end_episode)
+                    mapped = self._map_installment(
+                        target, installment, episode, end_episode, source_start_episode,
+                    )
                     if mapped and mapped.get("provisional"):
                         return self._result_from_mapping(
                             base_result, mapped, "installment-tail",
@@ -285,7 +334,9 @@ class EpisodeNormalizer:
                     "reason": "传统识别词或原标题已提供目标编集坐标",
                     "strategy": "target-coordinate",
                 }
-            mapped = self._map_installment(target, installment, episode, end_episode)
+            mapped = self._map_installment(
+                target, installment, episode, end_episode, source_start_episode,
+            )
             if mapped:
                 return self._result_from_mapping(
                     base_result,
@@ -297,6 +348,20 @@ class EpisodeNormalizer:
                     ),
                 )
 
+        # 明确的 S00 来源必须通过 Episode ID 找到目标 Special；剧集组未收录
+        # 时绝不能把 S00E01 当成正片全局第 1 集。
+        if season == 0:
+            default_source = (default_layout.get("by_coord") or {}).get((season, episode))
+            if (
+                    default_source and default_source.get("id") is not None
+                    and default_source.get("id") not in (target.get("by_id") or {})
+            ):
+                return {
+                    **base_result,
+                    "reason": "目标编集未收录该 Special，已安全保留原坐标",
+                    "strategy": "special-missing-from-target",
+                }
+
         current = target["by_coord"].get((season, episode))
         if current:
             if end_episode is not None and (season, end_episode) not in target["by_coord"]:
@@ -306,7 +371,6 @@ class EpisodeNormalizer:
         candidates: List[Dict[str, Any]] = []
 
         # 输入可能来自 TMDB 默认编集，而目标是剧集组。
-        default_layout = self._default_layout(tmdb_id, info)
         self._append_coordinate_candidate(
             candidates, default_layout, target, season, episode, end_episode, "tmdb-default",
         )
@@ -555,7 +619,9 @@ class EpisodeNormalizer:
             average = sum(regular_counts) / len(regular_counts)
             if average < 3:
                 score -= 25
-        missing = max(0, default_count - cls._safe_int(group.get("episode_count"), 0))
+        # episode_count 元数据包含/缺少 Special 的口径并不稳定，尾部完整度必须
+        # 以已经解析出的正篇数量为准。
+        missing = max(0, default_count - cls._safe_int(profile.get("episode_count"), 0))
         if missing > cls.TAIL_EXTENSION_LIMIT:
             score -= min(35, (missing - cls.TAIL_EXTENSION_LIMIT) * 4)
         return score
@@ -595,6 +661,7 @@ class EpisodeNormalizer:
             installment: Dict[str, Any],
             episode: int,
             end_episode: Optional[int],
+            source_start_episode: int = 1,
     ) -> Optional[Dict[str, Any]]:
         start_season = self._optional_int(installment.get("target_start_season"))
         start_episode = self._optional_int(installment.get("target_start_episode"))
@@ -602,7 +669,9 @@ class EpisodeNormalizer:
             return None
         start = target["by_coord"].get((start_season, start_episode))
         if (
-                start_season == 0 and not self._installment_targets_special(installment)
+                start_season == 0
+                and (not start or not start.get("is_special"))
+                and not self._installment_targets_special(installment)
                 and target["by_coord"].get((1, start_episode))
         ):
             # 兼容旧版本按 group.order=0 保存的第一常规季起点。
@@ -610,12 +679,29 @@ class EpisodeNormalizer:
             start = target["by_coord"].get((start_season, start_episode))
         if not start:
             return None
+        relative_begin = episode - source_start_episode
+        relative_end = (end_episode if end_episode is not None else episode) - source_start_episode
+        if relative_begin < 0 or relative_end < relative_begin:
+            return None
+
+        # Special 不在正片 sequence 中，按 S00 内的相对坐标映射。这里不做
+        # 缺集外推，避免把 TMDB 尚未收录的 OVA 错认成另一条特别篇。
+        if start.get("is_special") or start_season == 0:
+            begin = target["by_coord"].get((start_season, start_episode + relative_begin))
+            end = target["by_coord"].get((start_season, start_episode + relative_end))
+            if not begin or not end or not begin.get("is_special") or not end.get("is_special"):
+                return None
+            return {
+                "season": begin["season"],
+                "episode": begin["episode"],
+                "end_episode": end["episode"] if end_episode is not None else None,
+            }
         try:
             start_index = target["sequence"].index(start)
         except ValueError:
             return None
-        begin_index = start_index + episode - 1
-        end_index = start_index + (end_episode if end_episode is not None else episode) - 1
+        begin_index = start_index + relative_begin
+        end_index = start_index + relative_end
         mapped = self._mapping_from_indexes(target, begin_index, end_index, end_episode is not None)
         if mapped:
             return mapped
@@ -625,6 +711,7 @@ class EpisodeNormalizer:
             start_episode=start_episode,
             episode=episode,
             end_episode=end_episode,
+            source_start_episode=source_start_episode,
         )
 
     @classmethod
@@ -635,6 +722,7 @@ class EpisodeNormalizer:
             start_episode: int,
             episode: int,
             end_episode: Optional[int],
+            source_start_episode: int = 1,
     ) -> Optional[Dict[str, Any]]:
         """只在目标最后一个常规季末尾缺少少量集数时进行受控推算。"""
         season_entries = [
@@ -652,8 +740,8 @@ class EpisodeNormalizer:
         ]
         if later_regular:
             return None
-        begin = start_episode + episode - 1
-        end = start_episode + (end_episode if end_episode is not None else episode) - 1
+        begin = start_episode + episode - source_start_episode
+        end = start_episode + (end_episode if end_episode is not None else episode) - source_start_episode
         known_max = cls._safe_int(last.get("episode"), 0)
         if (
                 begin < start_episode or end < begin or end <= known_max
@@ -677,7 +765,9 @@ class EpisodeNormalizer:
         start_episode = cls._optional_int(installment.get("target_start_episode"))
         start = target["by_coord"].get((start_season, start_episode))
         if (
-                start_season == 0 and not cls._installment_targets_special(installment)
+                start_season == 0
+                and (not start or not start.get("is_special"))
+                and not cls._installment_targets_special(installment)
                 and target["by_coord"].get((1, start_episode))
         ):
             start = target["by_coord"].get((1, start_episode))
@@ -687,6 +777,27 @@ class EpisodeNormalizer:
             return target["sequence"].index(current) >= target["sequence"].index(start)
         except ValueError:
             return False
+
+    def _resolve_source_start_episode(
+            self,
+            tmdb_id: int,
+            info: Dict[str, Any],
+            target: Dict[str, Any],
+            installment: Dict[str, Any],
+    ) -> int:
+        """推导片段在来源累计编号中的首集；显式配置始终优先。"""
+        configured = self._optional_int(installment.get("source_start_episode"))
+        if configured is not None and configured > 0:
+            return configured
+        start_season = self._optional_int(installment.get("target_start_season"))
+        start_episode = self._optional_int(installment.get("target_start_episode"))
+        start = (target.get("by_coord") or {}).get((start_season, start_episode))
+        if not start or not start.get("is_special") or start.get("id") is None:
+            return 1
+        default_item = (self._default_layout(tmdb_id, info).get("by_id") or {}).get(start.get("id"))
+        if not default_item:
+            return 1
+        return max(1, self._safe_int(default_item.get("episode"), 1))
 
     @classmethod
     def _installment_targets_special(cls, installment: Dict[str, Any]) -> bool:

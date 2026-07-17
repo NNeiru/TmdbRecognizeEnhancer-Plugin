@@ -63,7 +63,7 @@ const platforms = computed(() => [
     .map(value => ({ title: value, value })),
 ])
 const filteredCatalog = computed(() => {
-  const keyword = board.value.search.trim().toLocaleLowerCase()
+  const keyword = String(board.value.search || '').trim().toLocaleLowerCase()
   return catalog.value.filter(item => {
     if (board.value.region !== 'all' && item.region !== board.value.region) return false
     if (board.value.platform !== 'all' && item.platform !== board.value.platform) return false
@@ -95,7 +95,7 @@ const ruleQuarterOptions = computed(() => {
   ]
 })
 const filteredRules = computed(() => {
-  const keyword = ruleSearch.value.trim().toLocaleLowerCase()
+  const keyword = String(ruleSearch.value || '').trim().toLocaleLowerCase()
   return rules.value.filter(rule => {
     const quarters = Array.from(new Set((rule.installments || []).map(item => item.quarter).filter(Boolean)))
     if (ruleQuarter.value === 'unclassified' && quarters.length) return false
@@ -400,7 +400,8 @@ async function deleteRule(rule) {
 function addInstallment() {
   editForm.value.installments.push({
     id: `manual-${Date.now()}`,
-    title: '', quarter: '', aliases: '', source_season: '', target_start_season: 1, target_start_episode: 1,
+    title: '', quarter: '', aliases: '', source_season: '', source_start_episode: '',
+    target_start_season: 1, target_start_episode: 1,
   })
 }
 
@@ -657,12 +658,13 @@ onMounted(async () => {
           <template #append><VBtn icon="mdi-close" variant="text" @click="manualDialog = false" /></template>
         </VCardItem>
         <VDivider />
-        <VCardText>
+        <VCardText class="manual-rule-form">
           <VAlert v-if="manualMessage" type="warning" variant="tonal" density="compact" class="mb-4">{{ manualMessage }}</VAlert>
-          <VTextField v-model.number="manualForm.tmdb_id" label="TMDBID" type="number" prepend-inner-icon="mdi-database-search" />
+          <VTextField v-model.number="manualForm.tmdb_id" label="TMDBID" type="number" prepend-inner-icon="mdi-database-search" hide-details />
           <VSelect
             v-model="manualForm.preference" label="目标编集"
             :items="[{title:'使用 TMDB 默认编集',value:'default'},{title:'优先 Production/Season 剧集组',value:'group_preferred'}]"
+            hide-details
           />
           <VSwitch v-model="manualForm.specify_quarter" label="手动指定归属季度" color="primary" hide-details class="mb-3" />
           <VRow v-if="manualForm.specify_quarter" dense>
@@ -767,8 +769,11 @@ onMounted(async () => {
                   <VCol cols="12" sm="3"><VTextField v-model="item.quarter" label="季度" /></VCol>
                   <VCol cols="12" sm="3"><VTextField v-model="item.source_season" label="来源季" type="number" /></VCol>
                   <VCol cols="12"><VTextarea v-model="item.aliases" label="命中别名（每行一个）" rows="2" auto-grow /></VCol>
-                  <VCol cols="6"><VTextField v-model="item.target_start_season" label="目标起始季" type="number" /></VCol>
-                  <VCol cols="6"><VTextField v-model="item.target_start_episode" label="目标起始集" type="number" /></VCol>
+                  <VCol cols="12" sm="4">
+                    <VTextField v-model="item.source_start_episode" label="来源起始集（留空自动）" type="number" hint="累计编号拆入 Special 时会按 Episode ID 自动推导" persistent-hint />
+                  </VCol>
+                  <VCol cols="6" sm="4"><VTextField v-model="item.target_start_season" label="目标起始季" type="number" /></VCol>
+                  <VCol cols="6" sm="4"><VTextField v-model="item.target_start_episode" label="目标起始集" type="number" /></VCol>
                 </VRow>
                 <VBtn color="error" variant="text" prepend-icon="mdi-delete-outline" @click="editForm.installments.splice(index, 1)">删除片段</VBtn>
               </VExpansionPanelText>
@@ -828,6 +833,8 @@ onMounted(async () => {
 .empty-catalog, .empty-rules { grid-column: 1 / -1; min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: rgba(var(--v-theme-on-surface), .55); }
 .manual-match { display: grid; grid-template-columns: 120px auto auto; gap: 8px; align-items: center; min-width: 350px; }
 .tmdb-correction { display: grid; grid-template-columns: minmax(180px, 1fr) auto; gap: 10px; align-items: center; }
+.manual-rule-form { display: grid; gap: 14px; }
+.manual-rule-form :deep(.v-alert), .manual-rule-form :deep(.v-switch), .manual-rule-form :deep(.v-row) { margin-block: 0 !important; }
 @media (max-width: 1000px) {
   .board-controls, .rules-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

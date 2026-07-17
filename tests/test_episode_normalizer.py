@@ -305,3 +305,127 @@ def test_installment_start_uses_explicit_title_season():
     )
 
     assert start == {"season": 3, "episode": 1, "strategy": "title-season"}
+
+
+def test_cumulative_default_special_maps_to_s00_without_corrupting_regular_episode():
+    """默认 E13-E17 被剧集组拆为 Special 时，E16->S00E04，而 E11 仍是 S01E11。"""
+    class DefaultTailSpecials(FakeTmdbApi):
+        @staticmethod
+        def get_info(mtype, tmdbid):
+            return {
+                "id": tmdbid,
+                "name": "Next Shine",
+                "seasons": [{"season_number": 1, "episode_count": 17}],
+                "episode_groups": {"results": [{
+                    "id": "production", "name": "Production Seasons", "type": 6,
+                    "group_count": 2, "episode_count": 17,
+                }]},
+            }
+
+        @staticmethod
+        def get_tv_season_detail(tmdbid, season):
+            return {"episodes": [
+                {"id": index, "season_number": 1, "episode_number": index}
+                for index in range(1, 18)
+            ]}
+
+        @staticmethod
+        def get_tv_group_seasons(group_id):
+            return [
+                {"order": 0, "name": "Specials", "episodes": [
+                    {"id": index, "season_number": 1, "episode_number": index}
+                    for index in range(13, 18)
+                ]},
+                {"order": 1, "name": "Season 1", "episodes": [
+                    {"id": index, "season_number": 1, "episode_number": index}
+                    for index in range(1, 13)
+                ]},
+            ]
+
+    normalizer = EpisodeNormalizer(DefaultTailSpecials())
+    rule = {
+        "tmdb_id": 277513,
+        "enabled": True,
+        "target_type": "group",
+        "episode_group_id": "production",
+        "installments": [{
+            "title": "Next Shine!",
+            "aliases": ["Next Shine!"],
+            "source_season": 1,
+            "target_start_season": 0,
+            "target_start_episode": 1,
+        }],
+    }
+
+    special = normalizer.normalize(
+        rule, season=1, episode=16, raw_title="[Sakurato] Next Shine! [16].mkv",
+    )
+    regular = normalizer.normalize(
+        rule, season=1, episode=11, raw_title="[Sakurato] Next Shine! [11].mkv",
+    )
+
+    assert special["applied"] is True
+    assert (special["season"], special["episode"]) == (0, 4)
+    assert special["strategy"] == "tmdb-default-special"
+    assert regular["applied"] is False
+    assert (regular["season"], regular["episode"]) == (1, 11)
+    assert regular["strategy"] == "target-coordinate"
+
+
+def test_group_recommendation_ignores_specials_missing_from_production_group():
+    """Production 组完整覆盖正篇时，不因缺少大量 S00 小剧场而被判不完整。"""
+    class GroupWithoutDefaultSpecials(FakeTmdbApi):
+        @staticmethod
+        def get_info(mtype, tmdbid):
+            return {
+                "id": tmdbid,
+                "name": "Long Running Anime",
+                "seasons": [
+                    {"season_number": 0, "episode_count": 30},
+                    {"season_number": 1, "episode_count": 24},
+                ],
+                "episode_groups": {"results": [{
+                    "id": "production", "name": "Production Season", "type": 6,
+                    "group_count": 2, "episode_count": 24,
+                }]},
+            }
+
+        @staticmethod
+        def get_tv_season_detail(tmdbid, season):
+            if season == 0:
+                return {"episodes": [
+                    {"id": 1000 + index, "season_number": 0, "episode_number": index}
+                    for index in range(1, 31)
+                ]}
+            return {"episodes": [
+                {"id": index, "season_number": 1, "episode_number": index}
+                for index in range(1, 25)
+            ]}
+
+        @staticmethod
+        def get_tv_group_seasons(group_id):
+            return [
+                {"order": 0, "name": "Season 1", "episodes": [
+                    {"id": index, "season_number": 1, "episode_number": index}
+                    for index in range(1, 13)
+                ]},
+                {"order": 1, "name": "Season 2", "episodes": [
+                    {"id": index, "season_number": 1, "episode_number": index}
+                    for index in range(13, 25)
+                ]},
+            ]
+
+    normalizer = EpisodeNormalizer(GroupWithoutDefaultSpecials())
+    recommendation = normalizer.recommend_target(117465)
+    missing_special = normalizer.normalize({
+        "tmdb_id": 117465,
+        "enabled": True,
+        "target_type": "group",
+        "episode_group_id": "production",
+    }, season=0, episode=1)
+
+    assert recommendation["target_type"] == "group"
+    assert recommendation["episode_group_id"] == "production"
+    assert recommendation["group"]["coverage"] == 100.0
+    assert missing_special["applied"] is False
+    assert missing_special["strategy"] == "special-missing-from-target"
