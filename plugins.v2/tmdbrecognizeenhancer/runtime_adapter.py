@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from functools import wraps
+from pathlib import Path
 from typing import Any, Optional
 
 
@@ -125,3 +126,73 @@ class MoviePilotRuntimeAdapter:
             return None
         context = getattr(MediaChain, MoviePilotRuntimeAdapter._context_attr, None)
         return context.get() if isinstance(context, ContextVar) else None
+
+
+class SubtitleRenameAdapter:
+    """在 MP 生成标准字幕语言后缀后提供插件映射点，不修改源码文件。"""
+
+    _method_name = "_TransHandler__rename_subtitles"
+    _marker = "_tmdb_enhancer_subtitle_wrapper"
+    _processor_attr = "_tmdb_enhancer_subtitle_processor"
+    _processor_owner_attr = "_tmdb_enhancer_subtitle_processor_owner"
+
+    def __init__(self) -> None:
+        self.compatible = False
+        self.message = "尚未安装字幕命名适配器"
+        self._owner_token = object()
+
+    def install(self, processor=None) -> bool:
+        try:
+            from app.modules.filemanager.transhandler import TransHandler
+        except Exception as err:
+            self.message = f"无法导入 MoviePilot TransHandler：{err}"
+            return False
+        current = getattr(TransHandler, self._method_name, None)
+        if not callable(current):
+            self.message = "当前 MoviePilot 缺少可兼容的字幕命名入口"
+            return False
+
+        setattr(TransHandler, self._processor_attr, processor)
+        setattr(TransHandler, self._processor_owner_attr, self._owner_token)
+        if not getattr(current, self._marker, False):
+            original = current
+
+            @wraps(original)
+            def wrapper(sub_item, new_file):
+                result = original(sub_item, new_file)
+                active_processor = getattr(TransHandler, self._processor_attr, None)
+                if not callable(active_processor):
+                    return result
+                try:
+                    # 只允许修改最终文件名，禁止映射规则改变目标目录。
+                    mapped_name = active_processor(Path(result).name)
+                    return Path(result).with_name(str(mapped_name or Path(result).name))
+                except Exception:
+                    return result
+
+            setattr(wrapper, self._marker, True)
+            setattr(wrapper, "_tmdb_enhancer_original", original)
+            setattr(wrapper, "_tmdb_enhancer_owner", self._owner_token)
+            setattr(TransHandler, self._method_name, staticmethod(wrapper))
+        else:
+            setattr(current, "_tmdb_enhancer_owner", self._owner_token)
+
+        self.compatible = True
+        self.message = "已接入 MP 字幕语言后缀生成阶段"
+        return True
+
+    def uninstall(self) -> None:
+        try:
+            from app.modules.filemanager.transhandler import TransHandler
+        except Exception:
+            return
+        current = getattr(TransHandler, self._method_name, None)
+        original = getattr(current, "_tmdb_enhancer_original", None)
+        owner = getattr(current, "_tmdb_enhancer_owner", None)
+        if current and getattr(current, self._marker, False) and original and owner is self._owner_token:
+            setattr(TransHandler, self._method_name, staticmethod(original))
+        if getattr(TransHandler, self._processor_owner_attr, None) is self._owner_token:
+            setattr(TransHandler, self._processor_attr, None)
+            setattr(TransHandler, self._processor_owner_attr, None)
+        self.compatible = False
+        self.message = "字幕命名适配器已卸载"

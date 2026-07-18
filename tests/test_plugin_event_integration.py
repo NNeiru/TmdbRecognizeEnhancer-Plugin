@@ -169,6 +169,37 @@ def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
     assert "文件操作前" in target["description"]
 
 
+def test_rename_mapping_runs_at_group_and_rendered_path_stages(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "custom_rename_fields_enabled": False,
+        "rename_mapping_enabled": True,
+    })
+    plugin._rename_mappings.refresh([
+        {
+            "stage": "release_group", "mode": "regex",
+            "pattern": r"^(?:A[&@]B|B[&@]A)$", "replacement": "A@B",
+        },
+        {
+            "stage": "rendered_path", "mode": "literal",
+            "pattern": "命运／奇异赝品", "replacement": "命运-奇异赝品",
+        },
+    ])
+    build = SimpleNamespace(event_data={"rename_dict": {"releaseGroup": "B&A"}})
+    plugin.on_transfer_rename_build(build)
+    assert build.event_data["rename_dict"]["releaseGroup"] == "A@B"
+
+    rename = SimpleNamespace(event_data={
+        "render_str": "命运／奇异赝品/S01E01.mkv",
+        "updated": False,
+        "updated_str": None,
+    })
+    plugin.on_transfer_rename_mapping(rename)
+    assert rename.event_data["updated_str"] == "命运-奇异赝品/S01E01.mkv"
+
+
 def test_current_quarter_catalog_prioritizes_mapped_anime_candidate(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

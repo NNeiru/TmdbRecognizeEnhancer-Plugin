@@ -43,6 +43,7 @@ export const DEFAULT_CONFIG = {
   recognition_memory_min_hits: 3,
   recognition_memory_ttl_days: 14,
   custom_rename_fields_enabled: true,
+  rename_mapping_enabled: true,
 }
 
 export const UI_VERSION = __TMDB_ENHANCER_UI_VERSION__

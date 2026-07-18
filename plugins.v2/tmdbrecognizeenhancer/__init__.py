@@ -31,7 +31,8 @@ from .episode_normalizer import EpisodeNormalizer
 from .metadata_tools import ReleaseGroupRegistry, RenameFieldRegistry
 from .performance_diagnostics import PerformanceDiagnostics
 from .recognition_rules import FIELD_SPECS, RecognitionRuleRegistry
-from .runtime_adapter import MoviePilotRuntimeAdapter
+from .rename_mapping import RenameMappingRegistry
+from .runtime_adapter import MoviePilotRuntimeAdapter, SubtitleRenameAdapter
 
 
 class TmdbRecognizeEnhancer(_PluginBase):
@@ -40,7 +41,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.0-beta.6"
+    plugin_version = "0.5.0-beta.7"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -54,6 +55,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     DATA_KEY_RECOGNITION_RULE_OVERRIDES = "recognition_rule_overrides"
     DATA_KEY_RECOGNITION_MEMORY = "recognition_memory"
     DATA_KEY_CUSTOM_RENAME_FIELDS = "custom_rename_fields"
+    DATA_KEY_RENAME_MAPPINGS = "rename_mappings"
     # 季度目录匹配使用独立策略，不继承整理识别的 max_queries、降级开关等参数。
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
@@ -103,6 +105,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "recognition_memory_min_hits": 3,
         "recognition_memory_ttl_days": 14,
         "custom_rename_fields_enabled": True,
+        "rename_mapping_enabled": True,
     }
 
     _split_pattern = re.compile(r"\s*(?::|：|\||｜|/|／|—|–)\s*")
@@ -136,6 +139,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._recognition_rules = RecognitionRuleRegistry()
         self._rename_fields = RenameFieldRegistry()
         self._custom_rename_fields: Tuple[Dict[str, Any], ...] = tuple()
+        self._rename_mappings = RenameMappingRegistry()
+        self._subtitle_rename_adapter = SubtitleRenameAdapter()
         self._diagnostics = PerformanceDiagnostics()
         self._history_lock = threading.RLock()
         self._web_cache_lock = threading.RLock()
@@ -153,6 +158,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._episode_normalizer = EpisodeNormalizer(self._tmdb_api)
         self._refresh_metadata_tools()
         self._sync_runtime_adapter_state()
+        self._sync_subtitle_adapter_state()
         self._sync_event_handler_state()
 
     def get_state(self) -> bool:
@@ -382,6 +388,27 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "summary": "试算自定义重命名字段",
             },
             {
+                "path": "/metadata-tools/rename-mapping",
+                "endpoint": self.save_rename_mapping_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "保存命名阶段映射规则",
+            },
+            {
+                "path": "/metadata-tools/rename-mapping/delete",
+                "endpoint": self.delete_rename_mapping_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "删除命名阶段映射规则",
+            },
+            {
+                "path": "/metadata-tools/rename-mapping/preview",
+                "endpoint": self.preview_rename_mapping_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "试算命名阶段映射规则",
+            },
+            {
                 "path": "/diagnostics",
                 "endpoint": self.get_diagnostics_api,
                 "methods": ["GET"],
@@ -394,6 +421,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """禁用事件处理器并释放 TMDB 客户端。"""
         self._sync_event_handler_state(enabled=False)
         self._runtime_adapter.uninstall()
+        self._subtitle_rename_adapter.uninstall()
         self._close_tmdb_client()
 
     def get_status(self) -> schemas.Response:
@@ -451,6 +479,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         ),
                         "field_count": len(self._custom_rename_fields),
                     },
+                    "rename_mapping": {
+                        "enabled": bool(self._config.get("rename_mapping_enabled")),
+                        "status": (
+                            "运行中" if self.get_state() and self._config.get("rename_mapping_enabled")
+                            and self._subtitle_rename_adapter.compatible else "普通命名可用，字幕适配等待兼容"
+                            if self.get_state() and self._config.get("rename_mapping_enabled") else "已停用"
+                        ),
+                        "rule_count": self._rename_mappings.catalog().get("count", 0),
+                    },
                 },
                 "history": history,
                 "episode_normalizer": {
@@ -474,6 +511,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self.update_config(self._current_config())
         self._refresh_metadata_tools()
         self._sync_runtime_adapter_state()
+        self._sync_subtitle_adapter_state()
         self._sync_event_handler_state()
         return self.get_status()
 
@@ -498,12 +536,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "custom": list(deepcopy(self._custom_rename_fields)),
                 "count": len(self._custom_rename_fields),
             },
+            "rename_mappings": {
+                **self._rename_mappings.catalog(),
+                "subtitle_compatible": self._subtitle_rename_adapter.compatible,
+                "subtitle_message": self._subtitle_rename_adapter.message,
+            },
             "capabilities": {
                 "runtime_override": self._runtime_adapter.compatible,
                 "runtime_message": self._runtime_adapter.message,
                 "source_mutation": False,
                 "custom_independent_field": hasattr(ChainEventType, "TransferRenameBuild"),
                 "target_directory_context": hasattr(ChainEventType, "TransferRename"),
+                "subtitle_post_mapping": self._subtitle_rename_adapter.compatible,
             },
         })
 
@@ -619,6 +663,39 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 key: value for key, value in context.items()
                 if not str(key).startswith("__")
             },
+        })
+
+    def save_rename_mapping_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """新增或更新一条制作组、命名结果或字幕文件名映射。"""
+        current = self._read_rename_mappings()
+        rule_id = str(payload.get("id") or "").strip()
+        candidate = [item for item in current if not rule_id or item.get("id") != rule_id]
+        try:
+            normalized = RenameMappingRegistry.validate_rule(payload, candidate)
+        except ValueError as err:
+            return schemas.Response(success=False, message=str(err))
+        self.save_data(self.DATA_KEY_RENAME_MAPPINGS, normalized)
+        self._rename_mappings.refresh(normalized)
+        return self.get_metadata_tools_api()
+
+    def delete_rename_mapping_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """删除一条命名映射。"""
+        rule_id = str(payload.get("id") or "").strip()
+        rules = [item for item in self._read_rename_mappings() if item.get("id") != rule_id]
+        self.save_data(self.DATA_KEY_RENAME_MAPPINGS, rules)
+        self._rename_mappings.refresh(rules)
+        return self.get_metadata_tools_api()
+
+    def preview_rename_mapping_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """按实际顺序试算某一个命名阶段。"""
+        stage = str(payload.get("stage") or "rendered_path").strip().lower()
+        value = str(payload.get("value") or "")
+        output, changes = self._rename_mappings.apply(value, stage)
+        return schemas.Response(success=True, data={
+            "stage": stage,
+            "input": value,
+            "output": output,
+            "changes": changes,
         })
 
     def get_diagnostics_api(self) -> schemas.Response:
@@ -1550,13 +1627,26 @@ class TmdbRecognizeEnhancer(_PluginBase):
     @eventmanager.register(ChainEventType.TransferRenameBuild, priority=1)
     def on_transfer_rename_build(self, event: Event) -> None:
         """在 MP 首次渲染前注入源文件上下文与不依赖目标目录的自定义字段。"""
-        if not self.get_state() or not self._config.get("custom_rename_fields_enabled"):
+        if not self.get_state() or not (
+                self._config.get("custom_rename_fields_enabled")
+                or self._config.get("rename_mapping_enabled")
+        ):
             return
         if not event or not event.event_data:
             return
         data = event.event_data
         rename_dict = self._event_get(data, "rename_dict")
         if not isinstance(rename_dict, dict):
+            return
+        if self._config.get("rename_mapping_enabled") and rename_dict.get("releaseGroup"):
+            mapped_group, changes = self._rename_mappings.apply(
+                rename_dict.get("releaseGroup"), "release_group"
+            )
+            rename_dict["releaseGroup"] = mapped_group
+            if changes and self._config.get("debug"):
+                logger.info(f"[TMDB识别增强] 制作组命名映射：{changes}")
+        if not self._config.get("custom_rename_fields_enabled"):
+            self._event_set(data, "rename_dict", rename_dict)
             return
         source_context = self._build_rename_source_context(
             self._event_get(data, "source_path"), self._event_get(data, "source_item"),
@@ -1609,6 +1699,33 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._event_set(data, "source", self.__class__.__name__)
         if errors and self._config.get("debug"):
             logger.warning(f"[TMDB识别增强] 自定义重命名字段目标阶段失败：{errors}")
+
+    @eventmanager.register(ChainEventType.TransferRename, priority=100)
+    def on_transfer_rename_mapping(self, event: Event) -> None:
+        """在其它命名处理完成后顺序映射相对路径；字幕语言后缀由运行时适配器随后处理。"""
+        if not self.get_state() or not self._config.get("rename_mapping_enabled"):
+            return
+        if not event or not event.event_data:
+            return
+        data = event.event_data
+        current = (
+            self._event_get(data, "updated_str")
+            if self._event_get(data, "updated") else self._event_get(data, "render_str")
+        )
+        mapped, changes = self._rename_mappings.apply(current, "rendered_path")
+        if not changes:
+            return
+        # render_str 只能是相对路径；拒绝规则把整理目标逃逸到媒体库根目录之外。
+        candidate = Path(mapped)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            logger.warning(f"[TMDB识别增强] 命名映射产生了不安全路径，已拒绝：{mapped}")
+            return
+        self._event_set(data, "render_str", mapped)
+        self._event_set(data, "updated", True)
+        self._event_set(data, "updated_str", mapped)
+        self._event_set(data, "source", self.__class__.__name__)
+        if self._config.get("debug"):
+            logger.info(f"[TMDB识别增强] 命名结果映射：{changes}")
 
     @eventmanager.register(ChainEventType.NameRecognize, priority=5)
     def on_name_recognize(self, event: Event) -> None:
@@ -1748,6 +1865,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._release_group_registry.refresh(profiles)
         self._recognition_rules.refresh(self._read_recognition_rule_overrides())
         self._custom_rename_fields = tuple(deepcopy(self._read_custom_rename_fields()))
+        self._rename_mappings.refresh(self._read_rename_mappings())
 
     def _read_custom_rename_fields(self) -> List[Dict[str, Any]]:
         """读取并校验用户自定义重命名字段；异常旧数据不会阻断插件启动。"""
@@ -1757,6 +1875,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         except ValueError as err:
             logger.warning(f"[TMDB识别增强] 自定义重命名字段加载失败：{err}")
             return []
+
+    def _read_rename_mappings(self) -> List[Dict[str, Any]]:
+        """读取制作组与最终命名映射。"""
+        return RenameMappingRegistry.normalize_rules(
+            self.get_data(self.DATA_KEY_RENAME_MAPPINGS) or []
+        )
 
     @staticmethod
     def _build_rename_source_context(source_path: Any, source_item: Any = None) -> Dict[str, Any]:
@@ -1827,6 +1951,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self._runtime_adapter.install(self._apply_recognition_rule_overrides)
         else:
             self._runtime_adapter.uninstall()
+
+    def _sync_subtitle_adapter_state(self) -> None:
+        """按模块开关安装或恢复 MP 字幕后缀后的文件名映射点。"""
+        if self.get_state() and self._config.get("rename_mapping_enabled"):
+            self._subtitle_rename_adapter.install(self._apply_subtitle_name_mapping)
+        else:
+            self._subtitle_rename_adapter.uninstall()
+
+    def _apply_subtitle_name_mapping(self, filename: Any) -> str:
+        """由字幕适配器调用；输入输出都只允许是文件名，不改变目录。"""
+        mapped, changes = self._rename_mappings.apply(filename, "subtitle_name")
+        if changes and self._config.get("debug"):
+            logger.info(f"[TMDB识别增强] 字幕文件名映射：{changes}")
+        return Path(mapped).name
 
     def _prepare_recognition_input(self, raw_title: str) -> Tuple[str, Dict[str, Any]]:
         """复用 MoviePilot 元数据解析结果，返回搜索标题与识别提示。"""
@@ -3289,7 +3427,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "progressive_fallback", "fetch_aliases", "episode_normalizer_enabled",
             "release_group_assist_enabled", "recognition_rule_overrides_enabled",
             "seasonal_evidence_enabled", "recognition_memory_enabled",
-            "custom_rename_fields_enabled",
+            "custom_rename_fields_enabled", "rename_mapping_enabled",
         )
         for key in bool_keys:
             merged[key] = bool(merged.get(key))

@@ -50,9 +50,10 @@ const DEFAULT_CONFIG = {
   recognition_memory_weight: 16,
   recognition_memory_min_hits: 3,
   recognition_memory_ttl_days: 14,
-  custom_rename_fields_enabled: true
+  custom_rename_fields_enabled: true,
+  rename_mapping_enabled: true
 };
-const UI_VERSION = "0.5.0-beta.6";
+const UI_VERSION = "0.5.0-beta.7";
 function ensureUiVersion(backendVersion) {
   const backend = String(backendVersion || "").trim();
   if (!backend || backend === UI_VERSION || typeof window === "undefined") return false;
