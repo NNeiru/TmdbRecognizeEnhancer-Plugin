@@ -1120,7 +1120,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 mediainfo.season = season
             if episode is not None:
                 meta.begin_episode = episode
-                meta.end_episode = end_episode or episode
+                # 单集必须保持 end_episode 为空；若把同一个集数同时写入起止值，
+                # MoviePilot 命名模板会将其渲染成 E13-E13 这样的伪范围。
+                meta.end_episode = (
+                    end_episode
+                    if end_episode is not None and end_episode != episode else None
+                )
             if group_id:
                 meta.episode_group = group_id
                 mediainfo.episode_group = group_id
