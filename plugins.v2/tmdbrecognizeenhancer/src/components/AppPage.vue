@@ -19,6 +19,7 @@ const saving = ref(false)
 const previewing = ref(false)
 const error = ref('')
 const tab = ref('status')
+const historyFilter = ref('all')
 const status = ref({ config: cloneConfig(), summary: {}, history: [] })
 const previewInput = ref({
   title: 'Mushoku Tensei: Isekai Ittara Honki Dasu',
@@ -33,6 +34,17 @@ const config = computed({
 })
 const summary = computed(() => status.value.summary || {})
 const history = computed(() => status.value.history || [])
+const historyFilterItems = [
+  { title: '全部模块', value: 'all' },
+  { title: '识别与偏移', value: 'recognition' },
+  { title: '字段与命名', value: 'operation' },
+  { title: '仅异常/拒绝', value: 'warning' },
+]
+const filteredHistory = computed(() => history.value.filter(item => {
+  if (historyFilter.value === 'all') return true
+  if (historyFilter.value === 'warning') return !item.accepted
+  return (item.kind || 'recognition') === historyFilter.value
+}))
 const normalizerStatus = computed(() => status.value.episode_normalizer || {})
 const modules = computed(() => status.value.modules || {})
 
@@ -333,16 +345,16 @@ onMounted(loadStatus)
 
           <section v-if="tab === 'history'" class="workspace-panel">
             <div class="tab-content">
-              <div class="d-flex align-center mb-4"><div><div class="text-h6">模块运行日志</div><div class="text-body-2 text-medium-emphasis">汇总 TMDB 搜索增强与集数偏移的运行结论，不保存完整响应</div></div><VSpacer /><VBtn variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" :disabled="!history.length" @click="clearHistory">清空</VBtn><VBtn icon="mdi-refresh" variant="text" :loading="loading" @click="loadStatus" /></div>
-              <div v-if="history.length" class="history-list">
-                <div v-for="item in history" :key="`${item.created_at}-${item.title}`" class="history-row">
+              <div class="d-flex align-center flex-wrap ga-2 mb-4"><div class="flex-grow-1"><div class="text-h6">模块运行日志</div><div class="text-body-2 text-medium-emphasis">汇总识别决策、集数偏移、字段覆盖及命名处理结果，不保存完整响应</div></div><VSelect v-model="historyFilter" :items="historyFilterItems" item-title="title" item-value="value" density="compact" hide-details class="history-filter" /><VBtn variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" :disabled="!history.length" @click="clearHistory">清空</VBtn><VBtn icon="mdi-refresh" variant="text" :loading="loading" @click="loadStatus" /></div>
+              <div v-if="filteredHistory.length" class="history-list">
+                <div v-for="(item, historyIndex) in filteredHistory" :key="`${item.created_at}-${item.module}-${item.title}-${historyIndex}`" class="history-row">
                   <div class="history-marker" :class="item.accepted ? 'history-marker-success' : 'history-marker-warning'"><span /></div>
                   <VCard variant="outlined" class="history-card">
-                    <VCardText><div class="d-flex align-start ga-3"><div class="flex-grow-1"><div class="d-flex flex-wrap align-center ga-2"><div class="font-weight-bold">{{ item.title }}</div><VChip size="x-small" color="primary" variant="tonal">{{ item.module || 'TMDB 搜索增强' }}</VChip></div><div v-if="item.original_title" class="text-caption text-medium-emphasis text-truncate mt-1" :title="item.original_title">原标题：{{ item.original_title }}</div><div class="text-caption text-medium-emphasis mt-1">{{ item.created_at }} · {{ item.reason }}</div><div v-if="item.episode_adjustment" class="text-caption mt-1">集数偏移：{{ item.episode_adjustment.reason }}<span v-if="item.episode_adjustment.season != null"> · S{{ item.episode_adjustment.season }}E{{ item.episode_adjustment.episode }}</span></div><div class="d-flex flex-wrap ga-1 mt-2"><VChip v-for="query in item.queries" :key="query" size="x-small" variant="tonal">{{ query }}</VChip><VChip v-if="item.web_search?.attempted" size="x-small" color="info" variant="tonal" prepend-icon="mdi-web">外部 {{ item.web_search.result_count }} 条 · 证据 {{ item.web_search.evidence_candidates || 0 }}</VChip></div></div><VChip :color="item.accepted ? 'success' : 'warning'" size="small">{{ item.best?.score ?? '拒绝' }}</VChip></div></VCardText>
+                    <VCardText><div class="d-flex align-start ga-3"><div class="flex-grow-1"><div class="d-flex flex-wrap align-center ga-2"><div class="font-weight-bold">{{ item.title }}</div><VChip size="x-small" color="primary" variant="tonal">{{ item.module || 'TMDB 搜索增强' }}</VChip></div><div v-if="item.original_title" class="text-caption text-medium-emphasis text-truncate mt-1" :title="item.original_title">原标题：{{ item.original_title }}</div><div class="text-caption text-medium-emphasis mt-1">{{ item.created_at }} · {{ item.reason }}</div><div v-if="item.episode_adjustment" class="text-caption mt-1">集数偏移：{{ item.episode_adjustment.reason }}<span v-if="item.episode_adjustment.season != null"> · S{{ item.episode_adjustment.season }}E{{ item.episode_adjustment.episode }}</span></div><div class="d-flex flex-wrap ga-1 mt-2"><VChip v-for="stage in item.stages" :key="stage" size="x-small" color="secondary" variant="tonal">{{ stage }}</VChip><VChip v-for="query in item.queries" :key="query" size="x-small" variant="tonal">{{ query }}</VChip><VChip v-if="item.web_search?.attempted" size="x-small" color="info" variant="tonal" prepend-icon="mdi-web">外部 {{ item.web_search.result_count }} 条 · 证据 {{ item.web_search.evidence_candidates || 0 }}</VChip></div></div><VChip :color="item.accepted ? 'success' : 'warning'" size="small">{{ item.kind === 'operation' ? (item.accepted ? '完成' : '异常') : (item.best?.score ?? '拒绝') }}</VChip></div></VCardText>
                   </VCard>
                 </div>
               </div>
-              <div v-else class="empty-preview"><VIcon icon="mdi-text-box-search-outline" size="60" /><div class="text-h6 mt-3">尚无模块日志</div></div>
+              <div v-else class="empty-preview"><VIcon icon="mdi-text-box-search-outline" size="60" /><div class="text-h6 mt-3">{{ history.length ? '当前筛选没有日志' : '尚无模块日志' }}</div></div>
             </div>
           </section>
 
@@ -411,6 +423,7 @@ onMounted(loadStatus)
 .context-evidence { margin-top: 2px; color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .empty-preview { min-height: 390px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: rgba(var(--v-theme-on-surface),.52); }
 .history-list { display: flex; flex-direction: column; gap: 16px; }
+.history-filter { flex: 0 0 150px; }
 .history-row { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; align-items: stretch; }
 .history-marker { position: relative; display: flex; justify-content: center; padding-top: 20px; }
 .history-marker::after { content: ''; position: absolute; top: 36px; bottom: -17px; width: 2px; background: rgba(var(--v-theme-on-surface),.11); }

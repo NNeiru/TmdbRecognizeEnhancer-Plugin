@@ -46,7 +46,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.0-beta.14"
+    plugin_version = "0.5.0-beta.15"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -470,7 +470,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def get_status(self) -> schemas.Response:
         """返回当前配置、运行摘要和最近识别记录。"""
         history = self._read_history()
-        accepted = sum(1 for item in history if item.get("accepted"))
+        recognition_history = [
+            item for item in history if item.get("kind", "recognition") == "recognition"
+        ]
+        accepted = sum(1 for item in recognition_history if item.get("accepted"))
         return schemas.Response(
             success=True,
             data={
@@ -479,10 +482,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "config": self._current_config(),
                 "summary": {
                     "enabled": self.get_state(),
-                    "total": len(history),
+                    "total": len(recognition_history),
                     "accepted": accepted,
-                    "rejected": len(history) - accepted,
-                    "acceptance_rate": round(accepted * 100 / len(history), 1) if history else 0,
+                    "rejected": len(recognition_history) - accepted,
+                    "acceptance_rate": (
+                        round(accepted * 100 / len(recognition_history), 1)
+                        if recognition_history else 0
+                    ),
                     "recognition_memory": self._recognition_memory_summary(),
                 },
                 "modules": {
@@ -795,14 +801,24 @@ class TmdbRecognizeEnhancer(_PluginBase):
         })
 
     def get_diagnostics_api(self) -> schemas.Response:
-        """执行一次手动性能采样，不开启轮询或后台线程。"""
+        """执行一次轻量性能采样；是否连续刷新由前端页面控制。"""
+        season_catalog = self._read_season_catalog_cache()
+        mapping_catalog = self._rename_mappings.catalog()
+        arrangement_catalog = self._release_group_arrangements.catalog()
         plugin_stats = {
             **self._recognition_rules.runtime_stats(),
             "history_records": len(self._read_history()),
             "episode_rules": len(self._read_episode_rules()),
             "active_catalog_scans": len(self._catalog_scans),
             "web_cache_entries": len(self._web_cache),
-            "season_catalog_quarters": len(self._read_season_catalog_cache()),
+            "season_catalog_quarters": len(season_catalog),
+            "season_catalog_items": sum(
+                len(value.get("items") or [])
+                for value in season_catalog.values() if isinstance(value, dict)
+            ),
+            "custom_rename_fields": len(self._custom_rename_fields),
+            "rename_mapping_rules": int(mapping_catalog.get("count") or 0),
+            "release_group_rules": int(arrangement_catalog.get("count") or 0),
             "recognition_mode": self._config.get("recognition_mode"),
             "web_search_fallback": bool(self._config.get("web_search_fallback")),
             "fetch_aliases": bool(self._config.get("fetch_aliases")),
@@ -1820,8 +1836,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not isinstance(rename_dict, dict):
             return
         separator_changes = self._apply_rename_field_separators(rename_dict)
+        log_stages: List[str] = []
+        log_details: List[str] = []
         if separator_changes and self._config.get("debug"):
             logger.info(f"[TMDB识别增强] 命名字段分隔符：{separator_changes}")
+        if separator_changes:
+            log_stages.append("连接与分隔")
+            log_details.append(f"规范了 {len(separator_changes)} 个命名字段")
         if self._config.get("rename_mapping_enabled") and rename_dict.get("releaseGroup"):
             arranged_group, arrangement = self._release_group_arrangements.apply(
                 rename_dict.get("releaseGroup")
@@ -1834,8 +1855,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 logger.info(f"[TMDB识别增强] 制作组结构化编排：{arrangement}")
             if changes and self._config.get("debug"):
                 logger.info(f"[TMDB识别增强] 制作组命名映射：{changes}")
+            if arrangement.get("applied") or changes:
+                log_stages.append("制作组编排")
+                log_details.append(
+                    f"制作组：{arrangement.get('input') or rename_dict.get('releaseGroup')} → {mapped_group}"
+                )
         if not self._config.get("custom_rename_fields_enabled"):
             self._event_set(data, "rename_dict", rename_dict)
+            if log_stages:
+                self._append_module_history(
+                    module="命名预处理",
+                    title=self._rename_event_title(data, rename_dict),
+                    reason="；".join(log_details),
+                    stages=log_stages,
+                )
             return
         source_context = self._build_rename_source_context(
             self._event_get(data, "source_path"), self._event_get(data, "source_item"),
@@ -1845,6 +1878,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
         values, errors = self._rename_fields.evaluate(independent, rename_dict)
         rename_dict.update(values)
         self._event_set(data, "rename_dict", rename_dict)
+        if values:
+            log_stages.append("自定义字段")
+            log_details.append(f"生成了 {len(values)} 个自定义字段")
+        if errors:
+            log_stages.append("自定义字段异常")
+            log_details.append(f"{len(errors)} 个字段计算失败")
+        if log_stages:
+            self._append_module_history(
+                module="命名预处理",
+                title=self._rename_event_title(data, rename_dict),
+                reason="；".join(log_details),
+                stages=log_stages,
+                accepted=not errors,
+            )
         if errors and self._config.get("debug"):
             logger.warning(f"[TMDB识别增强] 自定义重命名字段预渲染失败：{errors}")
 
@@ -1876,6 +1923,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         rename_dict.update({**source_context, **target_context})
         values, errors = self._rename_fields.evaluate(self._custom_rename_fields, rename_dict)
         rename_dict.update(values)
+        previous_render = str(self._event_get(data, "render_str") or "")
         try:
             rendered = self._rename_fields.render_template(template_string, rename_dict)
         except Exception as err:
@@ -1886,6 +1934,17 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._event_set(data, "updated", True)
         self._event_set(data, "updated_str", rendered)
         self._event_set(data, "source", self.__class__.__name__)
+        if rendered != previous_render or errors:
+            self._append_module_history(
+                module="自定义命名字段",
+                title=self._rename_event_title(data, rename_dict),
+                reason=(
+                    f"补算目标目录字段并重新渲染；{len(errors)} 个字段失败"
+                    if errors else "补算目标目录相关字段并重新渲染"
+                ),
+                stages=["自定义字段"],
+                accepted=not errors,
+            )
         if errors and self._config.get("debug"):
             logger.warning(f"[TMDB识别增强] 自定义重命名字段目标阶段失败：{errors}")
 
@@ -1914,6 +1973,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._event_set(data, "updated", True)
         self._event_set(data, "updated_str", mapped)
         self._event_set(data, "source", self.__class__.__name__)
+        self._append_module_history(
+            module="文本映射",
+            title=self._rename_event_title(data),
+            reason=f"命中 {len(changes)} 条规则：{current} → {mapped}",
+            stages=["文本映射"],
+        )
         if self._config.get("debug"):
             logger.info(f"[TMDB识别增强] 命名结果映射：{changes}")
 
@@ -2143,8 +2208,33 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "[TMDB识别增强] 内置识别字段覆盖："
                     + "；".join(f"{item['field']}={item['before']}→{item['after']}" for item in changes)
                 )
+            if changes:
+                self._append_module_history(
+                    module="识别字段覆盖",
+                    title=str(
+                        getattr(meta, "original_name", None)
+                        or getattr(meta, "name", None)
+                        or "未命名媒体"
+                    ),
+                    reason="；".join(
+                        f"{item['field']}：{item['before']} → {item['after']}"
+                        for item in changes
+                    ),
+                    stages=["识别字段覆盖"],
+                )
         except Exception as err:
             logger.warning(f"[TMDB识别增强] 识别字段覆盖失败，保留 MP 原结果：{err}")
+            self._append_module_history(
+                module="识别字段覆盖",
+                title=str(
+                    getattr(meta, "original_name", None)
+                    or getattr(meta, "name", None)
+                    or "未命名媒体"
+                ),
+                reason=f"覆盖执行失败，已保留 MP 原结果：{err}",
+                stages=["识别字段覆盖"],
+                accepted=False,
+            )
 
     def _sync_runtime_adapter_state(self) -> None:
         """只在插件启用期间安装运行时适配器。"""
@@ -2156,7 +2246,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _sync_subtitle_adapter_state(self) -> None:
         """按模块开关安装或恢复 MP 字幕后缀后的最终命名点。"""
         if self.get_state() and self._config.get("rename_mapping_enabled"):
-            self._subtitle_rename_adapter.install(self._apply_final_naming_mapping)
+            self._subtitle_rename_adapter.install(self._apply_subtitle_final_naming_mapping)
         else:
             self._subtitle_rename_adapter.uninstall()
 
@@ -2200,6 +2290,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if changes and self._config.get("debug"):
             logger.info(f"[TMDB识别增强] 最终命名二次渲染：{changes}")
         return (mapped, changes) if include_changes else mapped
+
+    def _apply_subtitle_final_naming_mapping(self, value: Any) -> str:
+        """字幕语言后缀生成后执行最终映射，并补记实际命名日志。"""
+        mapped, changes = self._apply_final_naming_mapping(value, include_changes=True)
+        if changes:
+            self._append_module_history(
+                module="文本映射",
+                title=Path(str(value or "")).name or str(value or "字幕文件"),
+                reason=f"字幕后缀生成后命中 {len(changes)} 条规则：{value} → {mapped}",
+                stages=["字幕后缀", "文本映射"],
+            )
+        return str(mapped)
 
     @classmethod
     def _is_subtitle_transfer(cls, data: Any) -> bool:
@@ -3785,6 +3887,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "best", "runner_up", "margin", "web_search", "episode_adjustment", "selection_mode", "created_at",
             )
         }
+        record["kind"] = "recognition"
         record["module"] = (
             "TMDB 搜索增强 + 集数偏移" if has_search and adjustment is not None
             else "集数偏移" if adjustment is not None else "TMDB 搜索增强"
@@ -3794,6 +3897,49 @@ class TmdbRecognizeEnhancer(_PluginBase):
             records = self._read_history()
             records.insert(0, record)
             self.save_data(self.DATA_KEY_HISTORY, records[: int(self._config["history_limit"])])
+
+    def _append_module_history(
+            self,
+            module: str,
+            title: str,
+            reason: str,
+            stages: Optional[List[str]] = None,
+            accepted: bool = True,
+    ) -> None:
+        """记录非识别模块的实际改写结果，不影响识别接纳率统计。"""
+        record = {
+            "kind": "operation",
+            "module": str(module or "插件处理"),
+            "accepted": bool(accepted),
+            "level": "success" if accepted else "warning",
+            "title": str(title or "未命名媒体"),
+            "original_title": "",
+            "reason": str(reason or "处理完成"),
+            "stages": list(dict.fromkeys(str(item) for item in (stages or []) if item)),
+            "queries": [],
+            "best": None,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        with self._history_lock:
+            records = self._read_history()
+            records.insert(0, record)
+            self.save_data(self.DATA_KEY_HISTORY, records[: int(self._config["history_limit"])])
+
+    @classmethod
+    def _rename_event_title(
+            cls, data: Any, rename_dict: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """为命名模块日志提取稳定且便于阅读的文件标题。"""
+        context = rename_dict if isinstance(rename_dict, dict) else cls._event_get(data, "rename_dict")
+        if isinstance(context, dict):
+            value = context.get("original_name") or context.get("name") or context.get("title")
+            if value:
+                return str(value)
+        source_path = cls._event_get(data, "source_path")
+        if source_path:
+            return Path(str(source_path)).name or str(source_path)
+        rendered = cls._event_get(data, "updated_str") or cls._event_get(data, "render_str")
+        return str(rendered or "未命名媒体")
 
     def _remember_recognition(self, result: Dict[str, Any]) -> None:
         """累计正式整理链的不同文件命中；相同文件重复运行不会刷高频次。"""

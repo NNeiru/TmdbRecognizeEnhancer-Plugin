@@ -169,6 +169,33 @@ def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
     assert "文件操作前" in target["description"]
 
 
+def test_operation_history_is_visible_without_polluting_recognition_rate(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({"enabled": True, "history_limit": 30})
+
+    plugin._append_history({
+        "accepted": False,
+        "title": "识别失败样本",
+        "reason": "没有候选",
+        "queries": ["test"],
+        "best": None,
+    })
+    plugin._append_module_history(
+        module="命名预处理",
+        title="Example.mkv",
+        reason="规范了制作组",
+        stages=["制作组编排"],
+    )
+
+    status = plugin.get_status().data
+    assert status["summary"]["total"] == 1
+    assert status["summary"]["rejected"] == 1
+    assert len(status["history"]) == 2
+    assert status["history"][0]["kind"] == "operation"
+    assert status["history"][0]["stages"] == ["制作组编排"]
+
+
 def test_rename_mapping_runs_at_group_and_final_result_stages(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = module.TmdbRecognizeEnhancer()

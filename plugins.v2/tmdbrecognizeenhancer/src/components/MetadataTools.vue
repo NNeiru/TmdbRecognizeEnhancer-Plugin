@@ -446,16 +446,16 @@ onMounted(load)
               <VBtn icon="mdi-content-copy" size="small" variant="text" title="复制模板变量" @click="copyVariable(item.key)" /><VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openRenameField(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `rename-delete:${item.key}`" @click="deleteRenameField(item)" />
             </div>
           </div>
-          <div v-else class="empty-fields"><VIcon icon="mdi-code-braces" size="48" /><div class="mt-2">尚未定义自定义字段</div></div>
+          <div v-else class="empty-fields custom-fields-empty"><VIcon icon="mdi-code-braces" size="34" /><div class="mt-2">尚未定义自定义字段</div><div class="text-caption mt-1">需要时点击右上角“新增字段”</div></div>
         </VCardText></VCard>
 
         <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>上下文试算</VCardTitle><VCardSubtitle>手工构造一次命名上下文，只验证自定义字段输出，不执行文件整理。</VCardSubtitle></VCardItem><VCardText>
           <div class="rename-preview-form">
-            <VTextarea v-model="renamePreviewInput.original_name" label="MP 原始标题 original_name" rows="2" hide-details class="preview-original" />
+            <VTextarea v-model="renamePreviewInput.original_name" label="MP 原始标题 original_name" rows="1" auto-grow hide-details class="preview-original" />
             <VTextField v-model="renamePreviewInput.type" label="媒体类型 type" hide-details />
             <VTextField v-model="renamePreviewInput.category" label="二级分类 category" hide-details />
-            <VTextField v-model="renamePreviewInput.source_path" label="真实源路径 source_path" hide-details class="preview-wide" />
-            <VTextField v-model="renamePreviewInput.target_dir" label="分类后目标根目录 target_dir" hide-details class="preview-wide" />
+            <VTextField v-model="renamePreviewInput.source_path" label="真实源路径 source_path" hide-details />
+            <VTextField v-model="renamePreviewInput.target_dir" label="分类后目标根目录 target_dir" hide-details />
             <VBtn color="secondary" prepend-icon="mdi-play" :loading="renamePreviewing" class="preview-wide" @click="previewRenameFields">试算全部字段</VBtn>
           </div>
           <div v-if="renamePreview" class="preview-output mt-4"><div v-for="(value, key) in renamePreview.values" :key="key" class="d-flex justify-space-between ga-3"><code>{{ key }}</code><span class="text-right text-break">{{ value || '（空）' }}</span></div><VAlert v-if="renamePreview.errors?.length" type="warning" variant="tonal" density="compact" class="mt-3">{{ renamePreview.errors.map(item => `${item.key}: ${item.message}`).join('；') }}</VAlert></div>
@@ -617,9 +617,10 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .custom-field-list { display: grid; gap: 10px; }
 .custom-field-row { display: flex; align-items: center; gap: 8px; padding: 13px 14px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; }
 .empty-fields { min-height: 230px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: rgba(var(--v-theme-on-surface), .5); }
+.custom-fields-empty { min-height: 108px; }
 .compact-empty { min-height: 110px; }
 .preview-output { display: grid; gap: 8px; padding: 12px 14px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .055); }
-.rename-preview-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px 20px; }
+.rename-preview-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px 14px; }
 .preview-original, .preview-wide { grid-column: 1 / -1; }
 .field-panels { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
 .field-description-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 4px 0 10px; }
