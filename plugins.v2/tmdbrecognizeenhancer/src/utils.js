@@ -34,7 +34,7 @@ export const DEFAULT_CONFIG = {
   history_limit: 30,
   episode_normalizer_enabled: false,
   release_group_assist_enabled: true,
-  custom_rename_fields_enabled: true,
+  recognition_rule_overrides_enabled: true,
   release_group_type_weight: 12,
 }
 

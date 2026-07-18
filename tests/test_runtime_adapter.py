@@ -78,3 +78,29 @@ def test_new_adapter_instance_owns_wrapper_after_hot_reload(monkeypatch):
 
     new_adapter.uninstall()
     assert FakeMediaChain._recognize_with_fallback_by_meta is original_sync
+
+
+def test_runtime_adapter_applies_processor_before_recognition(monkeypatch):
+    app_module = ModuleType("app")
+    chain_module = ModuleType("app.chain")
+    media_module = ModuleType("app.chain.media")
+
+    class FakeMediaChain:
+        def _recognize_with_fallback_by_meta(self, metainfo, **kwargs):
+            return metainfo.video_bit
+
+        async def _async_recognize_with_fallback_by_meta(self, metainfo, **kwargs):
+            return metainfo.video_bit
+
+    media_module.MediaChain = FakeMediaChain
+    monkeypatch.setitem(sys.modules, "app", app_module)
+    monkeypatch.setitem(sys.modules, "app.chain", chain_module)
+    monkeypatch.setitem(sys.modules, "app.chain.media", media_module)
+    module = _load_adapter_module()
+    adapter = module.MoviePilotRuntimeAdapter()
+
+    assert adapter.install(lambda meta: setattr(meta, "video_bit", "12bit")) is True
+    meta = SimpleNamespace(video_bit="10bit")
+    assert FakeMediaChain()._recognize_with_fallback_by_meta(meta) == "12bit"
+    meta.video_bit = "10bit"
+    assert asyncio.run(FakeMediaChain()._async_recognize_with_fallback_by_meta(meta)) == "12bit"

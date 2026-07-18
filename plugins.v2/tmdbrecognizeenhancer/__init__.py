@@ -26,7 +26,9 @@ from app.schemas.types import ChainEventType, MediaType
 from app.utils.http import RequestUtils
 
 from .episode_normalizer import EpisodeNormalizer
-from .metadata_tools import ReleaseGroupRegistry, RenameFieldRegistry
+from .metadata_tools import ReleaseGroupRegistry
+from .performance_diagnostics import PerformanceDiagnostics
+from .recognition_rules import FIELD_SPECS, RecognitionRuleRegistry
 from .runtime_adapter import MoviePilotRuntimeAdapter
 
 
@@ -36,7 +38,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.0-beta.1"
+    plugin_version = "0.5.0-beta.2"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -47,7 +49,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     DATA_KEY_EPISODE_RULES = "episode_normalizer_rules"
     DATA_KEY_SEASON_CATALOG = "season_catalog"
     DATA_KEY_RELEASE_GROUP_PROFILES = "release_group_profiles"
-    DATA_KEY_CUSTOM_RENAME_FIELDS = "custom_rename_fields"
+    DATA_KEY_RECOGNITION_RULE_OVERRIDES = "recognition_rule_overrides"
     # 季度目录匹配使用独立策略，不继承整理识别的 max_queries、降级开关等参数。
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
@@ -88,7 +90,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "history_limit": 30,
         "episode_normalizer_enabled": False,
         "release_group_assist_enabled": True,
-        "custom_rename_fields_enabled": True,
+        "recognition_rule_overrides_enabled": True,
         "release_group_type_weight": 12.0,
     }
 
@@ -120,7 +122,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._episode_normalizer: Optional[EpisodeNormalizer] = None
         self._runtime_adapter = MoviePilotRuntimeAdapter()
         self._release_group_registry = ReleaseGroupRegistry()
-        self._custom_rename_fields: List[Dict[str, Any]] = []
+        self._recognition_rules = RecognitionRuleRegistry()
+        self._diagnostics = PerformanceDiagnostics()
         self._history_lock = threading.RLock()
         self._web_cache_lock = threading.RLock()
         self._web_cache: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
@@ -315,25 +318,32 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "summary": "设置制作组类型",
             },
             {
-                "path": "/metadata-tools/custom-field",
-                "endpoint": self.save_custom_rename_field_api,
+                "path": "/metadata-tools/recognition-rule",
+                "endpoint": self.save_recognition_rule_api,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "保存自定义重命名字段",
+                "summary": "保存内置识别字段覆盖规则",
             },
             {
-                "path": "/metadata-tools/custom-field/delete",
-                "endpoint": self.delete_custom_rename_field_api,
+                "path": "/metadata-tools/recognition-rule/delete",
+                "endpoint": self.delete_recognition_rule_api,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "删除自定义重命名字段",
+                "summary": "删除内置识别字段覆盖规则",
             },
             {
-                "path": "/metadata-tools/custom-field/preview",
-                "endpoint": self.preview_custom_rename_fields_api,
+                "path": "/metadata-tools/recognition-rule/preview",
+                "endpoint": self.preview_recognition_rule_api,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "试算自定义重命名字段",
+                "summary": "试算内置识别字段覆盖规则",
+            },
+            {
+                "path": "/diagnostics",
+                "endpoint": self.get_diagnostics_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "按需采样 MoviePilot 和插件性能",
             },
         ]
 
@@ -350,6 +360,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return schemas.Response(
             success=True,
             data={
+                "backend_version": self.plugin_version,
+                "api_schema": 2,
                 "config": self._current_config(),
                 "summary": {
                     "enabled": self.get_state(),
@@ -379,13 +391,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                             and self._config.get("release_group_assist_enabled") else "已停用"
                         ),
                     },
-                    "rename_fields": {
-                        "enabled": bool(self._config.get("custom_rename_fields_enabled")),
+                    "recognition_rules": {
+                        "enabled": bool(self._config.get("recognition_rule_overrides_enabled")),
                         "status": (
-                            "运行中" if self.get_state() and self._config.get("custom_rename_fields_enabled")
-                            and self._rename_build_supported() else "当前 MP 不支持"
-                            if self.get_state() and self._config.get("custom_rename_fields_enabled") else "已停用"
+                            "运行中" if self.get_state() and self._config.get("recognition_rule_overrides_enabled")
+                            else "已停用"
                         ),
+                        **self._recognition_rules.runtime_stats(),
                     },
                 },
                 "history": history,
@@ -414,19 +426,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return self.get_status()
 
     def get_metadata_tools_api(self) -> schemas.Response:
-        """返回制作组目录、字段目录和当前扩展配置。"""
+        """返回制作组分类和 MP 内置识别规则目录。"""
         catalog = self._release_group_registry.catalog()
         return schemas.Response(success=True, data={
+            "backend_version": self.plugin_version,
+            "api_schema": 2,
             "release_groups": catalog,
             "release_group_profiles": self._read_release_group_profiles(),
-            "builtin_fields": RenameFieldRegistry.builtin_catalog(),
-            "custom_fields": deepcopy(self._custom_rename_fields),
+            "recognition_rules": self._recognition_rules.catalog(),
             "capabilities": {
-                "rename_build_event": self._rename_build_supported(),
-                "rename_build_message": (
-                    "支持在 MP 渲染前注入字段" if self._rename_build_supported()
-                    else "当前 MP 缺少 TransferRenameBuild 事件，自定义字段只能试算，不能用于实际整理"
-                ),
+                "runtime_override": self._runtime_adapter.compatible,
+                "runtime_message": self._runtime_adapter.message,
+                "source_mutation": False,
+                "custom_independent_field": False,
             },
         })
 
@@ -448,40 +460,69 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._release_group_registry.refresh(profiles)
         return self.get_metadata_tools_api()
 
-    def save_custom_rename_field_api(self, payload: dict = Body(...)) -> schemas.Response:
-        """新增或更新一个安全的自定义重命名字段。"""
-        key = str(payload.get("key") or "").strip()
-        original_key = str(payload.get("original_key") or key).strip()
-        fields = [
-            item for item in self._custom_rename_fields
-            if item.get("key") not in (key, original_key)
+    def save_recognition_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """新增或更新一个插件覆盖规则；不会写入 MP/Rust 文件。"""
+        try:
+            re.compile(str(payload.get("pattern") or ""), re.IGNORECASE)
+        except re.error as err:
+            return schemas.Response(success=False, message=f"正则表达式无效：{err}")
+        overrides = self._read_recognition_rule_overrides()
+        rule_id = str(payload.get("id") or "").strip()
+        source_rule_id = str(payload.get("source_rule_id") or "").strip()
+        overrides = [
+            item for item in overrides
+            if not (rule_id and item.get("id") == rule_id)
+            and not (source_rule_id and item.get("source_rule_id") == source_rule_id)
         ]
-        fields.append(payload)
-        try:
-            normalized = RenameFieldRegistry.normalize_fields(fields)
-        except ValueError as err:
-            return schemas.Response(success=False, message=str(err))
-        self.save_data(self.DATA_KEY_CUSTOM_RENAME_FIELDS, normalized)
-        self._custom_rename_fields = normalized
+        overrides.append(payload)
+        normalized = RecognitionRuleRegistry.normalize_overrides(overrides)
+        if len(normalized) <= len(overrides) - 1:
+            return schemas.Response(success=False, message="规则字段或正则无效")
+        self.save_data(self.DATA_KEY_RECOGNITION_RULE_OVERRIDES, normalized)
+        self._recognition_rules.refresh(normalized)
         return self.get_metadata_tools_api()
 
-    def delete_custom_rename_field_api(self, payload: dict = Body(...)) -> schemas.Response:
-        """删除指定的自定义重命名字段。"""
-        key = str(payload.get("key") or "").strip()
-        fields = [item for item in self._custom_rename_fields if item.get("key") != key]
-        try:
-            fields = RenameFieldRegistry.normalize_fields(fields)
-        except ValueError as err:
-            return schemas.Response(success=False, message=str(err))
-        self.save_data(self.DATA_KEY_CUSTOM_RENAME_FIELDS, fields)
-        self._custom_rename_fields = fields
+    def delete_recognition_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """删除用户规则或恢复一条被修改的内置规则。"""
+        rule_id = str(payload.get("id") or "").strip()
+        source_rule_id = str(payload.get("source_rule_id") or "").strip()
+        overrides = [
+            item for item in self._read_recognition_rule_overrides()
+            if item.get("id") != rule_id and item.get("source_rule_id") != source_rule_id
+        ]
+        self.save_data(self.DATA_KEY_RECOGNITION_RULE_OVERRIDES, overrides)
+        self._recognition_rules.refresh(overrides)
         return self.get_metadata_tools_api()
 
-    def preview_custom_rename_fields_api(self, payload: dict = Body(...)) -> schemas.Response:
-        """以用户提供的安全上下文试算全部自定义字段。"""
-        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-        values, errors = RenameFieldRegistry.evaluate(self._custom_rename_fields, context)
-        return schemas.Response(success=True, data={"values": values, "errors": errors})
+    def preview_recognition_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """用临时 MetaBase 试算当前已保存的覆盖层。"""
+        title = self._clean_title(payload.get("title"))
+        if not title:
+            return schemas.Response(success=False, message="请输入需要试算的原标题")
+        meta = type("RulePreviewMeta", (), {})()
+        meta.title = title
+        meta.org_string = title
+        meta.original_name = title
+        meta.name = title
+        for spec in FIELD_SPECS.values():
+            setattr(meta, spec["attr"], None)
+        changes = self._recognition_rules.apply(meta)
+        return schemas.Response(success=True, data={"title": title, "changes": changes})
+
+    def get_diagnostics_api(self) -> schemas.Response:
+        """执行一次手动性能采样，不开启轮询或后台线程。"""
+        plugin_stats = {
+            **self._recognition_rules.runtime_stats(),
+            "history_records": len(self._read_history()),
+            "episode_rules": len(self._read_episode_rules()),
+            "active_catalog_scans": len(self._catalog_scans),
+            "web_cache_entries": len(self._web_cache),
+            "season_catalog_quarters": len(self._read_season_catalog_cache()),
+            "recognition_mode": self._config.get("recognition_mode"),
+            "web_search_fallback": bool(self._config.get("web_search_fallback")),
+            "fetch_aliases": bool(self._config.get("fetch_aliases")),
+        }
+        return schemas.Response(success=True, data=self._diagnostics.snapshot(plugin_stats))
 
     def preview_api(self, payload: dict = Body(...)) -> schemas.Response:
         """使用当前策略试跑标题，但不向 MoviePilot 识别链注入结果。"""
@@ -1522,30 +1563,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if enabled:
             eventmanager.enable_event_handler(type(self))
             eventmanager.enable_event_handler(self.on_name_recognize)
-            if self._rename_build_supported():
-                eventmanager.enable_event_handler(self.on_transfer_rename_build)
         else:
             eventmanager.disable_event_handler(self.on_name_recognize)
-            if self._rename_build_supported():
-                eventmanager.disable_event_handler(self.on_transfer_rename_build)
             eventmanager.disable_event_handler(type(self))
 
-    @staticmethod
-    def _rename_build_supported() -> bool:
-        """判断当前 MP 是否提供重命名渲染前事件。"""
-        return getattr(ChainEventType, "TransferRenameBuild", None) is not None
-
     def _refresh_metadata_tools(self) -> None:
-        """加载制作组档案和自定义字段，并对异常旧数据安全降级。"""
+        """加载制作组档案和识别字段覆盖层。"""
         profiles = self._read_release_group_profiles()
         self._release_group_registry.refresh(profiles)
-        try:
-            self._custom_rename_fields = RenameFieldRegistry.normalize_fields(
-                self.get_data(self.DATA_KEY_CUSTOM_RENAME_FIELDS) or []
-            )
-        except ValueError as err:
-            self._custom_rename_fields = []
-            logger.warning(f"[TMDB识别增强] 自定义重命名字段配置无效，已暂停使用：{err}")
+        self._recognition_rules.refresh(self._read_recognition_rule_overrides())
 
     def _read_release_group_profiles(self) -> Dict[str, Dict[str, str]]:
         """读取制作组类型覆盖并兼容异常旧数据。"""
@@ -1553,29 +1579,30 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self.get_data(self.DATA_KEY_RELEASE_GROUP_PROFILES) or {}
         )
 
-    def on_transfer_rename_build(self, event: Event) -> None:
-        """在 MP 渲染文件名之前注入用户定义的重命名字段。"""
-        if not self.get_state() or not self._config.get("custom_rename_fields_enabled"):
+    def _read_recognition_rule_overrides(self) -> List[Dict[str, Any]]:
+        """读取插件覆盖规则并兼容异常旧数据。"""
+        return RecognitionRuleRegistry.normalize_overrides(
+            self.get_data(self.DATA_KEY_RECOGNITION_RULE_OVERRIDES) or []
+        )
+
+    def _apply_recognition_rule_overrides(self, meta: Any) -> None:
+        """运行时入口：只在模块开启且存在覆盖规则时校正 MetaBase。"""
+        if not self.get_state() or not self._config.get("recognition_rule_overrides_enabled"):
             return
-        if not event or not event.event_data or not self._custom_rename_fields:
-            return
-        event_data = event.event_data
-        rename_dict = self._event_get(event_data, "rename_dict")
-        if not isinstance(rename_dict, dict):
-            return
-        values, errors = RenameFieldRegistry.evaluate(self._custom_rename_fields, rename_dict)
-        rename_dict.update(values)
-        self._event_set(event_data, "rename_dict", rename_dict)
-        if errors:
-            logger.warning(
-                f"[TMDB识别增强] {len(errors)} 个自定义重命名字段使用了回退值："
-                + "；".join(f"{item['key']}={item['message']}" for item in errors[:3])
-            )
+        try:
+            changes = self._recognition_rules.apply(meta)
+            if changes and self._config.get("debug"):
+                logger.info(
+                    "[TMDB识别增强] 内置识别字段覆盖："
+                    + "；".join(f"{item['field']}={item['before']}→{item['after']}" for item in changes)
+                )
+        except Exception as err:
+            logger.warning(f"[TMDB识别增强] 识别字段覆盖失败，保留 MP 原结果：{err}")
 
     def _sync_runtime_adapter_state(self) -> None:
         """只在插件启用期间安装运行时适配器。"""
         if self.get_state():
-            self._runtime_adapter.install()
+            self._runtime_adapter.install(self._apply_recognition_rule_overrides)
         else:
             self._runtime_adapter.uninstall()
 
@@ -2854,7 +2881,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "use_year_hint", "use_original_title_evidence", "web_search_fallback",
             "main_title_fallback",
             "progressive_fallback", "fetch_aliases", "episode_normalizer_enabled",
-            "release_group_assist_enabled", "custom_rename_fields_enabled",
+            "release_group_assist_enabled", "recognition_rule_overrides_enabled",
         )
         for key in bool_keys:
             merged[key] = bool(merged.get(key))
@@ -2899,6 +2926,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged["web_search_engine"] = engine if engine in self._web_search_engines else "auto"
         mode = str(merged.get("recognition_mode") or "tmdb_first").strip().lower()
         merged["recognition_mode"] = mode if mode in ("tmdb_first", "scored") else "tmdb_first"
+        # 0.5.0-beta.1 的表达式字段方案已弃用；不再把旧开关传回前端。
+        merged.pop("custom_rename_fields_enabled", None)
         return merged
 
     def _current_config(self) -> Dict[str, Any]:
@@ -3749,12 +3778,3 @@ class TmdbRecognizeEnhancer(_PluginBase):
         finally:
             self._tmdb_api = None
             self._episode_normalizer = None
-
-
-# TransferRenameBuild 并非所有 MP 版本都提供。动态注册可避免旧版本在导入
-# 插件时直接因枚举成员不存在而失败。
-_transfer_rename_build_event = getattr(ChainEventType, "TransferRenameBuild", None)
-if _transfer_rename_build_event is not None:
-    eventmanager.register(_transfer_rename_build_event, priority=5)(
-        TmdbRecognizeEnhancer.on_transfer_rename_build
-    )

@@ -13,13 +13,15 @@ class MoviePilotRuntimeAdapter:
     _context_attr = "_tmdb_enhancer_meta_context"
     _sync_marker = "_tmdb_enhancer_sync_wrapper"
     _async_marker = "_tmdb_enhancer_async_wrapper"
+    _processor_attr = "_tmdb_enhancer_meta_processor"
+    _processor_owner_attr = "_tmdb_enhancer_meta_processor_owner"
 
     def __init__(self):
         self.compatible = False
         self.message = "尚未安装运行时适配器"
         self._owner_token = object()
 
-    def install(self) -> bool:
+    def install(self, processor=None) -> bool:
         """安装轻量包装；MoviePilot 接口不兼容时安全返回 False。"""
         try:
             from app.chain.media import MediaChain
@@ -37,6 +39,8 @@ class MoviePilotRuntimeAdapter:
         if not isinstance(context, ContextVar):
             context = ContextVar("tmdb_recognize_enhancer_meta", default=None)
             setattr(MediaChain, self._context_attr, context)
+        setattr(MediaChain, self._processor_attr, processor)
+        setattr(MediaChain, self._processor_owner_attr, self._owner_token)
 
         current_sync = getattr(MediaChain, sync_name)
         if not getattr(current_sync, self._sync_marker, False):
@@ -44,6 +48,9 @@ class MoviePilotRuntimeAdapter:
 
             @wraps(original_sync)
             def sync_wrapper(chain, metainfo, *args, **kwargs):
+                active_processor = getattr(MediaChain, self._processor_attr, None)
+                if callable(active_processor):
+                    active_processor(metainfo)
                 token = context.set(metainfo)
                 try:
                     return original_sync(chain, metainfo, *args, **kwargs)
@@ -65,6 +72,9 @@ class MoviePilotRuntimeAdapter:
 
             @wraps(original_async)
             async def async_wrapper(chain, metainfo, *args, **kwargs):
+                active_processor = getattr(MediaChain, self._processor_attr, None)
+                if callable(active_processor):
+                    active_processor(metainfo)
                 token = context.set(metainfo)
                 try:
                     return await original_async(chain, metainfo, *args, **kwargs)
@@ -100,6 +110,9 @@ class MoviePilotRuntimeAdapter:
                     and owner is self._owner_token
             ):
                 setattr(MediaChain, method_name, original)
+        if getattr(MediaChain, self._processor_owner_attr, None) is self._owner_token:
+            setattr(MediaChain, self._processor_attr, None)
+            setattr(MediaChain, self._processor_owner_attr, None)
         self.compatible = False
         self.message = "运行时适配器已卸载"
 

@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import StrategySettings from './StrategySettings.vue'
 import EpisodeNormalizer from './EpisodeNormalizer.vue'
 import MetadataTools from './MetadataTools.vue'
+import PerformanceDiagnostics from './PerformanceDiagnostics.vue'
 import { cloneConfig, mediaTypeText, scoreColor, unwrapResponse } from '../utils'
 
 const props = defineProps({
@@ -12,6 +13,7 @@ const props = defineProps({
 })
 
 const loading = ref(false)
+const statusLoaded = ref(false)
 const saving = ref(false)
 const previewing = ref(false)
 const error = ref('')
@@ -39,6 +41,7 @@ async function loadStatus() {
   try {
     const response = await props.api.get(`${pluginBase.value}/status`)
     status.value = unwrapResponse(response) || status.value
+    statusLoaded.value = true
   } catch (err) {
     error.value = err?.message || '状态加载失败'
   } finally {
@@ -119,6 +122,9 @@ onMounted(loadStatus)
 
     <div class="page-body">
       <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
+      <VAlert v-if="statusLoaded && !status.backend_version" type="warning" variant="tonal" density="compact" class="mb-4">
+        管理页已更新，但插件后端仍是旧实例。字段管理和性能诊断接口尚未注册，请重载插件；若 MP 没有重载入口，重启一次容器即可。
+      </VAlert>
 
       <VRow class="mb-2">
         <VCol v-for="card in [
@@ -144,6 +150,7 @@ onMounted(loadStatus)
           <VTab value="metadata" prepend-icon="mdi-code-braces-box">字段与制作组</VTab>
           <VTab value="preview" prepend-icon="mdi-flask-outline">综合试跑</VTab>
           <VTab value="history" prepend-icon="mdi-text-box-search-outline">日志</VTab>
+          <VTab value="diagnostics" prepend-icon="mdi-speedometer">性能诊断</VTab>
         </VTabs>
         <VDivider />
 
@@ -175,8 +182,8 @@ onMounted(loadStatus)
                   <VCardText><VSwitch v-model="config.release_group_assist_enabled" color="primary" label="启用模块" hide-details /><div class="status-line"><span>分类范围</span><strong>动漫 / 真人电视剧</strong></div><div class="status-line"><span>作用阶段</span><strong>TMDB 候选选择</strong></div></VCardText>
                 </VCard>
                 <VCard variant="outlined" class="module-card">
-                  <VCardItem><template #prepend><VAvatar color="success" variant="tonal"><VIcon icon="mdi-code-braces" /></VAvatar></template><VCardTitle>自定义重命名字段</VCardTitle><VCardSubtitle>{{ modules.rename_fields?.status || '状态未知' }}</VCardSubtitle></VCardItem>
-                  <VCardText><VSwitch v-model="config.custom_rename_fields_enabled" color="success" label="启用模块" hide-details /><div class="status-line"><span>注入阶段</span><strong>MP 模板渲染前</strong></div><div class="status-line"><span>安全策略</span><strong>沙箱表达式</strong></div></VCardText>
+                  <VCardItem><template #prepend><VAvatar color="success" variant="tonal"><VIcon icon="mdi-text-box-edit-outline" /></VAvatar></template><VCardTitle>识别字段覆盖</VCardTitle><VCardSubtitle>{{ modules.recognition_rules?.status || '状态未知' }}</VCardSubtitle></VCardItem>
+                  <VCardText><VSwitch v-model="config.recognition_rule_overrides_enabled" color="success" label="启用模块" hide-details /><div class="status-line"><span>内置规则目录</span><strong>{{ modules.recognition_rules?.catalog_rules || 0 }} 条</strong></div><div class="status-line"><span>已启用覆盖</span><strong>{{ modules.recognition_rules?.compiled_rules || 0 }} 条</strong></div></VCardText>
                 </VCard>
               </div>
             </div>
@@ -284,6 +291,10 @@ onMounted(loadStatus)
               </div>
               <div v-else class="empty-preview"><VIcon icon="mdi-text-box-search-outline" size="60" /><div class="text-h6 mt-3">尚无模块日志</div></div>
             </div>
+          </section>
+
+          <section v-if="tab === 'diagnostics'" class="workspace-panel">
+            <div class="tab-content"><PerformanceDiagnostics :api="api" :plugin-id="pluginId" /></div>
           </section>
 
           <section v-show="tab === 'episodes'" class="workspace-panel">
