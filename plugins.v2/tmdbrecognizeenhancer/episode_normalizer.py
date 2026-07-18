@@ -260,8 +260,9 @@ class EpisodeNormalizer:
         }
         if not rule.get("enabled", True):
             return {**base_result, "reason": "目标编集规则未启用"}
-        if not tmdb_id or season is None or episode is None:
-            return {**base_result, "reason": "缺少 TMDBID、季或集信息"}
+        if not tmdb_id or episode is None:
+            missing = "TMDBID" if not tmdb_id else "集信息"
+            return {**base_result, "reason": f"缺少{missing}"}
         if target_type == "group" and not group_id:
             return {**base_result, "reason": "目标为剧集组但未选择 Group ID"}
 
@@ -347,6 +348,36 @@ class EpisodeNormalizer:
                         if mapped.get("provisional") else "命中季度条目对应片段"
                     ),
                 )
+
+        # 裸集号不能一律补成 S01，否则“第三期 - 01”会被误写为第一季。
+        # 但累计编号通常能够由目标编集本身唯一证明：例如目标为
+        # S01E01-E12、S02E01-E12、S03E01-E03 时，裸 E26 只能解释为
+        # 全局第 26 集，即 S03E02。单一常规季同样不存在季号歧义。
+        if season is None:
+            sequence = target.get("sequence") or []
+            regular_seasons = {
+                self._safe_int(item.get("season"), -1)
+                for item in sequence if not item.get("is_special")
+            }
+            local_episode_max = max((
+                self._safe_int(item.get("episode"), 0)
+                for item in sequence if not item.get("is_special")
+            ), default=0)
+            can_infer_absolute = len(regular_seasons) == 1 or episode > local_episode_max
+            if can_infer_absolute:
+                absolute = self._map_sequence_position(target, episode, end_episode)
+                if absolute:
+                    return self._result_from_mapping(
+                        base_result,
+                        absolute,
+                        "absolute-episode-missing-season",
+                        "标题未提供季号，已通过目标编集唯一定位累计集数",
+                    )
+            return {
+                **base_result,
+                "reason": "标题未提供季号，当前集数可能是相对编号或累计编号，已安全跳过",
+                "strategy": "missing-season-ambiguous",
+            }
 
         # 明确的 S00 来源必须通过 Episode ID 找到目标 Special；剧集组未收录
         # 时绝不能把 S00E01 当成正片全局第 1 集。
@@ -639,13 +670,17 @@ class EpisodeNormalizer:
             installments: Iterable[Dict[str, Any]],
             raw_title: str,
             parsed_name: str,
-            source_season: int,
+            source_season: Optional[int],
     ) -> Optional[Dict[str, Any]]:
         haystacks = [cls._normalize_alias(raw_title), cls._normalize_alias(parsed_name)]
         matched = []
         for item in installments:
             expected_season = cls._optional_int(item.get("source_season"))
-            if expected_season is not None and expected_season != source_season:
+            if (
+                    expected_season is not None
+                    and source_season is not None
+                    and expected_season != source_season
+            ):
                 continue
             aliases = item.get("aliases") or []
             if isinstance(aliases, str):

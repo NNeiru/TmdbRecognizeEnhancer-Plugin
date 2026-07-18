@@ -106,6 +106,63 @@ def test_default_absolute_episode_maps_to_production_season():
     assert (result["season"], result["episode"]) == (2, 1)
 
 
+def test_missing_season_with_clear_absolute_episode_maps_to_target_season():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+    rule = {
+        "tmdb_id": 100,
+        "enabled": True,
+        "target_type": "group",
+        "episode_group_id": "production",
+    }
+
+    result = normalizer.normalize(rule, season=None, episode=13)
+
+    assert result["applied"] is True
+    assert (result["season"], result["episode"]) == (2, 1)
+    assert result["strategy"] == "absolute-episode-missing-season"
+
+
+def test_missing_season_with_ambiguous_local_episode_is_not_guessed():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+    rule = {
+        "tmdb_id": 100,
+        "enabled": True,
+        "target_type": "group",
+        "episode_group_id": "production",
+    }
+
+    result = normalizer.normalize(rule, season=None, episode=2)
+
+    assert result["applied"] is False
+    assert result["strategy"] == "missing-season-ambiguous"
+
+
+def test_missing_season_can_use_unique_installment_alias():
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+    rule = {
+        "tmdb_id": 200,
+        "enabled": True,
+        "target_type": "default",
+        "installments": [{
+            "aliases": ["Anime 200 Season 3"],
+            "source_season": 3,
+            "target_start_season": 3,
+            "target_start_episode": 1,
+        }],
+    }
+
+    result = normalizer.normalize(
+        rule,
+        season=None,
+        episode=2,
+        raw_title="Anime 200 Season 3 - 02.mkv",
+    )
+
+    assert result["applied"] is True
+    assert (result["season"], result["episode"]) == (3, 2)
+    assert result["strategy"] == "installment"
+
+
 def test_production_local_episode_maps_to_flat_default():
     normalizer = EpisodeNormalizer(FakeTmdbApi())
     rule = {"tmdb_id": 100, "enabled": True, "target_type": "default"}
