@@ -44,6 +44,11 @@ export const DEFAULT_CONFIG = {
   recognition_memory_ttl_days: 14,
   custom_rename_fields_enabled: true,
   rename_mapping_enabled: true,
+  rename_default_separator: '',
+  rename_separator_fields: [],
+  customization_separator: '@',
+  release_group_default_connector: '@',
+  release_group_normalize_unknown_connectors: false,
 }
 
 export const UI_VERSION = __TMDB_ENHANCER_UI_VERSION__

@@ -16,12 +16,15 @@ class ReleaseGroupArrangementRegistry:
     _POSITIONS = {"first", "keep", "last"}
     _SPLIT_RE = re.compile(r"\s*[@&+]\s*")
     _INVALID_NAME_RE = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
+    DEFAULT_CONNECTOR = "__default__"
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._rules: List[Dict[str, Any]] = []
         self._alias_map: Dict[str, Dict[str, Any]] = {}
         self._errors: List[str] = []
+        self._default_connector = "@"
+        self._normalize_unknown = False
         self._apply_count = 0
         self._match_count = 0
 
@@ -74,7 +77,16 @@ class ReleaseGroupArrangementRegistry:
     @staticmethod
     def _normalize_connector(value: Any) -> str:
         raw = str("@" if value is None else value)
+        if raw == ReleaseGroupArrangementRegistry.DEFAULT_CONNECTOR:
+            return raw
         return " " if raw and raw.isspace() else raw.strip()
+
+    @classmethod
+    def normalize_default_connector(cls, value: Any) -> str:
+        connector = cls._normalize_connector("@" if value is None else value)
+        if connector == cls.DEFAULT_CONNECTOR or len(connector) > 8 or cls._INVALID_NAME_RE.search(connector):
+            return "@"
+        return connector
 
     @classmethod
     def normalize_rules(cls, value: Any) -> List[Dict[str, Any]]:
@@ -95,7 +107,9 @@ class ReleaseGroupArrangementRegistry:
             if position not in cls._POSITIONS:
                 position = "keep"
             connector = cls._normalize_connector(raw.get("connector"))
-            if len(connector) > 8 or cls._INVALID_NAME_RE.search(connector):
+            if connector != cls.DEFAULT_CONNECTOR and (
+                    len(connector) > 8 or cls._INVALID_NAME_RE.search(connector)
+            ):
                 connector = "@"
             rule_id = str(raw.get("id") or "").strip() or cls._rule_id(match_name, output_name)
             if rule_id in seen_ids:
@@ -121,7 +135,9 @@ class ReleaseGroupArrangementRegistry:
         output_name = cls._clean_name(candidate.get("output_name") or match_name, required=True)
         cls._normalize_aliases(candidate.get("aliases"))
         connector = cls._normalize_connector(candidate.get("connector"))
-        if len(connector) > 8 or cls._INVALID_NAME_RE.search(connector):
+        if connector != cls.DEFAULT_CONNECTOR and (
+                len(connector) > 8 or cls._INVALID_NAME_RE.search(connector)
+        ):
             raise ValueError("连接符不能超过 8 个字符，也不能包含路径或文件名非法字符")
         if str(candidate.get("position") or "keep").lower() not in cls._POSITIONS:
             raise ValueError("固定位置只支持最前、保持原顺序或最后")
@@ -136,7 +152,10 @@ class ReleaseGroupArrangementRegistry:
             raise ValueError("制作组编排规则无效")
         return normalized
 
-    def refresh(self, value: Any) -> None:
+    def refresh(
+            self, value: Any, default_connector: Any = "@",
+            normalize_unknown: bool = False,
+    ) -> None:
         rules = self.normalize_rules(value)
         alias_map: Dict[str, Dict[str, Any]] = {}
         errors: List[str] = []
@@ -157,17 +176,21 @@ class ReleaseGroupArrangementRegistry:
             self._rules = rules
             self._alias_map = alias_map
             self._errors = errors
+            self._default_connector = self.normalize_default_connector(default_connector)
+            self._normalize_unknown = bool(normalize_unknown)
 
     def apply(self, value: Any) -> Tuple[str, Dict[str, Any]]:
         raw = str(value or "").strip()
         with self._lock:
             alias_map = dict(self._alias_map)
+            default_connector = self._default_connector
+            normalize_unknown = self._normalize_unknown
             self._apply_count += 1
         empty_trace = {
             "applied": False, "input": raw, "output": raw,
             "members": [], "reason": "没有可处理的制作组",
         }
-        if not raw or not alias_map:
+        if not raw or (not alias_map and not normalize_unknown):
             return raw, empty_trace
 
         # A policy for the complete value wins over connector parsing. This keeps a
@@ -196,13 +219,17 @@ class ReleaseGroupArrangementRegistry:
                 "input": part,
                 "output": output_name,
                 "position": rule["position"] if rule else "keep",
-                "connector": rule["connector"] if rule else "@",
+                "connector": (
+                    default_connector
+                    if not rule or rule["connector"] == self.DEFAULT_CONNECTOR
+                    else rule["connector"]
+                ),
                 "order": rule["order"] if rule else 0,
                 "rule_id": rule["id"] if rule else "",
                 "rule_label": rule["label"] if rule else "未配置",
                 "source_index": index,
             })
-        if not matched:
+        if not matched and not normalize_unknown:
             empty_trace["members"] = members
             empty_trace["reason"] = "没有命中已启用的制作组编排规则"
             return raw, empty_trace
@@ -223,13 +250,16 @@ class ReleaseGroupArrangementRegistry:
                 rendered += item["connector"]
             rendered += item["output"]
         trace = {
-            "applied": True,
+            "applied": bool(matched or rendered != raw),
             "input": raw,
             "output": rendered,
             "matched_rules": matched,
             "changed": rendered != raw,
             "members": deepcopy(ordered),
-            "reason": "已按制作组规则规范名称、顺序和连接符",
+            "reason": (
+                "已按制作组规则规范名称、顺序和连接符"
+                if matched else "已使用制作组默认连接符统一未配置组"
+            ),
         }
         with self._lock:
             self._match_count += matched
@@ -239,6 +269,8 @@ class ReleaseGroupArrangementRegistry:
         with self._lock:
             rules = deepcopy(self._rules)
             errors = list(self._errors)
+            default_connector = self._default_connector
+            normalize_unknown = self._normalize_unknown
             stats = {
                 "apply_count": self._apply_count,
                 "match_count": self._match_count,
@@ -254,4 +286,7 @@ class ReleaseGroupArrangementRegistry:
                 {"value": "last", "label": "固定最后"},
             ],
             "connectors": ["@", "&", "+", "-", "_", ".", " "],
+            "default_connector": default_connector,
+            "normalize_unknown": normalize_unknown,
+            "default_connector_value": self.DEFAULT_CONNECTOR,
         }

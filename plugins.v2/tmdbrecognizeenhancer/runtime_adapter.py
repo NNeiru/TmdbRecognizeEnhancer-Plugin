@@ -218,3 +218,56 @@ class SubtitleRenameAdapter:
             setattr(TransHandler, self._processor_owner_attr, None)
         self.compatible = False
         self.message = "字幕命名适配器已卸载"
+
+
+class CustomizationSeparatorAdapter:
+    """在插件启用期间设置 MP 自定义占位符的组合连接符，并在停用时恢复。"""
+
+    _owner_attr = "_tmdb_enhancer_separator_owner"
+    _original_attr = "_tmdb_enhancer_separator_original"
+    _owner = "tmdbrecognizeenhancer"
+
+    def __init__(self) -> None:
+        self.compatible = False
+        self.message = "尚未接入 MP 自定义占位符连接符"
+
+    def install(self, separator: Any) -> bool:
+        try:
+            from app.core.meta.customization import CustomizationMatcher
+        except Exception as err:
+            self.compatible = False
+            self.message = f"无法导入 MoviePilot CustomizationMatcher：{err}"
+            return False
+        matcher = CustomizationMatcher()
+        owner = getattr(CustomizationMatcher, self._owner_attr, None)
+        if owner not in (None, self._owner):
+            self.compatible = False
+            self.message = "自定义占位符连接符已由其它运行时适配器接管"
+            return False
+        if owner is None:
+            setattr(
+                CustomizationMatcher, self._original_attr,
+                getattr(matcher, "custom_separator", None),
+            )
+        setattr(CustomizationMatcher, self._owner_attr, self._owner)
+        matcher.custom_separator = str(separator or "@")
+        self.compatible = True
+        self.message = f"自定义占位符使用“{matcher.custom_separator}”连接"
+        return True
+
+    def uninstall(self) -> None:
+        try:
+            from app.core.meta.customization import CustomizationMatcher
+        except Exception:
+            return
+        if getattr(CustomizationMatcher, self._owner_attr, None) != self._owner:
+            return
+        matcher = CustomizationMatcher()
+        matcher.custom_separator = getattr(
+            CustomizationMatcher, self._original_attr, None
+        )
+        for attr in (self._owner_attr, self._original_attr):
+            if hasattr(CustomizationMatcher, attr):
+                delattr(CustomizationMatcher, attr)
+        self.compatible = False
+        self.message = "已恢复 MP 原有自定义占位符连接符"

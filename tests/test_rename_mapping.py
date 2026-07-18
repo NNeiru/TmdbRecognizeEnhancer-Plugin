@@ -152,3 +152,55 @@ def test_release_group_arranger_supports_space_connector_and_deduplication():
     ])
 
     assert registry.apply("A@B@Group B")[0] == "A Group B"
+
+
+def test_release_group_arranger_supports_global_default_and_rule_override():
+    module = _load_file("test_release_group_arranger_default", "release_group_arranger.py")
+    registry = module.ReleaseGroupArrangementRegistry()
+    registry.refresh([
+        {
+            "match_name": "VCB", "output_name": "VCB-Studio", "position": "last",
+            "connector": module.ReleaseGroupArrangementRegistry.DEFAULT_CONNECTOR,
+        },
+        {
+            "match_name": "ADWeb", "output_name": "ADWeb", "position": "last",
+            "connector": "@", "order": 200,
+        },
+    ], default_connector="&")
+
+    assert registry.apply("ADWeb+A+VCB")[0] == "A&VCB-Studio@ADWeb"
+
+    global_only = module.ReleaseGroupArrangementRegistry()
+    global_only.refresh([], default_connector=".", normalize_unknown=True)
+    output, trace = global_only.apply("A&B+C")
+    assert output == "A.B.C"
+    assert trace["applied"] is True
+
+
+def test_customization_separator_adapter_restores_previous_value(monkeypatch):
+    runtime = _load_file("test_customization_separator_adapter", "runtime_adapter.py")
+
+    class CustomizationMatcher:
+        instance = None
+
+        def __new__(cls):
+            if cls.instance is None:
+                cls.instance = super().__new__(cls)
+                cls.instance.custom_separator = None
+            return cls.instance
+
+    app_module = ModuleType("app")
+    core_module = ModuleType("app.core")
+    meta_module = ModuleType("app.core.meta")
+    customization_module = ModuleType("app.core.meta.customization")
+    customization_module.CustomizationMatcher = CustomizationMatcher
+    monkeypatch.setitem(sys.modules, "app", app_module)
+    monkeypatch.setitem(sys.modules, "app.core", core_module)
+    monkeypatch.setitem(sys.modules, "app.core.meta", meta_module)
+    monkeypatch.setitem(sys.modules, "app.core.meta.customization", customization_module)
+
+    adapter = runtime.CustomizationSeparatorAdapter()
+    assert adapter.install(".") is True
+    assert CustomizationMatcher().custom_separator == "."
+    adapter.uninstall()
+    assert CustomizationMatcher().custom_separator is None

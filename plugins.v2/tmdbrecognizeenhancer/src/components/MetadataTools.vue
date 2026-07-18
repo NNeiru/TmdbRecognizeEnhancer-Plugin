@@ -36,7 +36,7 @@ const mappingPreviewInput = ref({ value: 'AB/C.chi.zh-cn.ass' })
 const mappingPreview = ref(null)
 const renameRuleSection = ref('groups')
 const groupArrangementDialog = ref(false)
-const groupArrangementForm = ref({ id: '', label: '', match_name: '', aliases: '', output_name: '', position: 'keep', connector: '@', order: 100, enabled: true })
+const groupArrangementForm = ref({ id: '', label: '', match_name: '', aliases: '', output_name: '', position: 'keep', connector: '__default__', order: 100, enabled: true })
 const groupArrangementPreviewInput = ref('ADWeb@A@VCB')
 const groupArrangementPreview = ref(null)
 const renamePreviewInput = ref({
@@ -96,7 +96,19 @@ const groupPositionItems = computed(() => data.value.release_group_arrangements?
   { value: 'last', label: '固定最后' },
 ])
 const groupPositionLabel = value => groupPositionItems.value.find(item => item.value === value)?.label || value
-const groupConnectorItems = computed(() => (data.value.release_group_arrangements?.connectors || ['@', '&', '+', '-', '_', '.', ' ']).map(value => ({ title: value === ' ' ? '空格' : value, value })))
+const separatorOptions = [
+  { title: '空格', value: ' ' }, { title: '点（.）', value: '.' },
+  { title: '横杠（-）', value: '-' }, { title: '下划线（_）', value: '_' },
+  { title: '@', value: '@' }, { title: '&', value: '&' }, { title: '+', value: '+' },
+]
+const groupConnectorItems = computed(() => [
+  { title: `使用默认（${config.value.release_group_default_connector === ' ' ? '空格' : config.value.release_group_default_connector || '@'}）`, value: data.value.release_group_arrangements?.default_connector_value || '__default__' },
+  ...(data.value.release_group_arrangements?.connectors || ['@', '&', '+', '-', '_', '.', ' ']).map(value => ({ title: value === ' ' ? '空格' : value, value })),
+])
+const separatorFieldKeys = new Set(['title', 'en_title', 'original_title', 'name', 'en_name', 'original_name', 'resourceType', 'effect', 'edition', 'videoFormat', 'resource_term', 'releaseGroup', 'videoCodec', 'videoBit', 'audioCodec', 'fps', 'webSource', 'customization'])
+const separatorFieldItems = computed(() => (data.value.rename_fields?.builtin || [])
+  .filter(item => separatorFieldKeys.has(item.key))
+  .map(item => ({ title: `${item.label}（${item.key}）`, value: item.key })))
 const customFields = computed(() => data.value.rename_fields?.custom || [])
 const availableRenameFields = computed(() => [
   ...(data.value.rename_fields?.builtin || []),
@@ -317,7 +329,7 @@ function openGroupArrangement(item = null) {
     aliases: (item.aliases || []).join('\n'),
   } : {
     id: '', label: '', match_name: '', aliases: '', output_name: '',
-    position: 'keep', connector: '@', order: 100, enabled: true,
+    position: 'keep', connector: '__default__', order: 100, enabled: true,
   }
   groupArrangementDialog.value = true
 }
@@ -464,6 +476,16 @@ onMounted(load)
       <div class="d-flex align-center flex-wrap ga-3 mb-4">
         <div class="flex-grow-1"><div class="text-h6">统一命名规则</div><div class="text-body-2 text-medium-emphasis">先编排制作组；MP 完成首次命名及字幕后缀后，再对完整相对路径统一二次渲染一次。</div></div>
       </div>
+      <VCard variant="outlined" class="mb-4 naming-defaults-card"><VCardItem><VCardTitle>命名连接与分隔默认值</VCardTitle><VCardSubtitle>全局值只作用于选择的字段或未指定连接符的制作组；单条制作组规则仍可覆盖。</VCardSubtitle></VCardItem><VCardText>
+        <VAlert v-if="config.enabled && data.capabilities?.customization_separator === false" type="warning" variant="tonal" density="compact" class="mb-4">{{ data.capabilities?.customization_separator_message || '当前 MP 无法动态设置自定义占位符连接符。' }}</VAlert>
+        <div class="naming-default-grid">
+          <VCombobox v-model="config.rename_default_separator" label="字段空白分隔符" :items="separatorOptions" item-title="title" item-value="value" :return-object="false" clearable hint="留空关闭；例如 WEB DL → WEB.DL" persistent-hint />
+          <VCombobox v-model="config.customization_separator" label="自定义占位符连接符" :items="separatorOptions" item-title="title" item-value="value" :return-object="false" hint="多个 customization 命中结果的连接符" persistent-hint />
+          <VCombobox v-model="config.release_group_default_connector" label="制作组默认连接符" :items="separatorOptions" item-title="title" item-value="value" :return-object="false" hint="用于未配置组和选择“使用默认”的规则" persistent-hint />
+          <VSelect v-model="config.rename_separator_fields" class="separator-scope" label="字段空白分隔符生效范围" :items="separatorFieldItems" multiple chips closable-chips clearable hint="只修改字段内部的空白；不会全局替换路径中的空格" persistent-hint />
+          <div class="separator-scope rule-enabled-box"><div><div class="font-weight-medium">统一未配置制作组的连接符</div><div class="text-caption text-medium-emphasis">开启后，即使没有单组规则，A&amp;B、A+B 也会统一成上面的默认连接符；关闭时只把默认值用于已触发的制作组编排。</div></div><VSwitch v-model="config.release_group_normalize_unknown_connectors" color="success" hide-details /></div>
+        </div>
+      </VCardText><VDivider /><VCardActions><VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存命名默认值</VBtn></VCardActions></VCard>
       <VTabs v-model="renameRuleSection" color="secondary" class="sub-tabs mb-4">
         <VTab value="groups" prepend-icon="mdi-account-multiple-check-outline">制作组编排</VTab>
         <VTab value="text" prepend-icon="mdi-find-replace">文本映射</VTab>
@@ -481,7 +503,7 @@ onMounted(load)
               <div class="group-layout-main">
                 <div class="d-flex align-center flex-wrap ga-2"><span class="font-weight-bold">{{ item.label || item.output_name }}</span><VChip size="x-small" color="primary" variant="tonal">{{ groupPositionLabel(item.position) }}</VChip><VChip v-if="!item.enabled" size="x-small" variant="tonal">已停用</VChip></div>
                 <div class="mapping-expression"><code>{{ item.match_name }}</code><VIcon icon="mdi-arrow-right" size="16" /><code>{{ item.output_name }}</code></div>
-                <div class="text-caption text-medium-emphasis">别名 {{ item.aliases?.length ? item.aliases.join('、') : '无' }} · 前置连接符 <code>{{ item.connector === ' ' ? '空格' : item.connector || '无' }}</code> · 排序值 {{ item.order }}</div>
+                <div class="text-caption text-medium-emphasis">别名 {{ item.aliases?.length ? item.aliases.join('、') : '无' }} · 前置连接符 <code>{{ item.connector === '__default__' ? `默认（${config.release_group_default_connector === ' ' ? '空格' : config.release_group_default_connector || '@'}）` : item.connector === ' ' ? '空格' : item.connector || '无' }}</code> · 排序值 {{ item.order }}</div>
               </div>
               <div class="d-flex"><VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openGroupArrangement(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `group-arrangement-delete:${item.id}`" @click="deleteGroupArrangement(item)" /></div>
             </VCardText>
@@ -563,9 +585,9 @@ onMounted(load)
         <VRow><VCol cols="12" sm="5"><VTextField v-model="groupArrangementForm.match_name" label="识别名称" placeholder="VCB-Studio" hint="MP releaseGroup 中出现的主要名称" persistent-hint /></VCol><VCol cols="12" sm="7"><VTextField v-model="groupArrangementForm.output_name" label="最终显示名称" placeholder="VCB-Studio" hint="留空时与识别名称相同" persistent-hint /></VCol></VRow>
         <VTextField v-model="groupArrangementForm.label" label="规则名称" placeholder="例如：VCB 固定最后" />
         <VTextarea v-model="groupArrangementForm.aliases" label="其它别名（每行一个）" rows="3" auto-grow placeholder="VCB&#10;VCB Studio" hint="别名只做单个制作组归一化，不会改 MP 的原始识别词" persistent-hint />
-        <VRow><VCol cols="12" sm="5"><VSelect v-model="groupArrangementForm.position" label="所在位置" :items="groupPositionItems" item-title="label" item-value="value" /></VCol><VCol cols="12" sm="3"><VCombobox v-model="groupArrangementForm.connector" label="前置连接符" :items="groupConnectorItems" item-title="title" item-value="value" :return-object="false" hint="仅在前面已有组时使用" persistent-hint /></VCol><VCol cols="12" sm="4"><VTextField v-model="groupArrangementForm.order" type="number" label="同位置排序值" hint="数值越小越靠前" persistent-hint /></VCol></VRow>
+        <VRow><VCol cols="12" sm="5"><VSelect v-model="groupArrangementForm.position" label="所在位置" :items="groupPositionItems" item-title="label" item-value="value" /></VCol><VCol cols="12" sm="3"><VCombobox v-model="groupArrangementForm.connector" label="前置连接符" :items="groupConnectorItems" item-title="title" item-value="value" :return-object="false" hint="可继承全局默认；仅在前面已有组时使用" persistent-hint /></VCol><VCol cols="12" sm="4"><VTextField v-model="groupArrangementForm.order" type="number" label="同位置排序值" hint="数值越小越靠前" persistent-hint /></VCol></VRow>
         <div class="rule-enabled-box"><div><div class="font-weight-medium">启用规则</div><div class="text-caption text-medium-emphasis">停用后保留配置但不参与编排</div></div><VSwitch v-model="groupArrangementForm.enabled" color="success" hide-details /></div>
-        <VAlert type="info" variant="tonal" density="compact">示例：VCB-Studio 设置“固定最后 + &amp;”，ADWeb 设置“固定最后 + @”，输入 <code>ADWeb@A@VCB</code> 将得到 <code>A&amp;VCB-Studio@ADWeb</code>。只有一个制作组时不会在开头添加连接符。</VAlert>
+        <VAlert type="info" variant="tonal" density="compact">示例：全局默认连接符设为 <code>@</code>；VCB-Studio 单独设置“固定最后 + &amp;”，ADWeb 选择“使用默认”，输入 <code>ADWeb@A@VCB</code> 将得到 <code>A&amp;VCB-Studio@ADWeb</code>。只有一个制作组时不会在开头添加连接符。</VAlert>
       </VCardText><VDivider /><VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="groupArrangementDialog = false">取消</VBtn><VBtn color="primary" :loading="saving === 'group-arrangement'" @click="saveGroupArrangement">保存编排</VBtn></VCardActions></VCard>
     </VDialog>
 
@@ -612,6 +634,8 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .mapping-expression { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 3px; overflow-wrap: anywhere; }
 .mapping-preview-form { display: grid; grid-template-columns: minmax(180px, 240px) minmax(280px, 1fr) auto; gap: 14px; align-items: center; }
 .final-mapping-preview { grid-template-columns: minmax(280px, 1fr) auto; }
+.naming-default-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.separator-scope { grid-column: 1 / -1; }
 .sub-tabs { border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .group-layout-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
 .group-layout-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-height: 126px; }
@@ -624,6 +648,8 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .preview-original, .preview-wide { grid-column: auto; }
   .field-description-grid { grid-template-columns: 1fr; }
   .mapping-preview-form { grid-template-columns: 1fr; }
+  .naming-default-grid { grid-template-columns: 1fr; }
+  .separator-scope { grid-column: auto; }
   .group-layout-grid, .group-preview-form { grid-template-columns: 1fr; }
 }
 </style>

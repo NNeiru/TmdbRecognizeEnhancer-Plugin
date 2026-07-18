@@ -201,6 +201,32 @@ def test_rename_mapping_runs_at_group_and_final_result_stages(monkeypatch):
     assert rename.event_data["updated_str"] == "命运-奇异赝品/S01E01.mkv"
 
 
+def test_selected_rename_fields_use_configured_whitespace_separator(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "custom_rename_fields_enabled": False,
+        "rename_mapping_enabled": True,
+        "rename_default_separator": ".",
+        "rename_separator_fields": ["resourceType", "videoCodec", "not_a_field"],
+    })
+    build = SimpleNamespace(event_data={
+        "rename_dict": {
+            "resourceType": "WEB DL",
+            "videoCodec": "H 265",
+            "title": "Keep My Title",
+        },
+    })
+
+    plugin.on_transfer_rename_build(build)
+
+    assert build.event_data["rename_dict"]["resourceType"] == "WEB.DL"
+    assert build.event_data["rename_dict"]["videoCodec"] == "H.265"
+    assert build.event_data["rename_dict"]["title"] == "Keep My Title"
+    assert plugin._config["rename_separator_fields"] == ["resourceType", "videoCodec"]
+
+
 def test_structured_release_group_arrangement_runs_before_advanced_mapping(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = module.TmdbRecognizeEnhancer()

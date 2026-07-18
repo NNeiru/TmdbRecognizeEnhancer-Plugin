@@ -33,7 +33,11 @@ from .performance_diagnostics import PerformanceDiagnostics
 from .recognition_rules import FIELD_SPECS, RecognitionRuleRegistry
 from .release_group_arranger import ReleaseGroupArrangementRegistry
 from .rename_mapping import RenameMappingRegistry
-from .runtime_adapter import MoviePilotRuntimeAdapter, SubtitleRenameAdapter
+from .runtime_adapter import (
+    CustomizationSeparatorAdapter,
+    MoviePilotRuntimeAdapter,
+    SubtitleRenameAdapter,
+)
 
 
 class TmdbRecognizeEnhancer(_PluginBase):
@@ -42,7 +46,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.0-beta.9"
+    plugin_version = "0.5.0-beta.10"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -108,6 +112,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "recognition_memory_ttl_days": 14,
         "custom_rename_fields_enabled": True,
         "rename_mapping_enabled": True,
+        "rename_default_separator": "",
+        "rename_separator_fields": [],
+        "customization_separator": "@",
+        "release_group_default_connector": "@",
+        "release_group_normalize_unknown_connectors": False,
+    }
+
+    RENAME_SEPARATOR_FIELDS = {
+        "title", "en_title", "original_title", "name", "en_name", "original_name",
+        "resourceType", "effect", "edition", "videoFormat", "resource_term",
+        "releaseGroup", "videoCodec", "videoBit", "audioCodec", "fps", "webSource",
+        "customization",
     }
 
     _split_pattern = re.compile(r"\s*(?::|：|\||｜|/|／|—|–)\s*")
@@ -144,6 +160,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._release_group_arrangements = ReleaseGroupArrangementRegistry()
         self._rename_mappings = RenameMappingRegistry()
         self._subtitle_rename_adapter = SubtitleRenameAdapter()
+        self._customization_separator_adapter = CustomizationSeparatorAdapter()
         self._diagnostics = PerformanceDiagnostics()
         self._history_lock = threading.RLock()
         self._web_cache_lock = threading.RLock()
@@ -162,6 +179,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._refresh_metadata_tools()
         self._sync_runtime_adapter_state()
         self._sync_subtitle_adapter_state()
+        self._sync_customization_separator_state()
         self._sync_event_handler_state()
 
     def get_state(self) -> bool:
@@ -446,6 +464,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._sync_event_handler_state(enabled=False)
         self._runtime_adapter.uninstall()
         self._subtitle_rename_adapter.uninstall()
+        self._customization_separator_adapter.uninstall()
         self._close_tmdb_client()
 
     def get_status(self) -> schemas.Response:
@@ -539,6 +558,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._refresh_metadata_tools()
         self._sync_runtime_adapter_state()
         self._sync_subtitle_adapter_state()
+        self._sync_customization_separator_state()
         self._sync_event_handler_state()
         return self.get_status()
 
@@ -572,6 +592,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "capabilities": {
                 "runtime_override": self._runtime_adapter.compatible,
                 "runtime_message": self._runtime_adapter.message,
+                "customization_separator": self._customization_separator_adapter.compatible,
+                "customization_separator_message": self._customization_separator_adapter.message,
                 "source_mutation": False,
                 "custom_independent_field": hasattr(ChainEventType, "TransferRenameBuild"),
                 "target_directory_context": hasattr(ChainEventType, "TransferRename"),
@@ -720,7 +742,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
         except ValueError as err:
             return schemas.Response(success=False, message=str(err))
         self.save_data(self.DATA_KEY_RELEASE_GROUP_ARRANGEMENTS, normalized)
-        self._release_group_arrangements.refresh(normalized)
+        self._release_group_arrangements.refresh(
+            normalized,
+            self._config.get("release_group_default_connector"),
+            self._config.get("release_group_normalize_unknown_connectors"),
+        )
         return self.get_metadata_tools_api()
 
     def delete_release_group_arrangement_api(self, payload: dict = Body(...)) -> schemas.Response:
@@ -731,7 +757,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             if item.get("id") != rule_id
         ]
         self.save_data(self.DATA_KEY_RELEASE_GROUP_ARRANGEMENTS, rules)
-        self._release_group_arrangements.refresh(rules)
+        self._release_group_arrangements.refresh(
+            rules,
+            self._config.get("release_group_default_connector"),
+            self._config.get("release_group_normalize_unknown_connectors"),
+        )
         return self.get_metadata_tools_api()
 
     def preview_release_group_arrangement_api(self, payload: dict = Body(...)) -> schemas.Response:
@@ -1789,6 +1819,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         rename_dict = self._event_get(data, "rename_dict")
         if not isinstance(rename_dict, dict):
             return
+        separator_changes = self._apply_rename_field_separators(rename_dict)
+        if separator_changes and self._config.get("debug"):
+            logger.info(f"[TMDB识别增强] 命名字段分隔符：{separator_changes}")
         if self._config.get("rename_mapping_enabled") and rename_dict.get("releaseGroup"):
             arranged_group, arrangement = self._release_group_arrangements.apply(
                 rename_dict.get("releaseGroup")
@@ -2022,7 +2055,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._release_group_registry.refresh(profiles)
         self._recognition_rules.refresh(self._read_recognition_rule_overrides())
         self._custom_rename_fields = tuple(deepcopy(self._read_custom_rename_fields()))
-        self._release_group_arrangements.refresh(self._read_release_group_arrangements())
+        self._release_group_arrangements.refresh(
+            self._read_release_group_arrangements(),
+            self._config.get("release_group_default_connector"),
+            self._config.get("release_group_normalize_unknown_connectors"),
+        )
         self._rename_mappings.refresh(self._read_rename_mappings())
 
     def _read_custom_rename_fields(self) -> List[Dict[str, Any]]:
@@ -2122,6 +2159,33 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self._subtitle_rename_adapter.install(self._apply_final_naming_mapping)
         else:
             self._subtitle_rename_adapter.uninstall()
+
+    def _sync_customization_separator_state(self) -> None:
+        """同步 MP 自定义占位符组合连接符，不修改 MoviePilot 文件。"""
+        if self.get_state():
+            self._customization_separator_adapter.install(
+                self._config.get("customization_separator") or "@"
+            )
+        else:
+            self._customization_separator_adapter.uninstall()
+
+    def _apply_rename_field_separators(self, rename_dict: Dict[str, Any]) -> List[Dict[str, str]]:
+        """按用户选择的字段，把字段内部空白统一为命名分隔符。"""
+        separator = str(self._config.get("rename_default_separator") or "")
+        fields = self._config.get("rename_separator_fields") or []
+        if not separator or not fields:
+            return []
+        changes: List[Dict[str, str]] = []
+        for field in fields:
+            value = rename_dict.get(field)
+            if not isinstance(value, str) or not re.search(r"\s", value.strip()):
+                continue
+            updated = separator.join(value.split())
+            if updated == value:
+                continue
+            rename_dict[field] = updated
+            changes.append({"field": field, "before": value, "after": updated})
+        return changes
 
     def _apply_final_naming_mapping(
             self, value: Any, include_changes: bool = False,
@@ -3619,6 +3683,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "release_group_assist_enabled", "recognition_rule_overrides_enabled",
             "seasonal_evidence_enabled", "recognition_memory_enabled",
             "custom_rename_fields_enabled", "rename_mapping_enabled",
+            "release_group_normalize_unknown_connectors",
         )
         for key in bool_keys:
             merged[key] = bool(merged.get(key))
@@ -3667,6 +3732,26 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged["web_search_engine"] = engine if engine in self._web_search_engines else "auto"
         mode = str(merged.get("recognition_mode") or "tmdb_first").strip().lower()
         merged["recognition_mode"] = mode if mode in ("tmdb_first", "scored") else "tmdb_first"
+        invalid_separator = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
+        for key, default in (
+                ("rename_default_separator", ""),
+                ("customization_separator", "@"),
+                ("release_group_default_connector", "@"),
+        ):
+            raw = str(merged.get(key) if merged.get(key) is not None else default)
+            separator = " " if raw and raw.isspace() else raw.strip()
+            if len(separator) > 8 or invalid_separator.search(separator):
+                separator = default
+            if key != "rename_default_separator" and not separator:
+                separator = default
+            merged[key] = separator
+        fields = merged.get("rename_separator_fields") or []
+        if not isinstance(fields, (list, tuple, set)):
+            fields = []
+        merged["rename_separator_fields"] = [
+            field for field in dict.fromkeys(str(item) for item in fields)
+            if field in self.RENAME_SEPARATOR_FIELDS
+        ]
         return merged
 
     def _current_config(self) -> Dict[str, Any]:
