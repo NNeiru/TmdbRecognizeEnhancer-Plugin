@@ -611,43 +611,46 @@ onMounted(async () => {
         <div :class="['catalog-grid', `view-${boardView}`]">
           <VCard v-for="item in filteredCatalog" :key="item.id" variant="outlined" class="catalog-card">
             <div class="select-corner"><VCheckbox v-model="selectedIds" :value="item.id" hide-details density="compact" /></div>
-            <VImg v-if="item.poster" :src="item.poster" height="170" cover />
-            <VCardItem>
-              <VCardTitle class="text-subtitle-1 text-wrap">{{ item.display_name || item.name_cn || item.name }}</VCardTitle>
-              <VCardSubtitle>{{ item.date || '日期未知' }} · {{ item.episode_count || '?' }} 集</VCardSubtitle>
-            </VCardItem>
-            <VCardText class="pt-0">
-              <div class="d-flex flex-wrap ga-1">
-                <VChip v-if="item.region_name" size="x-small" variant="tonal">{{ item.region_name }}</VChip>
-                <VChip v-if="item.platform" size="x-small" variant="tonal">{{ item.platform }}</VChip>
-                <VChip v-if="item.is_multi_season" size="x-small" color="secondary" variant="tonal">续作/多季</VChip>
-                <VChip v-if="item.matched_media_type" size="x-small" variant="tonal">{{ item.matched_media_type }}</VChip>
-                <VChip v-if="item.scan_status === 'scanning'" size="x-small" color="info" variant="tonal">
-                  <VProgressCircular indeterminate size="11" width="2" class="me-1" />正在扫描
-                </VChip>
-                <VChip v-else-if="item.scan_status === 'failed'" size="x-small" color="warning" variant="tonal">匹配待补充</VChip>
-                <VChip v-if="item.maintained" size="x-small" color="success" prepend-icon="mdi-check">已维护</VChip>
-              </div>
-              <div v-if="item.tmdb_match?.best" class="text-caption text-medium-emphasis mt-2">
-                TMDB {{ item.tmdb_match.best.tmdb_id }} · {{ item.tmdb_match.best.name }}
-              </div>
-            </VCardText>
-            <VCardActions>
-              <VMenu v-if="!item.maintained && item.rule_eligible !== false">
-                <template #activator="{ props: menuProps }">
-                  <VBtn v-bind="menuProps" color="primary" variant="tonal" append-icon="mdi-menu-down" :loading="busyId === item.id">加入规则</VBtn>
-                </template>
-                <VList density="compact">
-                  <VListItem title="使用 TMDB 默认编集" prepend-icon="mdi-database-outline" @click="addCatalogItem(item, 'default')" />
-                  <VListItem title="优先 Production/Season 剧集组" prepend-icon="mdi-animation-outline" @click="addCatalogItem(item, 'group_preferred')" />
-                </VList>
-              </VMenu>
-              <VBtn v-else-if="item.rule_eligible === false" variant="text" disabled prepend-icon="mdi-movie-open-outline">电影条目无需集数规则</VBtn>
-              <VBtn
-                v-else variant="text" prepend-icon="mdi-pencil-outline"
-                @click="openEditor(ruleByTmdbId.get(Number(item.tmdb_match?.best?.tmdb_id)))"
-              >编辑规则</VBtn>
-            </VCardActions>
+            <div class="catalog-card-layout">
+              <VImg v-if="item.poster" :src="item.poster" cover class="catalog-poster" />
+              <div v-else class="catalog-poster catalog-poster-placeholder"><VIcon icon="mdi-image-off-outline" size="30" /></div>
+              <VCardItem class="catalog-summary">
+                <VCardTitle class="text-subtitle-1 text-wrap">{{ item.display_name || item.name_cn || item.name }}</VCardTitle>
+                <VCardSubtitle>{{ item.date || '日期未知' }} · {{ item.episode_count || '?' }} 集</VCardSubtitle>
+              </VCardItem>
+              <VCardText class="catalog-details">
+                <div class="d-flex flex-wrap ga-1">
+                  <VChip v-if="item.region_name" size="x-small" variant="tonal">{{ item.region_name }}</VChip>
+                  <VChip v-if="item.platform" size="x-small" variant="tonal">{{ item.platform }}</VChip>
+                  <VChip v-if="item.is_multi_season" size="x-small" color="secondary" variant="tonal">续作/多季</VChip>
+                  <VChip v-if="item.matched_media_type" size="x-small" variant="tonal">{{ item.matched_media_type }}</VChip>
+                  <VChip v-if="item.scan_status === 'scanning'" size="x-small" color="info" variant="tonal">
+                    <VProgressCircular indeterminate size="11" width="2" class="me-1" />正在扫描
+                  </VChip>
+                  <VChip v-else-if="item.scan_status === 'failed'" size="x-small" color="warning" variant="tonal">匹配待补充</VChip>
+                  <VChip v-if="item.maintained" size="x-small" color="success" prepend-icon="mdi-check">已维护</VChip>
+                </div>
+                <div v-if="item.tmdb_match?.best" class="text-caption text-medium-emphasis mt-2 text-truncate" :title="`TMDB ${item.tmdb_match.best.tmdb_id} · ${item.tmdb_match.best.name}`">
+                  TMDB {{ item.tmdb_match.best.tmdb_id }} · {{ item.tmdb_match.best.name }}
+                </div>
+              </VCardText>
+              <VCardActions class="catalog-actions">
+                <VMenu v-if="!item.maintained && item.rule_eligible !== false">
+                  <template #activator="{ props: menuProps }">
+                    <VBtn v-bind="menuProps" color="primary" variant="tonal" append-icon="mdi-menu-down" :loading="busyId === item.id">加入规则</VBtn>
+                  </template>
+                  <VList density="compact">
+                    <VListItem title="使用 TMDB 默认编集" prepend-icon="mdi-database-outline" @click="addCatalogItem(item, 'default')" />
+                    <VListItem title="优先 Production/Season 剧集组" prepend-icon="mdi-animation-outline" @click="addCatalogItem(item, 'group_preferred')" />
+                  </VList>
+                </VMenu>
+                <VBtn v-else-if="item.rule_eligible === false" variant="text" disabled prepend-icon="mdi-movie-open-outline">电影条目无需集数规则</VBtn>
+                <VBtn
+                  v-else variant="text" prepend-icon="mdi-pencil-outline"
+                  @click="openEditor(ruleByTmdbId.get(Number(item.tmdb_match?.best?.tmdb_id)))"
+                >编辑规则</VBtn>
+              </VCardActions>
+            </div>
           </VCard>
           <div v-if="!catalogLoading && !filteredCatalog.length" class="empty-catalog">
             <VIcon icon="mdi-calendar-search" size="48" /><div>当前筛选条件没有番剧</div>
@@ -824,18 +827,24 @@ onMounted(async () => {
 .batch-target { max-width: 280px; }
 .catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 14px; }
 .catalog-card { position: relative; overflow: hidden; content-visibility: auto; contain-intrinsic-size: 320px; }
-.catalog-card :deep(.v-card-actions) { flex-wrap: wrap; row-gap: 6px; }
+.catalog-card-layout { height: 100%; display: flex; flex-direction: column; min-width: 0; }
+.catalog-poster { width: 100%; height: 170px; flex: 0 0 170px; }
+.catalog-poster-placeholder { display: flex; align-items: center; justify-content: center; color: rgba(var(--v-theme-on-surface), .34); background: rgba(var(--v-theme-surface-variant), .35); }
+.catalog-summary { min-width: 0; }
+.catalog-details { min-width: 0; padding-top: 0 !important; }
+.catalog-actions { flex-wrap: wrap; row-gap: 6px; margin-top: auto; }
 .catalog-grid.view-list { grid-template-columns: 1fr; }
-.catalog-grid.view-list .catalog-card { display: grid; grid-template-columns: 190px minmax(0, 1fr) auto; grid-template-rows: auto 1fr; align-items: center; }
-.catalog-grid.view-list .catalog-card :deep(.v-img) { grid-column: 1; grid-row: 1 / 3; height: 150px !important; }
-.catalog-grid.view-list .catalog-card :deep(.v-card-item) { grid-column: 2; grid-row: 1; }
-.catalog-grid.view-list .catalog-card :deep(.v-card-text) { grid-column: 2; grid-row: 2; }
-.catalog-grid.view-list .catalog-card :deep(.v-card-actions) { grid-column: 3; grid-row: 1 / 3; padding-inline-end: 16px; }
-.catalog-grid.view-compact { grid-template-columns: 1fr; gap: 7px; }
-.catalog-grid.view-compact .catalog-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
-.catalog-grid.view-compact .catalog-card :deep(.v-img), .catalog-grid.view-compact .catalog-card :deep(.v-card-text) { display: none; }
-.catalog-grid.view-compact .catalog-card :deep(.v-card-item) { padding-block: 9px; padding-inline-start: 48px; }
-.catalog-grid.view-compact .catalog-card :deep(.v-card-actions) { padding: 8px 12px; }
+.catalog-grid.view-list .catalog-card-layout { display: grid; grid-template-columns: 112px minmax(0, 1fr) minmax(145px, auto); grid-template-rows: auto 1fr; min-height: 148px; align-items: center; }
+.catalog-grid.view-list .catalog-poster { grid-column: 1; grid-row: 1 / 3; width: 112px; height: 148px; min-height: 148px; align-self: stretch; }
+.catalog-grid.view-list .catalog-summary { grid-column: 2; grid-row: 1; padding: 16px 18px 6px; align-self: end; }
+.catalog-grid.view-list .catalog-details { grid-column: 2; grid-row: 2; padding: 5px 18px 14px !important; align-self: start; }
+.catalog-grid.view-list .catalog-actions { grid-column: 3; grid-row: 1 / 3; align-self: center; justify-content: flex-end; margin: 0; padding: 12px 16px 12px 8px; }
+.catalog-grid.view-compact { grid-template-columns: 1fr; gap: 8px; }
+.catalog-grid.view-compact .catalog-card-layout { display: grid; grid-template-columns: minmax(230px, 1.2fr) minmax(260px, 1fr) auto; align-items: center; min-height: 72px; }
+.catalog-grid.view-compact .catalog-poster { display: none; }
+.catalog-grid.view-compact .catalog-summary { grid-column: 1; padding: 10px 12px 10px 52px; }
+.catalog-grid.view-compact .catalog-details { grid-column: 2; padding: 8px 12px !important; }
+.catalog-grid.view-compact .catalog-actions { grid-column: 3; justify-content: flex-end; margin: 0; padding: 8px 12px; }
 .select-corner { position: absolute; z-index: 2; inset-block-start: 6px; inset-inline-start: 6px; border-radius: 10px; background: rgba(var(--v-theme-surface), .9); }
 .rules-controls { display: grid; grid-template-columns: minmax(220px, 1fr) 160px auto auto auto; gap: 10px; align-items: center; }
 .rules-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 10px; }
@@ -869,7 +878,14 @@ onMounted(async () => {
   .rules-grid { grid-template-columns: 1fr; }
   .manual-match { grid-template-columns: 1fr; min-width: 160px; }
   .tmdb-correction { grid-template-columns: 1fr; }
-  .catalog-grid.view-list .catalog-card { grid-template-columns: 105px minmax(0, 1fr); }
-  .catalog-grid.view-list .catalog-card :deep(.v-card-actions) { grid-column: 1 / 3; grid-row: 3; padding-inline: 12px; }
+  .catalog-grid.view-list .catalog-card-layout { grid-template-columns: 92px minmax(0, 1fr); grid-template-rows: auto auto auto; }
+  .catalog-grid.view-list .catalog-poster { width: 92px; height: 126px; min-height: 126px; grid-row: 1 / 3; }
+  .catalog-grid.view-list .catalog-summary { padding: 12px 12px 4px; }
+  .catalog-grid.view-list .catalog-details { padding: 4px 12px 10px !important; }
+  .catalog-grid.view-list .catalog-actions { grid-column: 1 / 3; grid-row: 3; justify-content: flex-end; padding: 8px 10px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+  .catalog-grid.view-compact .catalog-card-layout { grid-template-columns: 1fr auto; }
+  .catalog-grid.view-compact .catalog-summary { grid-column: 1; padding-left: 48px; }
+  .catalog-grid.view-compact .catalog-details { grid-column: 1 / 3; grid-row: 2; padding: 0 12px 8px 48px !important; }
+  .catalog-grid.view-compact .catalog-actions { grid-column: 2; grid-row: 1; }
 }
 </style>

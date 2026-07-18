@@ -542,7 +542,7 @@ onMounted(load)
 
     <section v-else>
       <VCard variant="outlined"><VCardItem><VCardTitle>覆盖层试算</VCardTitle><VCardSubtitle>只运行已保存的插件覆盖规则，不请求 TMDB，也不写整理链。</VCardSubtitle></VCardItem><VCardText>
-        <VTextarea v-model="previewTitle" label="原标题" rows="3" auto-grow /><VBtn color="primary" prepend-icon="mdi-play" :loading="saving === 'preview'" @click="previewRules">开始试算</VBtn>
+        <div class="overlay-preview-form"><VTextarea v-model="previewTitle" label="原标题" rows="3" auto-grow hide-details /><div class="overlay-preview-actions"><VBtn color="primary" prepend-icon="mdi-play" :loading="saving === 'preview'" @click="previewRules">开始试算</VBtn></div></div>
         <VAlert v-if="preview && !preview.changes?.length" type="info" variant="tonal" class="mt-4">没有覆盖规则命中；MP 原始解析结果会保持不变。</VAlert>
         <VTable v-else-if="preview?.changes?.length" density="compact" class="tools-table mt-4"><thead><tr><th>字段</th><th>原值</th><th>覆盖值</th><th>规则</th></tr></thead><tbody><tr v-for="item in preview.changes" :key="item.rule_id"><td>{{ item.field }}</td><td>{{ item.before ?? '空' }}</td><td>{{ item.after ?? '清空' }}</td><td>{{ item.label }}</td></tr></tbody></VTable>
       </VCardText></VCard>
@@ -643,6 +643,8 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .group-layout-main { min-width: 0; flex: 1; }
 .group-preview-form { display: grid; grid-template-columns: minmax(280px, 1fr) auto; gap: 14px; align-items: center; }
 .member-trace { display: flex; flex-wrap: wrap; gap: 8px; }
+.overlay-preview-form { display: grid; gap: 14px; }
+.overlay-preview-actions { display: flex; align-items: center; min-height: 38px; }
 @media (max-width: 900px) { .filter-row { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 600px) {
   .filter-row, .rename-preview-form { grid-template-columns: 1fr; }
