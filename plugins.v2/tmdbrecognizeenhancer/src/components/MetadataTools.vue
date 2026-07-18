@@ -34,7 +34,7 @@ const mappingDialog = ref(false)
 const mappingForm = ref({ id: '', label: '', stage: 'final_result', mode: 'literal', pattern: '', replacement: '', enabled: true, priority: 100 })
 const mappingPreviewInput = ref({ value: 'AB/C.chi.zh-cn.ass' })
 const mappingPreview = ref(null)
-const renameRuleSection = ref('groups')
+const renameRuleSection = ref('fields')
 const groupArrangementDialog = ref(false)
 const groupArrangementForm = ref({ id: '', label: '', match_name: '', aliases: '', output_name: '', position: 'keep', connector: '__default__', order: 100, enabled: true })
 const groupArrangementPreviewInput = ref('ADWeb@A@VCB')
@@ -391,7 +391,6 @@ onMounted(load)
     <VTabs v-model="section" color="primary" class="mb-4">
       <VTab value="rules" prepend-icon="mdi-text-box-search-outline">内置识别字段</VTab>
       <VTab value="groups" prepend-icon="mdi-account-group-outline">制作组类型</VTab>
-      <VTab value="rename" prepend-icon="mdi-code-braces">自定义命名字段</VTab>
       <VTab value="mapping" prepend-icon="mdi-rename-box-outline">命名规则</VTab>
       <VTab value="test" prepend-icon="mdi-flask-outline">覆盖试算</VTab>
     </VTabs>
@@ -424,63 +423,63 @@ onMounted(load)
       <VPagination v-if="groupPageCount > 1" v-model="page" :length="groupPageCount" :total-visible="7" class="mt-3" />
     </section>
 
-    <section v-else-if="section === 'rename'">
-      <div class="d-flex align-center flex-wrap ga-3 mb-4">
-        <div class="flex-grow-1"><div class="text-h6">Jinja2 自定义字段</div><div class="text-body-2 text-medium-emphasis">保存后可在 MP 命名模板中直接使用 <code v-pre>{{ your_field }}</code>；固定文字可直接填写，条件与组合可使用 Jinja2。</div></div>
-        <VBtn color="primary" prepend-icon="mdi-plus" @click="openRenameField()">新增字段</VBtn>
-      </div>
-      <VAlert v-if="!data.capabilities?.custom_independent_field" type="warning" variant="tonal" class="mb-4">当前 MP 不支持渲染前上下文事件，无法注入自定义字段。请更新 MoviePilot。</VAlert>
-      <VCard variant="outlined"><VCardItem><VCardTitle>已定义字段</VCardTitle><VCardSubtitle>{{ customFields.length }} 个字段 · 支持字段间依赖</VCardSubtitle></VCardItem><VCardText>
-            <div v-if="customFields.length" class="custom-field-list">
-              <div v-for="item in customFields" :key="item.key" class="custom-field-row">
-                <div class="flex-grow-1 min-w-0"><div class="d-flex align-center ga-2"><code>{{ item.key }}</code><VChip size="x-small" :color="item.enabled ? 'success' : 'default'" variant="tonal">{{ item.enabled ? '启用' : '停用' }}</VChip></div><div class="font-weight-medium mt-1">{{ item.label || item.key }}</div><div class="rule-pattern text-truncate" :title="item.expression">{{ item.expression }}</div><div v-if="item.dependencies?.length" class="text-caption text-medium-emphasis">依赖：{{ item.dependencies.join('、') }}</div></div>
-                <VBtn icon="mdi-content-copy" size="small" variant="text" title="复制模板变量" @click="copyVariable(item.key)" /><VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openRenameField(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `rename-delete:${item.key}`" @click="deleteRenameField(item)" />
-              </div>
-            </div>
-            <div v-else class="empty-fields"><VIcon icon="mdi-code-braces" size="48" /><div class="mt-2">尚未定义自定义字段</div></div>
-          </VCardText></VCard>
-
-      <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>上下文试算</VCardTitle><VCardSubtitle>手工构造一次命名上下文，只验证自定义字段输出，不执行文件整理。</VCardSubtitle></VCardItem><VCardText>
-        <div class="rename-preview-form">
-          <VTextarea v-model="renamePreviewInput.original_name" label="MP 原始标题 original_name" rows="2" hide-details class="preview-original" />
-          <VTextField v-model="renamePreviewInput.type" label="媒体类型 type" hide-details />
-          <VTextField v-model="renamePreviewInput.category" label="二级分类 category" hide-details />
-          <VTextField v-model="renamePreviewInput.source_path" label="真实源路径 source_path" hide-details class="preview-wide" />
-          <VTextField v-model="renamePreviewInput.target_dir" label="分类后目标根目录 target_dir" hide-details class="preview-wide" />
-          <VBtn color="secondary" prepend-icon="mdi-play" :loading="renamePreviewing" class="preview-wide" @click="previewRenameFields">试算全部字段</VBtn>
-        </div>
-        <div v-if="renamePreview" class="preview-output mt-4"><div v-for="(value, key) in renamePreview.values" :key="key" class="d-flex justify-space-between ga-3"><code>{{ key }}</code><span class="text-right text-break">{{ value || '（空）' }}</span></div><VAlert v-if="renamePreview.errors?.length" type="warning" variant="tonal" density="compact" class="mt-3">{{ renamePreview.errors.map(item => `${item.key}: ${item.message}`).join('；') }}</VAlert></div>
-      </VCardText></VCard>
-
-      <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>可用于文件命名的输入字段</VCardTitle><VCardSubtitle>这里只列出命名渲染时真实存在的字段；种子信息和整理完成结果不会进入文件命名上下文。</VCardSubtitle></VCardItem><VCardText>
-        <VAlert type="info" variant="tonal" density="compact" class="mb-4">目标目录相关字段是在 MP 首次渲染之后、实际复制/移动/链接之前取得的。插件会据此重渲染一次，所以它们仍能影响最终命名，并不是整理完成后的结果。</VAlert>
-        <VTextField v-model="renameFieldSearch" label="搜索字段名称、变量或用途" prepend-inner-icon="mdi-magnify" clearable hide-details class="mb-4" />
-        <VExpansionPanels v-model="openRenameFieldGroups" multiple variant="accordion" class="field-panels">
-          <VExpansionPanel v-for="group in renameFieldGroups" :key="group.category" :value="group.category">
-            <VExpansionPanelTitle><div class="d-flex align-center ga-3"><span class="font-weight-medium">{{ group.category }}</span><VChip size="x-small" variant="tonal">{{ group.items.length }} 项</VChip></div></VExpansionPanelTitle>
-            <VExpansionPanelText><div class="field-description-grid">
-              <button v-for="item in group.items" :key="item.key" type="button" class="field-description-card" @click="copyVariable(item.key)">
-                <div class="field-description-head"><code>{{ item.key }}</code><VChip size="x-small" variant="tonal" color="secondary">{{ item.availability || '按上下文可用' }}</VChip></div>
-                <div class="field-description-label">{{ item.label }}</div>
-                <div class="field-description-text">{{ item.description }}</div>
-                <div class="field-copy-hint"><VIcon :icon="copiedVariable === item.key ? 'mdi-check' : 'mdi-content-copy'" size="14" /> {{ copiedVariable === item.key ? '已复制' : '点击复制' }} <code>{{ variableSyntax(item.key) }}</code></div>
-              </button>
-            </div></VExpansionPanelText>
-          </VExpansionPanel>
-        </VExpansionPanels>
-        <div v-if="!renameFieldGroups.length" class="empty-fields compact-empty">没有匹配的字段</div>
-      </VCardText></VCard>
-    </section>
-
     <section v-else-if="section === 'mapping'">
       <div class="d-flex align-center flex-wrap ga-3 mb-4">
         <div class="flex-grow-1"><div class="text-h6">统一命名规则</div><div class="text-body-2 text-medium-emphasis">先编排制作组；MP 完成首次命名及字幕后缀后，再对完整相对路径统一二次渲染一次。</div></div>
       </div>
       <VTabs v-model="renameRuleSection" color="secondary" class="sub-tabs mb-4">
+        <VTab value="fields" prepend-icon="mdi-code-braces">自定义字段</VTab>
+        <VTab value="defaults" prepend-icon="mdi-tune-variant">连接与分隔</VTab>
         <VTab value="groups" prepend-icon="mdi-account-multiple-check-outline">制作组编排</VTab>
         <VTab value="text" prepend-icon="mdi-find-replace">文本映射</VTab>
-        <VTab value="defaults" prepend-icon="mdi-tune-variant">连接与分隔默认值</VTab>
       </VTabs>
+      <div v-if="renameRuleSection === 'fields'">
+        <div class="d-flex align-center flex-wrap ga-3 mb-4">
+          <div class="flex-grow-1"><div class="text-h6">Jinja2 自定义字段</div><div class="text-body-2 text-medium-emphasis">保存后可在 MP 命名模板中直接使用 <code v-pre>{{ your_field }}</code>；固定文字可直接填写，条件与组合可使用 Jinja2。</div></div>
+          <VBtn color="primary" prepend-icon="mdi-plus" @click="openRenameField()">新增字段</VBtn>
+        </div>
+        <VAlert v-if="!data.capabilities?.custom_independent_field" type="warning" variant="tonal" class="mb-4">当前 MP 不支持渲染前上下文事件，无法注入自定义字段。请更新 MoviePilot。</VAlert>
+        <VCard variant="outlined"><VCardItem><VCardTitle>已定义字段</VCardTitle><VCardSubtitle>{{ customFields.length }} 个字段 · 支持字段间依赖</VCardSubtitle></VCardItem><VCardText>
+          <div v-if="customFields.length" class="custom-field-list">
+            <div v-for="item in customFields" :key="item.key" class="custom-field-row">
+              <div class="flex-grow-1 min-w-0"><div class="d-flex align-center ga-2"><code>{{ item.key }}</code><VChip size="x-small" :color="item.enabled ? 'success' : 'default'" variant="tonal">{{ item.enabled ? '启用' : '停用' }}</VChip></div><div class="font-weight-medium mt-1">{{ item.label || item.key }}</div><div class="rule-pattern text-truncate" :title="item.expression">{{ item.expression }}</div><div v-if="item.dependencies?.length" class="text-caption text-medium-emphasis">依赖：{{ item.dependencies.join('、') }}</div></div>
+              <VBtn icon="mdi-content-copy" size="small" variant="text" title="复制模板变量" @click="copyVariable(item.key)" /><VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openRenameField(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `rename-delete:${item.key}`" @click="deleteRenameField(item)" />
+            </div>
+          </div>
+          <div v-else class="empty-fields"><VIcon icon="mdi-code-braces" size="48" /><div class="mt-2">尚未定义自定义字段</div></div>
+        </VCardText></VCard>
+
+        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>上下文试算</VCardTitle><VCardSubtitle>手工构造一次命名上下文，只验证自定义字段输出，不执行文件整理。</VCardSubtitle></VCardItem><VCardText>
+          <div class="rename-preview-form">
+            <VTextarea v-model="renamePreviewInput.original_name" label="MP 原始标题 original_name" rows="2" hide-details class="preview-original" />
+            <VTextField v-model="renamePreviewInput.type" label="媒体类型 type" hide-details />
+            <VTextField v-model="renamePreviewInput.category" label="二级分类 category" hide-details />
+            <VTextField v-model="renamePreviewInput.source_path" label="真实源路径 source_path" hide-details class="preview-wide" />
+            <VTextField v-model="renamePreviewInput.target_dir" label="分类后目标根目录 target_dir" hide-details class="preview-wide" />
+            <VBtn color="secondary" prepend-icon="mdi-play" :loading="renamePreviewing" class="preview-wide" @click="previewRenameFields">试算全部字段</VBtn>
+          </div>
+          <div v-if="renamePreview" class="preview-output mt-4"><div v-for="(value, key) in renamePreview.values" :key="key" class="d-flex justify-space-between ga-3"><code>{{ key }}</code><span class="text-right text-break">{{ value || '（空）' }}</span></div><VAlert v-if="renamePreview.errors?.length" type="warning" variant="tonal" density="compact" class="mt-3">{{ renamePreview.errors.map(item => `${item.key}: ${item.message}`).join('；') }}</VAlert></div>
+        </VCardText></VCard>
+
+        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>可用于文件命名的输入字段</VCardTitle><VCardSubtitle>这里只列出命名渲染时真实存在的字段；种子信息和整理完成结果不会进入文件命名上下文。</VCardSubtitle></VCardItem><VCardText>
+          <VAlert type="info" variant="tonal" density="compact" class="mb-4">目标目录相关字段是在 MP 首次渲染之后、实际复制/移动/链接之前取得的。插件会据此重渲染一次，所以它们仍能影响最终命名，并不是整理完成后的结果。</VAlert>
+          <VTextField v-model="renameFieldSearch" label="搜索字段名称、变量或用途" prepend-inner-icon="mdi-magnify" clearable hide-details class="mb-4" />
+          <VExpansionPanels v-model="openRenameFieldGroups" multiple variant="accordion" class="field-panels">
+            <VExpansionPanel v-for="group in renameFieldGroups" :key="group.category" :value="group.category">
+              <VExpansionPanelTitle><div class="d-flex align-center ga-3"><span class="font-weight-medium">{{ group.category }}</span><VChip size="x-small" variant="tonal">{{ group.items.length }} 项</VChip></div></VExpansionPanelTitle>
+              <VExpansionPanelText><div class="field-description-grid">
+                <button v-for="item in group.items" :key="item.key" type="button" class="field-description-card" @click="copyVariable(item.key)">
+                  <div class="field-description-head"><code>{{ item.key }}</code><VChip size="x-small" variant="tonal" color="secondary">{{ item.availability || '按上下文可用' }}</VChip></div>
+                  <div class="field-description-label">{{ item.label }}</div>
+                  <div class="field-description-text">{{ item.description }}</div>
+                  <div class="field-copy-hint"><VIcon :icon="copiedVariable === item.key ? 'mdi-check' : 'mdi-content-copy'" size="14" /> {{ copiedVariable === item.key ? '已复制' : '点击复制' }} <code>{{ variableSyntax(item.key) }}</code></div>
+                </button>
+              </div></VExpansionPanelText>
+            </VExpansionPanel>
+          </VExpansionPanels>
+          <div v-if="!renameFieldGroups.length" class="empty-fields compact-empty">没有匹配的字段</div>
+        </VCardText></VCard>
+      </div>
       <VCard v-if="renameRuleSection === 'defaults'" variant="outlined" class="mb-4 naming-defaults-card"><VCardItem><VCardTitle>命名连接与分隔默认值</VCardTitle><VCardSubtitle>单组专属连接符 &gt; 标题原连接符 &gt; 全局默认连接符；下方开关决定是否跳过标题原连接符。</VCardSubtitle></VCardItem><VCardText>
         <VAlert v-if="config.enabled && data.capabilities?.customization_separator === false" type="warning" variant="tonal" density="compact" class="mb-4">{{ data.capabilities?.customization_separator_message || '当前 MP 无法动态设置自定义占位符连接符。' }}</VAlert>
         <div class="naming-default-grid">
