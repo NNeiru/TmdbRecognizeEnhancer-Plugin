@@ -36,6 +36,12 @@ export const DEFAULT_CONFIG = {
   release_group_assist_enabled: true,
   recognition_rule_overrides_enabled: true,
   release_group_type_weight: 12,
+  seasonal_evidence_enabled: true,
+  seasonal_evidence_weight: 18,
+  recognition_memory_enabled: true,
+  recognition_memory_weight: 16,
+  recognition_memory_min_hits: 3,
+  recognition_memory_ttl_days: 14,
 }
 
 export const UI_VERSION = __TMDB_ENHANCER_UI_VERSION__

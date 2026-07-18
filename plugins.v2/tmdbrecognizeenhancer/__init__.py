@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import threading
 import unicodedata
@@ -38,7 +39,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.0-beta.3"
+    plugin_version = "0.5.0-beta.4"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -50,6 +51,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     DATA_KEY_SEASON_CATALOG = "season_catalog"
     DATA_KEY_RELEASE_GROUP_PROFILES = "release_group_profiles"
     DATA_KEY_RECOGNITION_RULE_OVERRIDES = "recognition_rule_overrides"
+    DATA_KEY_RECOGNITION_MEMORY = "recognition_memory"
     # 季度目录匹配使用独立策略，不继承整理识别的 max_queries、降级开关等参数。
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
@@ -92,6 +94,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "release_group_assist_enabled": True,
         "recognition_rule_overrides_enabled": True,
         "release_group_type_weight": 12.0,
+        "seasonal_evidence_enabled": True,
+        "seasonal_evidence_weight": 18.0,
+        "recognition_memory_enabled": True,
+        "recognition_memory_weight": 16.0,
+        "recognition_memory_min_hits": 3,
+        "recognition_memory_ttl_days": 14,
     }
 
     _split_pattern = re.compile(r"\s*(?::|：|\||｜|/|／|—|–)\s*")
@@ -129,6 +137,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._web_cache: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
         self._catalog_lock = threading.RLock()
         self._catalog_scans: set = set()
+        self._memory_lock = threading.RLock()
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
         """加载配置并启停名称识别事件处理器。"""
@@ -233,6 +242,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "清空识别历史",
+            },
+            {
+                "path": "/recognition-memory/clear",
+                "endpoint": self.clear_recognition_memory_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "清空近期识别记忆",
             },
             {
                 "path": "/episode-normalizer",
@@ -370,6 +386,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "accepted": accepted,
                     "rejected": len(history) - accepted,
                     "acceptance_rate": round(accepted * 100 / len(history), 1) if history else 0,
+                    "recognition_memory": self._recognition_memory_summary(),
                 },
                 "modules": {
                     "recognizer": {
@@ -424,6 +441,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._refresh_metadata_tools()
         self._sync_runtime_adapter_state()
         self._sync_event_handler_state()
+        return self.get_status()
+
+    def clear_recognition_memory_api(self) -> schemas.Response:
+        """清空用户可控的近期识别偏好，不影响运行日志和季度看板。"""
+        with self._memory_lock:
+            self.save_data(self.DATA_KEY_RECOGNITION_MEMORY, {"entries": {}})
         return self.get_status()
 
     def get_metadata_tools_api(self) -> schemas.Response:
@@ -1810,6 +1833,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         candidates, type_constraint = self._filter_candidates_by_media_type(
             candidates, hints, type_constraint
         )
+        candidates = self._attach_context_evidence(candidates, search_title)
         scored = [self._score_candidate(search_title, queries, candidate, hints) for candidate in candidates]
         scored.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
 
@@ -1837,6 +1861,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidates, type_constraint = self._filter_candidates_by_media_type(
                 candidates, hints, type_constraint
             )
+            candidates = self._attach_context_evidence(candidates, search_title)
             scored = [self._score_candidate(search_title, queries, candidate, hints) for candidate in candidates]
             scored.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
             ranked, duplicate_summary = self._collapse_duplicate_candidates(scored)
@@ -1917,6 +1942,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
         candidates, release_group_preference = self._prefer_candidates_by_release_group(
             candidates, hints
         )
+        candidates = self._attach_context_evidence(candidates, title)
+        candidates.sort(
+            key=lambda item: self._safe_float(item.get("_context_priority"), 0.0),
+            reverse=True,
+        )
         diagnostics = [self._score_candidate(title, queries, item, hints) for item in candidates]
         best = diagnostics[0] if diagnostics else None
         runner_up = diagnostics[1] if len(diagnostics) > 1 else None
@@ -1933,6 +1963,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 + (
                     f"制作组标记为{release_group_preference['label']}，已优先符合题材的候选；"
                     if release_group_preference.get("applied") else ""
+                )
+                + (
+                    "当季目录或近期识别记忆已调整候选优先级；"
+                    if best and self._safe_float(best.get("context_priority"), 0) > 0 else ""
                 )
                 + "评分与分差未参与决策"
                 if best else (
@@ -2307,6 +2341,158 @@ class TmdbRecognizeEnhancer(_PluginBase):
         }
         return proxies or None
 
+    @staticmethod
+    def _current_quarter_key(now: Optional[datetime] = None) -> str:
+        """返回当前自然季度键；季度证据只使用这一期，避免旧缓存干扰。"""
+        now = now or datetime.now()
+        return f"{now.year}-Q{(now.month - 1) // 3 + 1}"
+
+    def _seasonal_candidate_evidence(
+            self, candidate: Dict[str, Any], title: str,
+            quarter: str = "", items: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """用已缓存的当季 AniList→TMDB 映射提供无网络软证据。"""
+        if not self._config.get("seasonal_evidence_enabled"):
+            return {}
+        tmdb_id = self._safe_int(candidate.get("id"), 0)
+        if not tmdb_id:
+            return {}
+        quarter = quarter or self._current_quarter_key()
+        if items is None:
+            quarter_data = self._read_season_catalog_cache().get(quarter) or {}
+            items = quarter_data.get("items") if isinstance(quarter_data, dict) else []
+        best_match = None
+        best_relation = 0.0
+        for item in items or []:
+            match = item.get("tmdb_match") or {}
+            matched = match.get("best") or {}
+            if not match.get("accepted") or self._safe_int(matched.get("tmdb_id"), 0) != tmdb_id:
+                continue
+            aliases = list(dict.fromkeys(value for value in (
+                item.get("display_name"), item.get("name"), item.get("name_cn"),
+                *(item.get("aliases") or []),
+            ) if value))
+            relations = []
+            for alias in aliases:
+                components = self._title_components(title, alias)
+                relations.append(
+                    components["token"] * .5
+                    + components["similarity"] * .3
+                    + components["prefix"] * .2
+                )
+            relation = max(relations, default=0.0)
+            if relation > best_relation:
+                best_relation = relation
+                best_match = item
+        if not best_match or best_relation < 55:
+            return {}
+        return {
+            "active": True,
+            "component": round(100.0 if best_relation >= 72 else 82.0, 2),
+            "quarter": quarter,
+            "title": best_match.get("display_name") or best_match.get("name_cn") or best_match.get("name"),
+            "relation": round(best_relation, 2),
+        }
+
+    def _read_recognition_memory(self, prune: bool = True) -> Dict[str, Any]:
+        """读取近期识别记忆，并按 TTL、数量上限清理异常或过期记录。"""
+        with self._memory_lock:
+            stored = self.get_data(self.DATA_KEY_RECOGNITION_MEMORY) or {}
+            entries = stored.get("entries") if isinstance(stored, dict) else {}
+            entries = deepcopy(entries) if isinstance(entries, dict) else {}
+            if not prune:
+                return {"entries": entries}
+            now = datetime.now().timestamp()
+            ttl_seconds = int(self._config.get("recognition_memory_ttl_days") or 14) * 86400
+            cleaned = {
+                key: value for key, value in entries.items()
+                if isinstance(value, dict)
+                and now - self._safe_float(value.get("updated_at"), 0) <= ttl_seconds
+            }
+            ordered = sorted(
+                cleaned.items(),
+                key=lambda pair: self._safe_float(pair[1].get("updated_at"), 0),
+                reverse=True,
+            )[:300]
+            normalized = {"entries": dict(ordered)}
+            if len(entries) != len(ordered):
+                self.save_data(self.DATA_KEY_RECOGNITION_MEMORY, normalized)
+            return normalized
+
+    def _memory_candidate_evidence(
+            self, candidate: Dict[str, Any], title: str, memory: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """只对同一完整解析标题的领先历史目标加权，避免宽泛别名串片。"""
+        if not self._config.get("recognition_memory_enabled"):
+            return {}
+        key = self._normalize_text(title)
+        entry = (memory.get("entries") or {}).get(key) or {}
+        targets = entry.get("targets") if isinstance(entry, dict) else {}
+        if not isinstance(targets, dict) or not targets:
+            return {}
+        ranked = sorted(
+            targets.values(),
+            key=lambda value: (
+                self._safe_int(value.get("count"), 0),
+                self._safe_float(value.get("last_seen"), 0),
+            ),
+            reverse=True,
+        )
+        leader = ranked[0]
+        leader_count = self._safe_int(leader.get("count"), 0)
+        minimum_hits = int(self._config.get("recognition_memory_min_hits") or 3)
+        if leader_count < minimum_hits:
+            return {}
+        if len(ranked) > 1 and self._safe_int(ranked[1].get("count"), 0) == leader_count:
+            return {}
+        candidate_id = self._safe_int(candidate.get("id"), 0)
+        candidate_type = self._normalize_media_type(candidate.get("media_type"))
+        leader_type = self._normalize_media_type(leader.get("media_type"))
+        if candidate_id != self._safe_int(leader.get("tmdb_id"), 0) or candidate_type != leader_type:
+            return {}
+        total = sum(max(0, self._safe_int(value.get("count"), 0)) for value in ranked)
+        share = leader_count / max(total, 1)
+        now = datetime.now().timestamp()
+        ttl_seconds = int(self._config.get("recognition_memory_ttl_days") or 14) * 86400
+        age_seconds = max(0.0, now - self._safe_float(leader.get("last_seen"), now))
+        freshness = max(0.0, 1.0 - age_seconds / max(ttl_seconds, 1))
+        component = 100.0 * share * (.6 + .4 * freshness)
+        return {
+            "active": True,
+            "component": round(component, 2),
+            "hits": leader_count,
+            "total_hits": total,
+            "share": round(share * 100, 1),
+            "age_days": round(age_seconds / 86400, 1),
+            "ttl_days": int(self._config.get("recognition_memory_ttl_days") or 14),
+        }
+
+    def _attach_context_evidence(
+            self, candidates: List[Dict[str, Any]], title: str
+    ) -> List[Dict[str, Any]]:
+        """一次读取上下文，将当季与近期记忆注入当前候选并形成稳定优先级。"""
+        memory = self._read_recognition_memory() if self._config.get("recognition_memory_enabled") else {"entries": {}}
+        quarter = self._current_quarter_key()
+        quarter_data = {}
+        if self._config.get("seasonal_evidence_enabled"):
+            quarter_data = self._read_season_catalog_cache().get(quarter) or {}
+        seasonal_items = quarter_data.get("items") if isinstance(quarter_data, dict) else []
+        for candidate in candidates:
+            seasonal = self._seasonal_candidate_evidence(
+                candidate, title, quarter=quarter, items=seasonal_items,
+            )
+            recent = self._memory_candidate_evidence(candidate, title, memory)
+            candidate["_seasonal_evidence"] = seasonal
+            candidate["_memory_evidence"] = recent
+            candidate["_context_priority"] = round(
+                self._safe_float(seasonal.get("component"), 0)
+                * self._safe_float(self._config.get("seasonal_evidence_weight"), 0)
+                + self._safe_float(recent.get("component"), 0)
+                * self._safe_float(self._config.get("recognition_memory_weight"), 0),
+                2,
+            )
+        return candidates
+
     def _score_candidate(
             self,
             original_title: str,
@@ -2409,6 +2595,22 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 float(self._config.get("release_group_type_weight") or 0),
             ))
 
+        seasonal_evidence = candidate.get("_seasonal_evidence") or {}
+        seasonal_component = self._safe_float(seasonal_evidence.get("component"), 0.0)
+        if self._config.get("seasonal_evidence_enabled") and seasonal_component > 0:
+            weighted.append((
+                seasonal_component,
+                float(self._config.get("seasonal_evidence_weight") or 0),
+            ))
+
+        memory_evidence = candidate.get("_memory_evidence") or {}
+        memory_component = self._safe_float(memory_evidence.get("component"), 0.0)
+        if self._config.get("recognition_memory_enabled") and memory_component > 0:
+            weighted.append((
+                memory_component,
+                float(self._config.get("recognition_memory_weight") or 0),
+            ))
+
         weight_total = sum(weight for _, weight in weighted if weight > 0)
         score = sum(value * weight for value, weight in weighted if weight > 0) / weight_total if weight_total else 0
         if exact_original:
@@ -2470,6 +2672,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "release_group": release_group_profile.get("release_group") or "",
                 "matched_rules": release_group_profile.get("matches") or [],
             },
+            "seasonal_evidence": seasonal_evidence,
+            "memory_evidence": memory_evidence,
+            "context_priority": round(self._safe_float(candidate.get("_context_priority"), 0.0), 2),
             "season_numbers": sorted(season_numbers),
             "number_of_seasons": self._safe_int(candidate.get("number_of_seasons"), 0),
             "title_season": (
@@ -2499,6 +2704,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "year": year_component,
                 "type": type_component,
                 "release_group": release_group_component,
+                "seasonal": seasonal_component or None,
+                "memory": memory_component or None,
                 "web": web_evidence,
             },
             "queries": [hit.get("query") for hit in hits],
@@ -2883,6 +3090,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "main_title_fallback",
             "progressive_fallback", "fetch_aliases", "episode_normalizer_enabled",
             "release_group_assist_enabled", "recognition_rule_overrides_enabled",
+            "seasonal_evidence_enabled", "recognition_memory_enabled",
         )
         for key in bool_keys:
             merged[key] = bool(merged.get(key))
@@ -2894,6 +3102,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "history_limit": (5, 100),
             "web_search_max_results": (3, 15),
             "web_search_timeout": (5, 30),
+            "recognition_memory_min_hits": (2, 10),
+            "recognition_memory_ttl_days": (1, 90),
         }
         for key, (minimum, maximum) in ranges.items():
             merged[key] = max(minimum, min(maximum, self._safe_int(merged.get(key), int(self.DEFAULT_CONFIG[key]))))
@@ -2910,6 +3120,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "year_weight": (0.0, 100.0),
             "type_weight": (0.0, 100.0),
             "release_group_type_weight": (0.0, 30.0),
+            "seasonal_evidence_weight": (0.0, 40.0),
+            "recognition_memory_weight": (0.0, 40.0),
             "season_missing_penalty": (0.0, 100.0),
             "web_search_min_evidence": (50.0, 100.0),
         }
@@ -2953,6 +3165,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """保存跨模块运行日志摘要，避免完整响应无限增长。"""
         adjustment = result.get("episode_adjustment")
         has_search = bool(result.get("queries"))
+        if has_search and result.get("accepted"):
+            self._remember_recognition(result)
         record = {
             key: result.get(key)
             for key in (
@@ -2969,6 +3183,84 @@ class TmdbRecognizeEnhancer(_PluginBase):
             records = self._read_history()
             records.insert(0, record)
             self.save_data(self.DATA_KEY_HISTORY, records[: int(self._config["history_limit"])])
+
+    def _remember_recognition(self, result: Dict[str, Any]) -> None:
+        """累计正式整理链的不同文件命中；相同文件重复运行不会刷高频次。"""
+        if not self._config.get("recognition_memory_enabled"):
+            return
+        best = result.get("best") or {}
+        tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
+        media_type = self._normalize_media_type(best.get("media_type"))
+        title_key = self._normalize_text(result.get("search_title") or result.get("title"))
+        if not tmdb_id or not media_type or len(title_key) < 4:
+            return
+        sample_source = str(result.get("original_title") or result.get("title") or title_key)
+        sample_hash = hashlib.sha256(sample_source.casefold().encode("utf-8")).hexdigest()[:20]
+        now = datetime.now().timestamp()
+        ttl_seconds = int(self._config.get("recognition_memory_ttl_days") or 14) * 86400
+        with self._memory_lock:
+            memory = self._read_recognition_memory(prune=True)
+            entries = memory.setdefault("entries", {})
+            entry = entries.setdefault(title_key, {
+                "title": result.get("title") or "",
+                "updated_at": now,
+                "targets": {},
+                "samples": {},
+            })
+            samples = entry.get("samples") if isinstance(entry.get("samples"), dict) else {}
+            samples = {
+                key: timestamp for key, timestamp in samples.items()
+                if now - self._safe_float(timestamp, 0) <= ttl_seconds
+            }
+            if sample_hash in samples:
+                return
+            samples[sample_hash] = now
+            target_key = f"{media_type.value}:{tmdb_id}"
+            targets = entry.get("targets") if isinstance(entry.get("targets"), dict) else {}
+            target = targets.setdefault(target_key, {
+                "tmdb_id": tmdb_id,
+                "media_type": media_type.value,
+                "name": best.get("name") or "",
+                "count": 0,
+            })
+            target["count"] = self._safe_int(target.get("count"), 0) + 1
+            target["last_seen"] = now
+            target["name"] = best.get("name") or target.get("name") or ""
+            entry.update({
+                "title": result.get("title") or entry.get("title") or "",
+                "updated_at": now,
+                "targets": targets,
+                "samples": dict(sorted(samples.items(), key=lambda pair: pair[1], reverse=True)[:60]),
+            })
+            entries[title_key] = entry
+            memory["entries"] = dict(sorted(
+                entries.items(),
+                key=lambda pair: self._safe_float(pair[1].get("updated_at"), 0),
+                reverse=True,
+            )[:300])
+            self.save_data(self.DATA_KEY_RECOGNITION_MEMORY, memory)
+
+    def _recognition_memory_summary(self) -> Dict[str, Any]:
+        """返回状态页所需的轻量记忆统计，不暴露完整文件名。"""
+        entries = (self._read_recognition_memory().get("entries") or {}) \
+            if self._config.get("recognition_memory_enabled") else {}
+        minimum_hits = int(self._config.get("recognition_memory_min_hits") or 3)
+        active_targets = 0
+        sample_count = 0
+        for entry in entries.values():
+            targets = entry.get("targets") if isinstance(entry, dict) else {}
+            samples = entry.get("samples") if isinstance(entry, dict) else {}
+            sample_count += len(samples) if isinstance(samples, dict) else 0
+            active_targets += sum(
+                1 for value in (targets or {}).values()
+                if self._safe_int(value.get("count"), 0) >= minimum_hits
+            )
+        return {
+            "title_count": len(entries),
+            "sample_count": sample_count,
+            "active_targets": active_targets,
+            "ttl_days": int(self._config.get("recognition_memory_ttl_days") or 14),
+        }
 
     def _normalizer(self) -> EpisodeNormalizer:
         """返回当前 TMDB 客户端对应的归一化服务。"""

@@ -196,11 +196,27 @@ onMounted(load)
       </VCardText></VCard>
     </section>
 
-    <VDialog v-model="dialog" max-width="760"><VCard><VCardItem><VCardTitle>{{ form.source_rule_id ? '编辑 MP 内置规则的插件覆盖' : '新增识别字段覆盖' }}</VCardTitle><VCardSubtitle>保存后立即作用于新进入 MP 识别链的标题；不会修改容器文件。</VCardSubtitle></VCardItem><VCardText>
-      <VRow dense><VCol cols="12" sm="7"><VSelect v-model="form.field" label="目标字段" :items="fieldItems.filter(item => item.value !== 'all')" /></VCol><VCol cols="12" sm="5"><VSelect v-model="form.action" label="动作" :items="[{title:'命中后覆盖字段',value:'override'},{title:'命中后清空字段',value:'clear'}]" /></VCol></VRow>
-      <VTextField v-model="form.label" label="规则名称" /><VTextarea v-model="form.pattern" label="匹配正则" rows="4" auto-grow /><VTextField v-if="form.action === 'override'" v-model="form.value" label="输出值" hint="可用 {match}、{first_group}、{1} 或命名组如 {bit}" persistent-hint />
-      <VRow dense class="mt-2"><VCol cols="6"><VTextField v-model="form.priority" type="number" label="优先级" /></VCol><VCol cols="6"><VSwitch v-model="form.enabled" color="success" label="启用" hide-details /></VCol></VRow>
-    </VCardText><VCardActions><VSpacer /><VBtn variant="text" @click="dialog = false">取消</VBtn><VBtn color="primary" :loading="saving === 'rule'" @click="saveRule">保存覆盖</VBtn></VCardActions></VCard></VDialog>
+    <VDialog v-model="dialog" max-width="780">
+      <VCard class="rule-dialog-card">
+        <VCardItem class="rule-dialog-header"><VCardTitle>{{ form.source_rule_id ? '编辑 MP 内置规则的插件覆盖' : '新增识别字段覆盖' }}</VCardTitle><VCardSubtitle>保存后立即作用于新进入 MP 识别链的标题；不会修改容器文件。</VCardSubtitle></VCardItem>
+        <VDivider />
+        <VCardText class="rule-dialog-body">
+          <VRow>
+            <VCol cols="12" sm="7"><VSelect v-model="form.field" label="目标字段" :items="fieldItems.filter(item => item.value !== 'all')" hide-details /></VCol>
+            <VCol cols="12" sm="5"><VSelect v-model="form.action" label="动作" :items="[{title:'命中后覆盖字段',value:'override'},{title:'命中后清空字段',value:'clear'}]" hide-details /></VCol>
+          </VRow>
+          <VTextField v-model="form.label" label="规则名称" hide-details />
+          <VTextarea v-model="form.pattern" label="匹配正则" rows="4" auto-grow hide-details />
+          <VTextField v-if="form.action === 'override'" v-model="form.value" label="输出值" hint="可用 {match}、{first_group}、{1} 或命名组如 {bit}" persistent-hint />
+          <VRow align="center">
+            <VCol cols="12" sm="7"><VTextField v-model="form.priority" type="number" label="优先级" hint="数值越高越先执行" persistent-hint /></VCol>
+            <VCol cols="12" sm="5"><div class="rule-enabled-box"><div><div class="font-weight-medium">启用规则</div><div class="text-caption text-medium-emphasis">保存后立即参与识别</div></div><VSwitch v-model="form.enabled" color="success" hide-details /></div></VCol>
+          </VRow>
+        </VCardText>
+        <VDivider />
+        <VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="dialog = false">取消</VBtn><VBtn color="primary" :loading="saving === 'rule'" @click="saveRule">保存覆盖</VBtn></VCardActions>
+      </VCard>
+    </VDialog>
   </div>
 </template>
 
@@ -209,6 +225,11 @@ onMounted(load)
 .tools-table { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
 .rule-pattern { max-width: 660px; margin-top: 4px; color: rgba(var(--v-theme-on-surface), .64); font: .76rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
 code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
+.rule-dialog-header { padding: 20px 24px 18px; }
+.rule-dialog-body { display: grid; gap: 18px; padding: 24px !important; }
+.rule-dialog-body :deep(.v-row) { margin-top: -8px; margin-bottom: -8px; }
+.rule-enabled-box { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 7px 14px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
+.rule-dialog-actions { padding: 14px 20px; }
 @media (max-width: 900px) { .filter-row { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 600px) { .filter-row { grid-template-columns: 1fr; } }
 </style>

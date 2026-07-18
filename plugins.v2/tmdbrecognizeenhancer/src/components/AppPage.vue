@@ -92,6 +92,19 @@ async function clearHistory() {
   }
 }
 
+async function clearRecognitionMemory() {
+  loading.value = true
+  error.value = ''
+  try {
+    const response = await props.api.post(`${pluginBase.value}/recognition-memory/clear`, {})
+    status.value = unwrapResponse(response) || status.value
+  } catch (err) {
+    error.value = err?.message || '近期识别记忆清理失败'
+  } finally {
+    loading.value = false
+  }
+}
+
 function typeConstraintSourceText(source) {
   return ({
     manual: '手动指定',
@@ -171,6 +184,7 @@ onMounted(loadStatus)
                 <VCardText class="d-flex align-center flex-wrap ga-4">
                   <VAvatar color="primary" variant="tonal"><VIcon icon="mdi-power" /></VAvatar>
                   <div class="flex-grow-1"><div class="font-weight-bold">插件总开关</div><div class="text-body-2 text-medium-emphasis">控制事件接管、运行时适配和全部模块</div></div>
+                  <VSwitch v-model="config.show_sidebar_nav" color="primary" hide-details label="显示侧栏工作台" />
                   <VSwitch v-model="config.enabled" color="success" hide-details :label="config.enabled ? '运行中' : '已关闭'" />
                 </VCardText>
               </VCard>
@@ -198,7 +212,11 @@ onMounted(loadStatus)
           <section v-if="tab === 'settings'" class="workspace-panel">
             <div class="tab-content">
               <StrategySettings v-model="config" :show-module-switches="false" />
-              <div class="sticky-actions"><VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving" @click="saveConfig">保存并立即生效</VBtn></div>
+              <div class="sticky-actions">
+                <div class="text-caption text-medium-emphasis mr-auto">近期记忆：{{ summary.recognition_memory?.active_targets || 0 }} 个已生效目标 / {{ summary.recognition_memory?.sample_count || 0 }} 个不同文件</div>
+                <VBtn variant="text" prepend-icon="mdi-delete-clock-outline" :disabled="!(summary.recognition_memory?.sample_count)" @click="clearRecognitionMemory">清除近期记忆</VBtn>
+                <VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving" @click="saveConfig">保存并立即生效</VBtn>
+              </div>
             </div>
           </section>
 
@@ -274,7 +292,7 @@ onMounted(loadStatus)
                       </VAlert>
                       <VTable v-if="preview.candidates?.length" density="compact" class="candidate-table mt-4">
                         <thead><tr><th>候选</th><th>命中名称</th><th>得分</th></tr></thead>
-                        <tbody><tr v-for="candidate in preview.candidates" :key="`${candidate.media_type}-${candidate.tmdb_id}`" :class="{ 'candidate-suppressed': candidate.suppressed_as_duplicate || candidate.suppressed_as_shadow_season }"><td><strong>{{ candidate.name }}</strong><div class="text-caption text-medium-emphasis">{{ candidate.year || '—' }} · #{{ candidate.tmdb_id }}</div><VChip v-if="candidate.suppressed_as_duplicate" size="x-small" color="info" variant="tonal" class="mt-1">重复项，归入 #{{ candidate.duplicate_of }}</VChip><VChip v-else-if="candidate.suppressed_as_shadow_season" size="x-small" color="warning" variant="tonal" class="mt-1">平行单季项，归入 #{{ candidate.shadow_of }}</VChip></td><td class="text-caption">{{ candidate.matched_name || '—' }}<div class="text-medium-emphasis">查询来源 {{ candidate.query_confidence ?? 0 }}<span v-if="candidate.web_evidence"> · 外部证据 {{ candidate.web_evidence }}</span></div><div v-if="candidate.release_group_evidence?.component !== null" class="text-medium-emphasis">制作组 {{ candidate.release_group_evidence.label }}：{{ candidate.release_group_evidence.component }} 分</div></td><td><VChip size="small" :color="scoreColor(candidate.score)">{{ preview.selection_mode === 'tmdb_first' ? '诊断 ' : '' }}{{ candidate.diagnostic_score ?? candidate.score }}</VChip></td></tr></tbody>
+                        <tbody><tr v-for="candidate in preview.candidates" :key="`${candidate.media_type}-${candidate.tmdb_id}`" :class="{ 'candidate-suppressed': candidate.suppressed_as_duplicate || candidate.suppressed_as_shadow_season }"><td><strong>{{ candidate.name }}</strong><div class="text-caption text-medium-emphasis">{{ candidate.year || '—' }} · #{{ candidate.tmdb_id }}</div><VChip v-if="candidate.suppressed_as_duplicate" size="x-small" color="info" variant="tonal" class="mt-1">重复项，归入 #{{ candidate.duplicate_of }}</VChip><VChip v-else-if="candidate.suppressed_as_shadow_season" size="x-small" color="warning" variant="tonal" class="mt-1">平行单季项，归入 #{{ candidate.shadow_of }}</VChip></td><td class="text-caption">{{ candidate.matched_name || '—' }}<div class="text-medium-emphasis">查询来源 {{ candidate.query_confidence ?? 0 }}<span v-if="candidate.web_evidence"> · 外部证据 {{ candidate.web_evidence }}</span></div><div v-if="candidate.release_group_evidence?.component !== null" class="text-medium-emphasis">制作组 {{ candidate.release_group_evidence.label }}：{{ candidate.release_group_evidence.component }} 分</div><div v-if="candidate.seasonal_evidence?.active" class="context-evidence">当季 {{ candidate.seasonal_evidence.quarter }}：{{ candidate.seasonal_evidence.component }} 分</div><div v-if="candidate.memory_evidence?.active" class="context-evidence">近期命中 {{ candidate.memory_evidence.hits }} 次（{{ candidate.memory_evidence.age_days }} 天前）：{{ candidate.memory_evidence.component }} 分</div></td><td><VChip size="small" :color="scoreColor(candidate.score)">{{ preview.selection_mode === 'tmdb_first' ? '诊断 ' : '' }}{{ candidate.diagnostic_score ?? candidate.score }}</VChip></td></tr></tbody>
                       </VTable>
                     </VCardText>
                   </VCard>
@@ -347,7 +365,7 @@ onMounted(loadStatus)
 .code-title { padding: 12px 14px; border: 1px solid rgba(var(--v-theme-primary),.16); border-radius: 10px; background: rgba(var(--v-theme-surface),.72); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .84rem; }
 .code-title-main { color: rgb(var(--v-theme-primary)); font-weight: 700; }
 .arrow-line { padding: 4px 0; text-align: center; color: rgb(var(--v-theme-primary)); }
-.sticky-actions { position: sticky; bottom: 0; z-index: 3; display: flex; justify-content: flex-end; margin: 18px -26px -26px; padding: 14px 26px; border-top: 1px solid rgba(var(--v-theme-on-surface),.08); background: rgba(var(--v-theme-surface),.94); backdrop-filter: blur(10px); }
+.sticky-actions { position: sticky; bottom: 0; z-index: 3; display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin: 18px -26px -26px; padding: 14px 26px; border-top: 1px solid rgba(var(--v-theme-on-surface),.08); background: rgba(var(--v-theme-surface),.94); backdrop-filter: blur(10px); }
 .preview-title-field { margin-bottom: 24px; }
 .preview-hints { margin-bottom: 12px; row-gap: 10px; }
 .field-label { margin: 0 0 7px 2px; color: rgba(var(--v-theme-on-surface),.7); font-size: .78rem; font-weight: 600; line-height: 1.2; }
@@ -357,6 +375,7 @@ onMounted(loadStatus)
 .pipeline-item { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 12px; border-radius: 10px; background: rgba(var(--v-theme-primary),.035); }
 .candidate-table { border-radius: 12px; border: 1px solid rgba(var(--v-theme-on-surface),.08); overflow: hidden; }
 .candidate-suppressed { opacity: .62; background: rgba(var(--v-theme-info),.035); }
+.context-evidence { margin-top: 2px; color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .empty-preview { min-height: 390px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: rgba(var(--v-theme-on-surface),.52); }
 .history-list { display: flex; flex-direction: column; gap: 16px; }
 .history-row { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; align-items: stretch; }

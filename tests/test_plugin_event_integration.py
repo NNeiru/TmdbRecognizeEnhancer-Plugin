@@ -149,6 +149,63 @@ def test_federation_path_is_versioned(monkeypatch):
     assert dist_path.endswith("/assets")
 
 
+def test_current_quarter_catalog_prioritizes_mapped_anime_candidate(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "seasonal_evidence_enabled": True,
+        "seasonal_evidence_weight": 18,
+        "recognition_memory_enabled": False,
+    })
+    plugin._current_quarter_key = lambda now=None: "2026-Q3"
+    plugin.save_data(plugin.DATA_KEY_SEASON_CATALOG, {
+        "2026-Q3": {"items": [{
+            "name": "Kami no Shizuku", "display_name": "神之水滴",
+            "aliases": ["Kami no Shizuku", "Drops of God"],
+            "tmdb_match": {
+                "accepted": True,
+                "best": {"tmdb_id": 306121},
+            },
+        }]},
+    })
+    candidates = plugin._attach_context_evidence([
+        {"id": 111, "media_type": "tv", "name": "神之水滴"},
+        {"id": 306121, "media_type": "tv", "name": "神之水滴"},
+    ], "Kami no Shizuku")
+
+    assert candidates[0]["_context_priority"] == 0
+    assert candidates[1]["_seasonal_evidence"]["quarter"] == "2026-Q3"
+    assert candidates[1]["_context_priority"] > 0
+
+
+def test_recognition_memory_counts_distinct_files_and_expires(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_memory_enabled": True,
+        "recognition_memory_min_hits": 2,
+        "recognition_memory_ttl_days": 14,
+    })
+    base = {
+        "accepted": True,
+        "title": "Kami no Shizuku",
+        "search_title": "Kami no Shizuku",
+        "queries": ["Kami no Shizuku"],
+        "best": {"tmdb_id": 306121, "media_type": "tv", "name": "神之水滴"},
+    }
+    plugin._remember_recognition({**base, "original_title": "Kami.no.Shizuku.S01E01.mkv"})
+    plugin._remember_recognition({**base, "original_title": "Kami.no.Shizuku.S01E01.mkv"})
+    plugin._remember_recognition({**base, "original_title": "Kami.no.Shizuku.S01E02.mkv"})
+    memory = plugin._read_recognition_memory()
+    evidence = plugin._memory_candidate_evidence(
+        {"id": 306121, "media_type": "tv"}, "Kami no Shizuku", memory,
+    )
+
+    assert evidence["active"] is True
+    assert evidence["hits"] == 2
+    assert plugin._recognition_memory_summary()["sample_count"] == 2
+
+
 def test_runtime_original_name_is_forwarded_as_anchor_evidence(monkeypatch):
     module = _load_plugin(monkeypatch)
     runtime_meta = SimpleNamespace(
@@ -188,6 +245,32 @@ def test_tmdb_first_mode_uses_first_result_without_score_or_margin(monkeypatch):
     assert result["best"]["tmdb_id"] == 20
     assert result["best"]["score"] == 100.0
     assert result["margin"] == 0.0
+
+
+def test_tmdb_first_mode_can_promote_current_quarter_anime(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "enabled": True, "recognition_mode": "tmdb_first", "fetch_aliases": False,
+        "seasonal_evidence_enabled": True, "recognition_memory_enabled": False,
+    })
+    plugin._current_quarter_key = lambda now=None: "2026-Q3"
+    plugin.save_data(plugin.DATA_KEY_SEASON_CATALOG, {
+        "2026-Q3": {"items": [{
+            "name": "Kami no Shizuku", "aliases": ["Kami no Shizuku"],
+            "tmdb_match": {"accepted": True, "best": {"tmdb_id": 306121}},
+        }]},
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 111, "media_type": "tv", "name": "Drops of God", "genre_ids": [18]},
+        {"id": 306121, "media_type": "tv", "name": "神之水滴", "genre_ids": [16]},
+    ])
+
+    result = plugin._recognize_title("Kami no Shizuku", include_candidates=True)
+
+    assert result["best"]["tmdb_id"] == 306121
+    assert result["best"]["seasonal_evidence"]["quarter"] == "2026-Q3"
+    assert "当季目录" in result["reason"]
 
 
 def test_tmdb_first_prefers_animation_for_animation_release_group(monkeypatch):

@@ -43,9 +43,15 @@ const DEFAULT_CONFIG = {
   episode_normalizer_enabled: false,
   release_group_assist_enabled: true,
   recognition_rule_overrides_enabled: true,
-  release_group_type_weight: 12
+  release_group_type_weight: 12,
+  seasonal_evidence_enabled: true,
+  seasonal_evidence_weight: 18,
+  recognition_memory_enabled: true,
+  recognition_memory_weight: 16,
+  recognition_memory_min_hits: 3,
+  recognition_memory_ttl_days: 14
 };
-const UI_VERSION = "0.5.0-beta.3";
+const UI_VERSION = "0.5.0-beta.4";
 function ensureUiVersion(backendVersion) {
   const backend = String(backendVersion || "").trim();
   if (!backend || backend === UI_VERSION || typeof window === "undefined") return false;

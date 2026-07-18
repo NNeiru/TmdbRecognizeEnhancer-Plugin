@@ -14,6 +14,7 @@ const config = computed({
 
 const weightTotal = computed(() => [
   'token_weight', 'similarity_weight', 'prefix_weight', 'rank_weight', 'query_confidence_weight', 'anchor_weight', 'year_weight', 'type_weight',
+  'seasonal_evidence_weight', 'recognition_memory_weight',
 ].reduce((sum, key) => sum + Number(config.value[key] || 0), 0))
 
 const tmdbFirstMode = computed(() => config.value.recognition_mode === 'tmdb_first')
@@ -67,7 +68,6 @@ function applyBalancedPreset() {
               <VSwitch v-model="config.recognizer_enabled" color="primary" label="启用 TMDB 搜索增强" hide-details />
               <VSwitch v-model="config.episode_normalizer_enabled" color="success" label="启用集数偏移" hide-details />
             </template>
-            <VSwitch v-model="config.show_sidebar_nav" color="primary" label="显示侧栏工作台" hide-details />
             <VSelect v-model="config.recognition_mode" :items="[
               {title:'TMDB 单次首结果（默认）',value:'tmdb_first'},
               {title:'可解释评分模式',value:'scored'},
@@ -129,10 +129,43 @@ function applyBalancedPreset() {
     </VRow>
 
     <VAlert v-if="tmdbFirstMode" type="success" variant="tonal" class="mt-4">
-      当前只提交一次完整解析标题并采用 TMDB 返回的第一个影视结果。最低分、领先分差和评分权重全部不参与选择；年份与别名仍会显示在试跑诊断中。
+      当前只提交一次完整解析标题。通常采用 TMDB 第一个影视结果；若当季目录或近期识别记忆明确指向本次候选之一，会在保留 TMDB 顺序的基础上优先该候选。评分与分差不参与选择。
     </VAlert>
 
-    <VCard v-else variant="outlined" class="setting-card mt-4">
+    <VCard variant="outlined" class="setting-card mt-4">
+      <VCardItem>
+        <template #prepend><VIcon icon="mdi-compass-rose" color="primary" /></template>
+        <VCardTitle>上下文辅助</VCardTitle>
+        <VCardSubtitle>两类证据互相独立；关闭后完全不参与候选选择</VCardSubtitle>
+      </VCardItem>
+      <VCardText>
+        <VRow>
+          <VCol cols="12" md="6">
+            <div class="context-box">
+              <VSwitch v-model="config.seasonal_evidence_enabled" color="primary" label="使用当季动画目录" hide-details />
+              <div class="text-body-2 text-medium-emphasis mb-3">仅读取插件已缓存的当前季度看板。相同标题同时存在动画与真人版时，优先已映射的当季动画条目；识别时不访问外部网站。</div>
+              <VSlider v-model="config.seasonal_evidence_weight" :min="0" :max="40" :step="1" color="primary" :disabled="!config.seasonal_evidence_enabled" thumb-label>
+                <template #prepend><span class="evidence-label">影响强度</span></template>
+                <template #append><strong>{{ config.seasonal_evidence_weight }}</strong></template>
+              </VSlider>
+            </div>
+          </VCol>
+          <VCol cols="12" md="6">
+            <div class="context-box">
+              <VSwitch v-model="config.recognition_memory_enabled" color="secondary" label="使用近期重复命中" hide-details />
+              <div class="text-body-2 text-medium-emphasis mb-3">只累计正式整理链中不同文件对同一完整解析标题的命中；综合试跑和同一文件重复运行不会刷高频次。</div>
+              <VRow dense>
+                <VCol cols="12"><VSlider v-model="config.recognition_memory_weight" :min="0" :max="40" :step="1" color="secondary" :disabled="!config.recognition_memory_enabled" thumb-label><template #prepend><span class="evidence-label">影响强度</span></template><template #append><strong>{{ config.recognition_memory_weight }}</strong></template></VSlider></VCol>
+                <VCol cols="6"><VTextField v-model.number="config.recognition_memory_min_hits" type="number" min="2" max="10" label="生效所需文件数" suffix="个" :disabled="!config.recognition_memory_enabled" /></VCol>
+                <VCol cols="6"><VTextField v-model.number="config.recognition_memory_ttl_days" type="number" min="1" max="90" label="记忆保存时间" suffix="天" :disabled="!config.recognition_memory_enabled" /></VCol>
+              </VRow>
+            </div>
+          </VCol>
+        </VRow>
+      </VCardText>
+    </VCard>
+
+    <VCard v-if="!tmdbFirstMode" variant="outlined" class="setting-card mt-4">
       <VCardItem>
         <template #prepend><VIcon icon="mdi-scale-balance" color="secondary" /></template>
         <VCardTitle>评分权重</VCardTitle>
@@ -187,4 +220,6 @@ function applyBalancedPreset() {
 .slider-label strong { color: rgb(var(--v-theme-primary)); font-variant-numeric: tabular-nums; }
 .weight-box { padding: 12px 14px; border-radius: 12px; background: rgba(var(--v-theme-primary), .045); }
 .web-fallback-box { padding: 14px; border: 1px solid rgba(var(--v-theme-warning), .22); border-radius: 14px; background: rgba(var(--v-theme-warning), .045); }
+.context-box { height: 100%; padding: 16px 18px; border: 1px solid rgba(var(--v-theme-primary), .12); border-radius: 14px; background: rgba(var(--v-theme-primary), .035); }
+.evidence-label { min-width: 64px; font-size: .8rem; color: rgba(var(--v-theme-on-surface), .68); }
 </style>
