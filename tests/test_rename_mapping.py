@@ -168,7 +168,19 @@ def test_release_group_arranger_supports_global_default_and_rule_override():
         },
     ], default_connector="&")
 
-    assert registry.apply("ADWeb+A+VCB")[0] == "A&VCB-Studio@ADWeb"
+    # 未指定单组连接符时优先继承标题原连接符。
+    assert registry.apply("A+VCB+ADWeb")[0] == "A+VCB-Studio@ADWeb"
+    # 原来位于第一位的组被移动后，继承标题中的第一个连接符。
+    assert registry.apply("VCB+A+ADWeb")[0] == "A+VCB-Studio@ADWeb"
+
+    override = module.ReleaseGroupArrangementRegistry()
+    override.refresh(registry.catalog()["items"], default_connector="&", normalize_unknown=True)
+    output, trace = override.apply("A+VCB+ADWeb")
+    # 开关只让默认值覆盖原连接符；ADWeb 的单组专属 @ 仍然优先。
+    assert output == "A&VCB-Studio@ADWeb"
+    assert [item["connector_source"] for item in trace["members"]] == [
+        "default_override", "default_override", "rule",
+    ]
 
     global_only = module.ReleaseGroupArrangementRegistry()
     global_only.refresh([], default_connector=".", normalize_unknown=True)

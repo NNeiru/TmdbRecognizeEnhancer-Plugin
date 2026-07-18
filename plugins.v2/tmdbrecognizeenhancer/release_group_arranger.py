@@ -14,7 +14,7 @@ class ReleaseGroupArrangementRegistry:
 
     _MAX_RULES = 300
     _POSITIONS = {"first", "keep", "last"}
-    _SPLIT_RE = re.compile(r"\s*[@&+]\s*")
+    _SPLIT_RE = re.compile(r"\s*([@&+])\s*")
     _INVALID_NAME_RE = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
     DEFAULT_CONNECTOR = "__default__"
 
@@ -184,29 +184,42 @@ class ReleaseGroupArrangementRegistry:
         with self._lock:
             alias_map = dict(self._alias_map)
             default_connector = self._default_connector
-            normalize_unknown = self._normalize_unknown
+            override_original_connector = self._normalize_unknown
             self._apply_count += 1
         empty_trace = {
             "applied": False, "input": raw, "output": raw,
             "members": [], "reason": "没有可处理的制作组",
         }
-        if not raw or (not alias_map and not normalize_unknown):
+        if not raw:
             return raw, empty_trace
 
         # A policy for the complete value wins over connector parsing. This keeps a
         # legitimate group whose official name contains '&' or '+' intact.
         whole_rule = alias_map.get(raw.casefold())
         if whole_rule:
-            parts = [raw]
+            parts = [(raw, "")]
         else:
-            parts = [part.strip() for part in self._SPLIT_RE.split(raw) if part.strip()]
+            tokens = self._SPLIT_RE.split(raw)
+            parts = []
+            first = str(tokens[0] or "").strip() if tokens else ""
+            if first:
+                # The first member has no leading connector while it remains first,
+                # but it still needs the title's first connector if a rule moves it.
+                # Example: VCB+A -> A+VCB, rather than falling back to a global '&'.
+                first_connector = str(tokens[1] or "").strip() if len(tokens) > 1 else ""
+                parts.append((first, first_connector))
+            for index in range(1, len(tokens), 2):
+                connector = str(tokens[index] or "").strip()
+                name = str(tokens[index + 1] or "").strip() if index + 1 < len(tokens) else ""
+                if name:
+                    parts.append((name, connector))
         if not parts:
             return raw, empty_trace
 
         members: List[Dict[str, Any]] = []
         matched = 0
         seen = set()
-        for index, part in enumerate(parts):
+        for index, (part, original_connector) in enumerate(parts):
             rule = alias_map.get(part.casefold())
             output_name = rule["output_name"] if rule else part
             dedupe_key = output_name.casefold()
@@ -215,25 +228,34 @@ class ReleaseGroupArrangementRegistry:
             seen.add(dedupe_key)
             if rule:
                 matched += 1
+            explicit_connector = (
+                rule.get("connector")
+                if rule and rule.get("connector") != self.DEFAULT_CONNECTOR else ""
+            )
+            if explicit_connector:
+                connector = explicit_connector
+                connector_source = "rule"
+            elif override_original_connector:
+                connector = default_connector
+                connector_source = "default_override"
+            elif original_connector:
+                connector = original_connector
+                connector_source = "original"
+            else:
+                connector = default_connector
+                connector_source = "default_fallback"
             members.append({
                 "input": part,
                 "output": output_name,
                 "position": rule["position"] if rule else "keep",
-                "connector": (
-                    default_connector
-                    if not rule or rule["connector"] == self.DEFAULT_CONNECTOR
-                    else rule["connector"]
-                ),
+                "connector": connector,
+                "connector_source": connector_source,
+                "original_connector": original_connector,
                 "order": rule["order"] if rule else 0,
                 "rule_id": rule["id"] if rule else "",
                 "rule_label": rule["label"] if rule else "未配置",
                 "source_index": index,
             })
-        if not matched and not normalize_unknown:
-            empty_trace["members"] = members
-            empty_trace["reason"] = "没有命中已启用的制作组编排规则"
-            return raw, empty_trace
-
         first = sorted(
             (item for item in members if item["position"] == "first"),
             key=lambda item: (item["order"], item["source_index"]),
@@ -258,7 +280,10 @@ class ReleaseGroupArrangementRegistry:
             "members": deepcopy(ordered),
             "reason": (
                 "已按制作组规则规范名称、顺序和连接符"
-                if matched else "已使用制作组默认连接符统一未配置组"
+                if matched else
+                "默认连接符已覆盖标题原连接符"
+                if override_original_connector and rendered != raw else
+                "未命中单组规则，已保留标题原连接符"
             ),
         }
         with self._lock:
