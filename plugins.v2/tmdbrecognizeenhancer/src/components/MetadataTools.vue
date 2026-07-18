@@ -479,8 +479,9 @@ onMounted(load)
       <VTabs v-model="renameRuleSection" color="secondary" class="sub-tabs mb-4">
         <VTab value="groups" prepend-icon="mdi-account-multiple-check-outline">制作组编排</VTab>
         <VTab value="text" prepend-icon="mdi-find-replace">文本映射</VTab>
+        <VTab value="defaults" prepend-icon="mdi-tune-variant">连接与分隔默认值</VTab>
       </VTabs>
-      <VCard variant="outlined" class="mb-4 naming-defaults-card"><VCardItem><VCardTitle>命名连接与分隔默认值</VCardTitle><VCardSubtitle>单组专属连接符 &gt; 标题原连接符 &gt; 全局默认连接符；下方开关决定是否跳过标题原连接符。</VCardSubtitle></VCardItem><VCardText>
+      <VCard v-if="renameRuleSection === 'defaults'" variant="outlined" class="mb-4 naming-defaults-card"><VCardItem><VCardTitle>命名连接与分隔默认值</VCardTitle><VCardSubtitle>单组专属连接符 &gt; 标题原连接符 &gt; 全局默认连接符；下方开关决定是否跳过标题原连接符。</VCardSubtitle></VCardItem><VCardText>
         <VAlert v-if="config.enabled && data.capabilities?.customization_separator === false" type="warning" variant="tonal" density="compact" class="mb-4">{{ data.capabilities?.customization_separator_message || '当前 MP 无法动态设置自定义占位符连接符。' }}</VAlert>
         <div class="naming-default-grid">
           <VCombobox v-model="config.rename_default_separator" label="字段空白分隔符" :items="separatorOptions" item-title="title" item-value="value" :return-object="false" clearable hint="留空关闭；例如 WEB DL → WEB.DL" persistent-hint />
@@ -516,7 +517,7 @@ onMounted(load)
         </VCardText></VCard>
       </div>
 
-      <div v-else>
+      <div v-else-if="renameRuleSection === 'text'">
         <div class="d-flex align-center flex-wrap ga-3 mb-4">
           <VAlert type="info" variant="tonal" density="compact" class="flex-grow-1 mb-0">无需判断标题、目录还是字幕。把 MP 的完整首次结果当作输入，例如 <code>AB/C.chi.zh-cn.ass</code>，规则连续执行后得到最终路径。</VAlert>
           <VBtn variant="tonal" color="secondary" prepend-icon="mdi-closed-caption-outline" @click="addSubtitleMappingPreset">添加简繁字幕预设</VBtn>
