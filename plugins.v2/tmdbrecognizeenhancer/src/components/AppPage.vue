@@ -138,8 +138,8 @@ onMounted(loadStatus)
       <div class="hero-content">
         <VAvatar size="54" color="white" variant="tonal"><VIcon icon="mdi-database-search-outline" size="30" /></VAvatar>
         <div>
-          <div class="text-h5 font-weight-bold hero-title">TMDB 识别增强</div>
-          <div class="text-body-2 hero-subtitle">增强 TMDB 搜索，并按维护规则完成动漫集数偏移</div>
+          <div class="text-h5 font-weight-bold hero-title">媒体整理增强</div>
+          <div class="text-body-2 hero-subtitle">统一增强媒体识别、集数、命名与整理诊断</div>
         </div>
         <VSpacer />
         <VChip :color="config.enabled ? 'success' : 'default'" variant="flat" prepend-icon="mdi-circle-medium">

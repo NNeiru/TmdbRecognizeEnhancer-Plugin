@@ -1,0 +1,13 @@
+
+.dashboard-card[data-v-eef1b7df] { height: 100%;
+}
+.dashboard-metrics[data-v-eef1b7df] { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+}
+.dashboard-metrics div[data-v-eef1b7df] { padding: 10px; border-radius: 10px; background: rgba(var(--v-theme-primary),.05);
+}
+.dashboard-metrics span[data-v-eef1b7df], .dashboard-metrics strong[data-v-eef1b7df] { display: block;
+}
+.dashboard-metrics span[data-v-eef1b7df] { font-size: .72rem; color: rgba(var(--v-theme-on-surface),.58);
+}
+.dashboard-metrics strong[data-v-eef1b7df] { margin-top: 3px; font-size: 1.15rem;
+}

@@ -41,12 +41,12 @@ from .runtime_adapter import (
 
 
 class TmdbRecognizeEnhancer(_PluginBase):
-    """提供可解释的 TMDB 候选选择与目标编集季集归一化。"""
+    """增强 MoviePilot 的媒体识别、季集归一化与最终命名链。"""
 
-    plugin_name = "TMDB 识别增强"
-    plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
+    plugin_name = "媒体整理增强"
+    plugin_desc = "增强媒体识别、集数归一化、命名字段、制作组编排、二次重命名与运行诊断。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.0-beta.16"
+    plugin_version = "0.5.0"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -212,7 +212,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return []
         return [{
             "nav_key": "main",
-            "title": "TMDB 识别增强",
+            "title": "媒体整理增强",
             "icon": "mdi-database-search-outline",
             "section": "organize",
             "permission": "manage",
@@ -223,7 +223,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """启用时提供一个识别决策摘要仪表板组件。"""
         if not self.get_state():
             return []
-        return [{"key": "recognize", "name": "TMDB 识别增强"}]
+        return [{"key": "recognize", "name": "媒体整理增强"}]
 
     def get_dashboard(
             self,
@@ -236,8 +236,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return (
             {"cols": 12, "sm": 6, "md": 4},
             {
-                "title": "TMDB 识别增强",
-                "subtitle": "候选选择运行摘要",
+                "title": "媒体整理增强",
+                "subtitle": "整理链运行摘要",
                 "refresh": 30,
                 "border": True,
             },
@@ -252,14 +252,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "endpoint": self.get_status,
                 "methods": ["GET"],
                 "auth": "bear",
-                "summary": "获取 TMDB 识别增强状态",
+                "summary": "获取媒体整理增强状态",
             },
             {
                 "path": "/config",
                 "endpoint": self.save_config_api,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "保存 TMDB 识别增强配置",
+                "summary": "保存媒体整理增强配置",
             },
             {
                 "path": "/preview",

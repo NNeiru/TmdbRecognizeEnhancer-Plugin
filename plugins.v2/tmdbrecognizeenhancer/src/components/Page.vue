@@ -11,7 +11,7 @@ const pageRef = ref(null)
   <div class="plugin-page">
     <VToolbar density="comfortable" class="toolbar">
       <VIcon icon="mdi-database-search-outline" color="primary" class="ms-3" />
-      <div class="text-subtitle-1 font-weight-bold ms-3">TMDB 识别增强</div>
+      <div class="text-subtitle-1 font-weight-bold ms-3">媒体整理增强</div>
       <VSpacer />
       <VBtn icon="mdi-refresh" variant="text" :loading="pageRef?.loading" @click="pageRef?.loadStatus()" />
       <VBtn icon="mdi-content-save" variant="text" color="primary" :loading="pageRef?.saving" @click="pageRef?.saveConfig()" />

@@ -28,8 +28,8 @@ onMounted(async () => {
         <VIcon icon="mdi-database-search-outline" size="20" />
       </VAvatar>
       <div class="ms-3">
-        <div class="text-subtitle-1 font-weight-bold">TMDB 识别增强</div>
-        <div class="text-caption text-medium-emphasis">候选选择策略</div>
+        <div class="text-subtitle-1 font-weight-bold">媒体整理增强</div>
+        <div class="text-caption text-medium-emphasis">整理链与命名策略</div>
       </div>
       <VSpacer />
       <VBtn icon="mdi-content-save" variant="text" color="primary" @click="emit('save', cloneConfig(config))" />

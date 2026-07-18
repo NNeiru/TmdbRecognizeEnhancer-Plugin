@@ -29,7 +29,7 @@ onMounted(loadStatus)
   <VCard :loading="loading" :flat="attrs.border === false" class="dashboard-card">
     <VCardItem>
       <template #prepend><VAvatar color="primary" variant="tonal"><VIcon icon="mdi-database-search-outline" /></VAvatar></template>
-      <VCardTitle>{{ attrs.title || 'TMDB 识别增强' }}</VCardTitle>
+      <VCardTitle>{{ attrs.title || '媒体整理增强' }}</VCardTitle>
       <VCardSubtitle>{{ summary.enabled ? '插件总开关已开启' : '插件当前未启用' }}</VCardSubtitle>
     </VCardItem>
     <VCardText>
