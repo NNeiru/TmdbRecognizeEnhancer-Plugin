@@ -12,7 +12,7 @@ const emit = defineEmits(['update:modelValue', 'save-config'])
 const loading = ref(false)
 const saving = ref('')
 const error = ref('')
-const data = ref({ release_groups: { items: [] }, recognition_rules: { items: [], fields: [], overrides: [] }, capabilities: {} })
+const data = ref({ release_groups: { items: [] }, recognition_rules: { items: [], fields: [], overrides: [] }, rename_fields: { builtin: [], context: [], custom: [] }, capabilities: {} })
 const section = ref('rules')
 const search = ref('')
 const field = ref('all')
@@ -23,6 +23,16 @@ const dialog = ref(false)
 const form = ref({ id: '', source_rule_id: '', field: 'videoBit', pattern: '', value: '{match}', action: 'override', enabled: true, priority: 100, label: '' })
 const previewTitle = ref('[Group] Example.S01E01.1080p.WEB-DL.H265.10bit.AAC.mkv')
 const preview = ref(null)
+const renameDialog = ref(false)
+const renameForm = ref({ original_key: '', key: '', label: '', expression: '', fallback: '', enabled: true })
+const renamePreviewing = ref(false)
+const renamePreview = ref(null)
+const renamePreviewInput = ref({
+  original_name: '[Group] Example.S01E01.1080p.WEB-DL.mkv',
+  type: '电视剧', category: '动漫',
+  source_path: '/downloads/anime/Example.S01E01.mkv',
+  target_dir: '/media/TV/动漫',
+})
 
 const pluginBase = computed(() => `plugin/${props.pluginId || 'TmdbRecognizeEnhancer'}`)
 const config = computed({ get: () => props.modelValue || {}, set: value => emit('update:modelValue', value) })
@@ -61,6 +71,12 @@ const groupPageCount = computed(() => Math.max(1, Math.ceil(groups.value.length 
 const pagedGroups = computed(() => groups.value.slice((page.value - 1) * pageSize, page.value * pageSize))
 const kindLabel = value => ({ animation: '动漫', live_action: '真人电视剧', unknown: '未分类' })[value] || '未分类'
 const kindColor = value => ({ animation: 'primary', live_action: 'orange', unknown: 'default' })[value] || 'default'
+const customFields = computed(() => data.value.rename_fields?.custom || [])
+const availableRenameFields = computed(() => [
+  ...(data.value.rename_fields?.builtin || []),
+  ...(data.value.rename_fields?.context || []),
+  ...customFields.value.map(item => ({ ...item, category: '用户自定义', description: item.expression })),
+])
 
 watch([search, field, source, groupKind, section], () => { page.value = 1 })
 
@@ -132,6 +148,57 @@ async function previewRules() {
   finally { saving.value = '' }
 }
 
+function openRenameField(item = null) {
+  renameForm.value = item ? {
+    original_key: item.key, key: item.key, label: item.label || item.key,
+    expression: item.expression || '', fallback: item.fallback || '', enabled: item.enabled !== false,
+  } : {
+    original_key: '', key: '', label: '',
+    expression: "{% if 'CHS&CHT' in original_name %}简繁{% elif 'CHS' in original_name %}简中{% else %}未知{% endif %}",
+    fallback: '', enabled: true,
+  }
+  renameDialog.value = true
+}
+
+async function saveRenameField() {
+  saving.value = 'rename-field'
+  error.value = ''
+  try {
+    data.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/rename-field`, renameForm.value)) || data.value
+    renameDialog.value = false
+  } catch (err) { error.value = explainError(err, '自定义字段保存失败') }
+  finally { saving.value = '' }
+}
+
+async function deleteRenameField(item) {
+  saving.value = `rename-delete:${item.key}`
+  error.value = ''
+  try {
+    data.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/rename-field/delete`, { key: item.key })) || data.value
+  } catch (err) { error.value = explainError(err, '自定义字段删除失败') }
+  finally { saving.value = '' }
+}
+
+async function previewRenameFields() {
+  renamePreviewing.value = true
+  renamePreview.value = null
+  error.value = ''
+  try {
+    const input = renamePreviewInput.value
+    renamePreview.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/rename-field/preview`, {
+      context: { original_name: input.original_name, type: input.type, category: input.category },
+      source_path: input.source_path,
+      target_dir: input.target_dir,
+      rendered_relative_path: '示例/首次渲染.mkv',
+    }))
+  } catch (err) { error.value = explainError(err, '自定义字段试算失败') }
+  finally { renamePreviewing.value = false }
+}
+
+async function copyVariable(key) {
+  try { await navigator.clipboard.writeText(`{{ ${key} }}`) } catch (_) { /* 浏览器拒绝剪贴板时不影响编辑 */ }
+}
+
 onMounted(load)
 </script>
 
@@ -145,10 +212,11 @@ onMounted(load)
     <VCard variant="outlined" class="mb-4"><VCardText class="d-flex align-center flex-wrap ga-6">
       <VSwitch v-model="config.recognition_rule_overrides_enabled" color="primary" label="启用识别字段覆盖" hide-details />
       <VSwitch v-model="config.release_group_assist_enabled" color="success" label="制作组辅助 TMDB 判断" hide-details />
+      <VSwitch v-model="config.custom_rename_fields_enabled" color="secondary" label="启用自定义命名字段" hide-details />
       <VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存模块开关</VBtn>
     </VCardText></VCard>
     <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-      MP 的技术字段规则分散在 Python 与 Rust 中，没有统一可写接口。这里展示原规则，编辑后在 MP 解析完成、进入识别链前覆盖字段值；“恢复内置”即可撤销。独立自定义重命名字段暂未启用。
+      内置字段覆盖作用于 MP 解析结果；自定义命名字段则在文件整理的 Jinja2 渲染上下文中新增变量，不修改 MP/Rust 文件，也不会覆盖同名内置字段。
     </VAlert>
     <VAlert v-if="data.recognition_rules?.errors?.length" type="warning" variant="tonal" density="compact" class="mb-4">
       部分规则读取失败：{{ data.recognition_rules.errors.join('；') }}
@@ -157,6 +225,7 @@ onMounted(load)
     <VTabs v-model="section" color="primary" class="mb-4">
       <VTab value="rules" prepend-icon="mdi-text-box-search-outline">内置识别字段</VTab>
       <VTab value="groups" prepend-icon="mdi-account-group-outline">制作组类型</VTab>
+      <VTab value="rename" prepend-icon="mdi-code-braces">自定义命名字段</VTab>
       <VTab value="test" prepend-icon="mdi-flask-outline">覆盖试算</VTab>
     </VTabs>
 
@@ -188,6 +257,37 @@ onMounted(load)
       <VPagination v-if="groupPageCount > 1" v-model="page" :length="groupPageCount" :total-visible="7" class="mt-3" />
     </section>
 
+    <section v-else-if="section === 'rename'">
+      <div class="d-flex align-center flex-wrap ga-3 mb-4">
+        <div class="flex-grow-1"><div class="text-h6">Jinja2 自定义字段</div><div class="text-body-2 text-medium-emphasis">保存后可在 MP 命名模板中直接使用 <code v-pre>{{ your_field }}</code>；固定文字可直接填写，条件与组合可使用 Jinja2。</div></div>
+        <VBtn color="primary" prepend-icon="mdi-plus" @click="openRenameField()">新增字段</VBtn>
+      </div>
+      <VAlert v-if="!data.capabilities?.custom_independent_field" type="warning" variant="tonal" class="mb-4">当前 MP 不支持渲染前上下文事件，无法注入自定义字段。请更新 MoviePilot。</VAlert>
+      <VRow>
+        <VCol cols="12" lg="7">
+          <VCard variant="outlined" class="h-100"><VCardItem><VCardTitle>已定义字段</VCardTitle><VCardSubtitle>{{ customFields.length }} 个字段 · 支持字段间依赖</VCardSubtitle></VCardItem><VCardText>
+            <div v-if="customFields.length" class="custom-field-list">
+              <div v-for="item in customFields" :key="item.key" class="custom-field-row">
+                <div class="flex-grow-1 min-w-0"><div class="d-flex align-center ga-2"><code>{{ item.key }}</code><VChip size="x-small" :color="item.enabled ? 'success' : 'default'" variant="tonal">{{ item.enabled ? '启用' : '停用' }}</VChip></div><div class="font-weight-medium mt-1">{{ item.label || item.key }}</div><div class="rule-pattern text-truncate" :title="item.expression">{{ item.expression }}</div><div v-if="item.dependencies?.length" class="text-caption text-medium-emphasis">依赖：{{ item.dependencies.join('、') }}</div></div>
+                <VBtn icon="mdi-content-copy" size="small" variant="text" title="复制模板变量" @click="copyVariable(item.key)" /><VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openRenameField(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `rename-delete:${item.key}`" @click="deleteRenameField(item)" />
+              </div>
+            </div>
+            <div v-else class="empty-fields"><VIcon icon="mdi-code-braces" size="48" /><div class="mt-2">尚未定义自定义字段</div></div>
+          </VCardText></VCard>
+        </VCol>
+        <VCol cols="12" lg="5">
+          <VCard variant="outlined"><VCardItem><VCardTitle>上下文试算</VCardTitle><VCardSubtitle>验证字段输出，不执行文件整理</VCardSubtitle></VCardItem><VCardText>
+            <VTextarea v-model="renamePreviewInput.original_name" label="原标题 original_name" rows="2" />
+            <VRow dense><VCol cols="6"><VTextField v-model="renamePreviewInput.type" label="媒体类型 type" /></VCol><VCol cols="6"><VTextField v-model="renamePreviewInput.category" label="二级分类 category" /></VCol></VRow>
+            <VTextField v-model="renamePreviewInput.source_path" label="源路径 source_path" /><VTextField v-model="renamePreviewInput.target_dir" label="目标根目录 target_dir" />
+            <VBtn block color="secondary" prepend-icon="mdi-play" :loading="renamePreviewing" @click="previewRenameFields">试算全部字段</VBtn>
+            <div v-if="renamePreview" class="preview-output mt-4"><div v-for="(value, key) in renamePreview.values" :key="key" class="d-flex justify-space-between ga-3"><code>{{ key }}</code><span class="text-right text-break">{{ value || '（空）' }}</span></div><VAlert v-if="renamePreview.errors?.length" type="warning" variant="tonal" density="compact" class="mt-3">{{ renamePreview.errors.map(item => `${item.key}: ${item.message}`).join('；') }}</VAlert></div>
+          </VCardText></VCard>
+        </VCol>
+      </VRow>
+      <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>可用输入字段</VCardTitle><VCardSubtitle>点击变量可复制到剪贴板；type 是电影/电视剧，category 是 MP 二级分类。</VCardSubtitle></VCardItem><VCardText><div class="variable-groups"><div v-for="categoryName in [...new Set(availableRenameFields.map(item => item.category))]" :key="categoryName" class="variable-group"><div class="text-caption font-weight-bold mb-2">{{ categoryName }}</div><div class="d-flex flex-wrap ga-2"><VChip v-for="item in availableRenameFields.filter(value => value.category === categoryName)" :key="item.key" size="small" variant="tonal" :title="item.description" @click="copyVariable(item.key)">{{ item.key }}</VChip></div></div></div></VCardText></VCard>
+    </section>
+
     <section v-else>
       <VCard variant="outlined"><VCardItem><VCardTitle>覆盖层试算</VCardTitle><VCardSubtitle>只运行已保存的插件覆盖规则，不请求 TMDB，也不写整理链。</VCardSubtitle></VCardItem><VCardText>
         <VTextarea v-model="previewTitle" label="原标题" rows="3" auto-grow /><VBtn color="primary" prepend-icon="mdi-play" :loading="saving === 'preview'" @click="previewRules">开始试算</VBtn>
@@ -217,6 +317,16 @@ onMounted(load)
         <VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="dialog = false">取消</VBtn><VBtn color="primary" :loading="saving === 'rule'" @click="saveRule">保存覆盖</VBtn></VCardActions>
       </VCard>
     </VDialog>
+
+    <VDialog v-model="renameDialog" max-width="820">
+      <VCard><VCardItem><VCardTitle>{{ renameForm.original_key ? '编辑自定义命名字段' : '新增自定义命名字段' }}</VCardTitle><VCardSubtitle>字段会作为独立变量加入 MP 的 Jinja2 命名上下文，不覆盖原有字段。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
+        <VRow><VCol cols="12" sm="5"><VTextField v-model="renameForm.key" label="字段名" :disabled="!!renameForm.original_key" hint="保存后字段名固定，避免破坏其它字段依赖" persistent-hint /></VCol><VCol cols="12" sm="7"><VTextField v-model="renameForm.label" label="显示名称" /></VCol></VRow>
+        <VTextarea v-model="renameForm.expression" label="字段内容 / Jinja2 表达式" rows="6" auto-grow hint="固定内容直接填写；组合使用 {{ title }}；条件可使用 {% if ... %}...{% endif %}" persistent-hint />
+        <VTextField v-model="renameForm.fallback" label="计算失败时的回退值" clearable />
+        <div class="rule-enabled-box"><div><div class="font-weight-medium">启用字段</div><div class="text-caption text-medium-emphasis">停用后变量不会注入命名模板</div></div><VSwitch v-model="renameForm.enabled" color="success" hide-details /></div>
+        <VAlert type="info" variant="tonal" density="compact">MP 命名模板中使用：<code v-pre>{{ 字段名 }}</code>。目标目录字段在初次渲染后补算，并由插件用同一模板安全重渲染一次。</VAlert>
+      </VCardText><VDivider /><VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="renameDialog = false">取消</VBtn><VBtn color="primary" :loading="saving === 'rename-field'" @click="saveRenameField">保存字段</VBtn></VCardActions></VCard>
+    </VDialog>
   </div>
 </template>
 
@@ -230,6 +340,12 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .rule-dialog-body :deep(.v-row) { margin-top: -8px; margin-bottom: -8px; }
 .rule-enabled-box { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 7px 14px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
 .rule-dialog-actions { padding: 14px 20px; }
+.custom-field-list { display: grid; gap: 10px; }
+.custom-field-row { display: flex; align-items: center; gap: 8px; padding: 13px 14px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; }
+.empty-fields { min-height: 230px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: rgba(var(--v-theme-on-surface), .5); }
+.preview-output { display: grid; gap: 8px; padding: 12px 14px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .055); }
+.variable-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 18px; }
+.variable-group { min-width: 0; }
 @media (max-width: 900px) { .filter-row { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 600px) { .filter-row { grid-template-columns: 1fr; } }
 </style>

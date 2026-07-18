@@ -205,6 +205,10 @@ onMounted(loadStatus)
                   <VCardItem><template #prepend><VAvatar color="success" variant="tonal"><VIcon icon="mdi-text-box-edit-outline" /></VAvatar></template><VCardTitle>识别字段覆盖</VCardTitle><VCardSubtitle>{{ modules.recognition_rules?.status || '状态未知' }}</VCardSubtitle></VCardItem>
                   <VCardText><VSwitch v-model="config.recognition_rule_overrides_enabled" color="success" label="启用模块" hide-details /><div class="status-line"><span>内置规则目录</span><strong>{{ modules.recognition_rules?.catalog_rules || 0 }} 条</strong></div><div class="status-line"><span>已启用覆盖</span><strong>{{ modules.recognition_rules?.compiled_rules || 0 }} 条</strong></div></VCardText>
                 </VCard>
+                <VCard variant="outlined" class="module-card">
+                  <VCardItem><template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-code-braces" /></VAvatar></template><VCardTitle>自定义命名字段</VCardTitle><VCardSubtitle>{{ modules.rename_fields?.status || '状态未知' }}</VCardSubtitle></VCardItem>
+                  <VCardText><VSwitch v-model="config.custom_rename_fields_enabled" color="secondary" label="启用模块" hide-details /><div class="status-line"><span>独立字段</span><strong>{{ modules.rename_fields?.field_count || 0 }} 个</strong></div><div class="status-line"><span>作用阶段</span><strong>Jinja2 命名渲染</strong></div></VCardText>
+                </VCard>
               </div>
             </div>
           </section>

@@ -15,6 +15,8 @@ def _load_plugin(monkeypatch):
 
     class ChainEventType(Enum):
         NameRecognize = "NameRecognize"
+        TransferRenameBuild = "TransferRenameBuild"
+        TransferRename = "TransferRename"
 
     class PluginBase:
         def __init__(self):
@@ -204,6 +206,69 @@ def test_recognition_memory_counts_distinct_files_and_expires(monkeypatch):
     assert evidence["active"] is True
     assert evidence["hits"] == 2
     assert plugin._recognition_memory_summary()["sample_count"] == 2
+
+
+def test_custom_rename_field_uses_mp_and_source_context(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "enabled": True, "custom_rename_fields_enabled": True,
+    })
+    plugin._custom_rename_fields = ({
+        "key": "library_kind", "label": "媒体库分类",
+        "expression": "{{ type }}/{{ category }}/{{ source_dir.split('/')[-1] }}",
+        "fallback": "未知", "enabled": True, "dependencies": ["type", "category", "source_dir"],
+    },)
+    plugin._rename_fields.evaluate = Mock(side_effect=lambda fields, context: ({
+        "library_kind": f"{context['type']}/{context['category']}/{context['source_dir'].replace(chr(92), '/').split('/')[-1]}"
+    }, []))
+    rename_dict = {
+        "title": "示例动画", "type": "电视剧", "category": "动漫",
+        "original_name": "Example.S01E01.mkv", "fileExt": ".mkv",
+    }
+    data = SimpleNamespace(
+        rename_dict=rename_dict,
+        source_path="/downloads/season/Example.S01E01.mkv",
+        source_item=SimpleNamespace(
+            path="/downloads/season/Example.S01E01.mkv", name="Example.S01E01.mkv",
+            extension="mkv", storage="local", type="file", size=1024,
+        ),
+    )
+
+    plugin.on_transfer_rename_build(SimpleNamespace(event_data=data))
+
+    assert rename_dict["source_dir"].replace("\\", "/") == "/downloads/season"
+    assert rename_dict["source_storage"] == "local"
+    assert rename_dict["library_kind"] == "电视剧/动漫/season"
+
+
+def test_target_directory_field_is_rendered_in_second_phase(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "enabled": True, "custom_rename_fields_enabled": True,
+    })
+    plugin._custom_rename_fields = ({
+        "key": "target_label", "label": "目标标签",
+        "expression": "{% if '/anime' in target_dir %}Anime{% else %}Other{% endif %}",
+        "fallback": "Other", "enabled": True, "dependencies": ["target_dir"],
+    },)
+    plugin._rename_fields.evaluate = Mock(return_value=({"target_label": "Anime"}, []))
+    plugin._rename_fields.render_template = Mock(return_value="Example/Anime.mkv")
+    data = SimpleNamespace(
+        template_string="{{ title }}/{{ target_label }}{{ fileExt }}",
+        rename_dict={"title": "Example", "fileExt": ".mkv"},
+        render_str="Example/.mkv", path="/media/anime",
+        source_path="/downloads/Example.mkv", source_item=None,
+        updated=False, updated_str=None, source=None,
+    )
+
+    plugin.on_transfer_rename(SimpleNamespace(event_data=data))
+
+    assert data.rename_dict["target_dir"] == "/media/anime"
+    assert data.rename_dict["target_label"] == "Anime"
+    assert data.updated is True
+    assert data.updated_str == "Example/Anime.mkv"
 
 
 def test_runtime_original_name_is_forwarded_as_anchor_evidence(monkeypatch):

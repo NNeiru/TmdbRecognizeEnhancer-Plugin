@@ -220,7 +220,22 @@ class RenameFieldRegistry:
         ("total_size", "整理总大小", "整理结果", "整理文件总大小"),
         ("err_msg", "错误信息", "整理结果", "整理失败信息"),
     )
+    CONTEXT_FIELDS: Tuple[Tuple[str, str, str, str], ...] = (
+        ("source_path", "源文件完整路径", "源文件上下文", "待整理文件或目录的完整源路径"),
+        ("source_dir", "源文件所在目录", "源文件上下文", "源文件父目录；目录资源则为其上级目录"),
+        ("source_name", "源文件名", "源文件上下文", "包含扩展名的源文件名"),
+        ("source_stem", "源文件主名", "源文件上下文", "不包含扩展名的源文件名"),
+        ("source_ext", "源文件扩展名", "源文件上下文", "例如 .mkv"),
+        ("source_storage", "源存储名称", "源文件上下文", "MoviePilot FileItem 的存储标识"),
+        ("source_item_type", "源项目类型", "源文件上下文", "file 或 dir"),
+        ("source_size", "源文件大小", "源文件上下文", "字节数；不可用时为 0"),
+        ("target_dir", "目标根目录", "目标目录上下文", "分类完成后、套用命名模板前的目标目录"),
+        ("rendered_relative_path", "初次渲染相对路径", "目标目录上下文", "自定义目标字段补算前的模板渲染结果"),
+        ("target_path_before_custom", "初次渲染目标路径", "目标目录上下文", "目标根目录与初次渲染结果组合后的路径"),
+    )
+    TARGET_CONTEXT_KEYS = {"target_dir", "rendered_relative_path", "target_path_before_custom"}
     _builtin_keys = {item[0] for item in BUILTIN_FIELDS}
+    _context_keys = {item[0] for item in CONTEXT_FIELDS}
 
     @classmethod
     def _get_environment(cls):
@@ -244,6 +259,14 @@ class RenameFieldRegistry:
         ]
 
     @classmethod
+    def context_catalog(cls) -> List[Dict[str, str]]:
+        """返回插件在重命名事件中补充的源文件与目标目录字段。"""
+        return [
+            {"key": key, "label": label, "category": category, "description": description}
+            for key, label, category, description in cls.CONTEXT_FIELDS
+        ]
+
+    @classmethod
     def normalize_fields(cls, value: Any) -> List[Dict[str, Any]]:
         """校验自定义字段，解析依赖并按可计算顺序排序。"""
         if not isinstance(value, list):
@@ -259,7 +282,7 @@ class RenameFieldRegistry:
             key = str(raw.get("key") or "").strip()
             if not cls._key_pattern.fullmatch(key):
                 raise ValueError(f"字段名 {key or '<空>'} 不合法")
-            if key in cls._builtin_keys or key.startswith("__"):
+            if key in cls._builtin_keys or key in cls._context_keys or key.startswith("__"):
                 raise ValueError(f"字段 {key} 是 MP 保留字段，第一版不允许覆盖")
             expression = str(raw.get("expression") or "").strip()
             if not expression:
@@ -282,6 +305,13 @@ class RenameFieldRegistry:
             }
 
         custom_keys = set(fields)
+        allowed_dependencies = cls._builtin_keys | cls._context_keys | custom_keys | set(environment.globals)
+        for field in fields.values():
+            unknown = sorted(set(field["dependencies"]) - allowed_dependencies)
+            if unknown:
+                raise ValueError(
+                    f"字段 {field['key']} 引用了不存在的变量：{'、'.join(unknown)}"
+                )
         ordered: List[Dict[str, Any]] = []
         visiting: set = set()
         visited: set = set()
@@ -302,6 +332,23 @@ class RenameFieldRegistry:
         for field_key in fields:
             visit(field_key)
         return ordered
+
+    @classmethod
+    def split_by_target_dependency(
+            cls, fields: Iterable[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """把可预渲染字段与依赖目标目录的字段分开，并传播自定义字段依赖。"""
+        independent: List[Dict[str, Any]] = []
+        target_dependent: List[Dict[str, Any]] = []
+        target_keys = set(cls.TARGET_CONTEXT_KEYS)
+        for field in fields:
+            dependencies = set(field.get("dependencies") or [])
+            if dependencies & target_keys:
+                target_dependent.append(field)
+                target_keys.add(field["key"])
+            else:
+                independent.append(field)
+        return independent, target_dependent
 
     @classmethod
     def evaluate(
@@ -331,3 +378,9 @@ class RenameFieldRegistry:
                 errors.append({"key": key, "message": str(err)})
             output[key] = value
         return output, errors
+
+    @staticmethod
+    def render_template(template_string: str, context: Dict[str, Any]) -> str:
+        """使用 MP 同款 Jinja2 Template 对补齐字段后的命名模板重新渲染。"""
+        from jinja2 import Template
+        return Template(template_string).render(context)

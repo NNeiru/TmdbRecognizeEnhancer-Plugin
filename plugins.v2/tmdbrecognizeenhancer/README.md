@@ -22,10 +22,11 @@
 
 - 自动读取 MoviePilot 当前进程实际加载的制作组、流媒体平台和技术参数正则。
 - 支持查看和搜索 `releaseGroup`、`resourceType`、`effect`、`videoFormat`、`videoCodec`、`videoBit`、`audioCodec`、`fps`、`webSource`、`customization`、季集和段号规则。
+- 支持新增独立 Jinja2 命名字段，可组合 MP 内置字段、源文件路径/目录与目标根目录，并在 MP 命名模板中通过 `{{ field_name }}` 使用。
 - 编辑内置规则时保存为插件覆盖层，在 MP 解析完成、进入识别链前校正 MetaBase；不写 MP/Rust 文件，可随时恢复内置值。
 - 每条制作组规则可设置为动漫、真人电视剧或未分类；未分类不会参与 TMDB 判断。
 - 评分模式把制作组与 TMDB Animation 题材的一致性计入得分；单次首结果模式仅在已有一致候选时稳定优先该候选。
-- 独立、自带表项的新重命名字段尚未开放；旧版表达式拼接方案已撤下。
+- 自定义字段使用沙箱化 Jinja2 计算，支持字段间依赖和失败回退；依赖目标目录的字段会在 MP 初次渲染后补齐上下文并安全重渲染一次。
 
 ## 性能诊断
 
