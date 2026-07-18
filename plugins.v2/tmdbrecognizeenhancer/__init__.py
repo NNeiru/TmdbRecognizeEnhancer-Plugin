@@ -46,7 +46,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.0-beta.10"
+    plugin_version = "0.5.0-beta.11"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -116,7 +116,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "rename_separator_fields": [],
         "customization_separator": "@",
         "release_group_default_connector": "@",
-        "release_group_normalize_unknown_connectors": False,
     }
 
     RENAME_SEPARATOR_FIELDS = {
@@ -745,7 +744,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._release_group_arrangements.refresh(
             normalized,
             self._config.get("release_group_default_connector"),
-            self._config.get("release_group_normalize_unknown_connectors"),
         )
         return self.get_metadata_tools_api()
 
@@ -760,7 +758,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._release_group_arrangements.refresh(
             rules,
             self._config.get("release_group_default_connector"),
-            self._config.get("release_group_normalize_unknown_connectors"),
         )
         return self.get_metadata_tools_api()
 
@@ -2058,7 +2055,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._release_group_arrangements.refresh(
             self._read_release_group_arrangements(),
             self._config.get("release_group_default_connector"),
-            self._config.get("release_group_normalize_unknown_connectors"),
         )
         self._rename_mappings.refresh(self._read_rename_mappings())
 
@@ -3683,7 +3679,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "release_group_assist_enabled", "recognition_rule_overrides_enabled",
             "seasonal_evidence_enabled", "recognition_memory_enabled",
             "custom_rename_fields_enabled", "rename_mapping_enabled",
-            "release_group_normalize_unknown_connectors",
         )
         for key in bool_keys:
             merged[key] = bool(merged.get(key))

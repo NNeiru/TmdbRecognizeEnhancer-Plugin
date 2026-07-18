@@ -121,7 +121,7 @@ def test_release_group_arranger_controls_alias_order_and_connector():
     assert [item["output"] for item in trace["members"]] == ["A", "VCB-Studio", "ADWeb"]
 
 
-def test_release_group_arranger_keeps_complete_ampersand_group_and_unknown_input():
+def test_release_group_arranger_keeps_configured_complete_group_and_normalizes_unknown_input():
     module = _load_file("test_release_group_arranger_whole", "release_group_arranger.py")
     registry = module.ReleaseGroupArrangementRegistry()
     registry.refresh([
@@ -137,8 +137,8 @@ def test_release_group_arranger_keeps_complete_ampersand_group_and_unknown_input
 
     assert registry.apply("A&B")[0] == "A&B"
     output, trace = registry.apply("Unknown&Other")
-    assert output == "Unknown&Other"
-    assert trace["applied"] is False
+    assert output == "Unknown@Other"
+    assert trace["applied"] is True
 
 
 def test_release_group_arranger_supports_space_connector_and_deduplication():
@@ -171,7 +171,7 @@ def test_release_group_arranger_supports_global_default_and_rule_override():
     assert registry.apply("ADWeb+A+VCB")[0] == "A&VCB-Studio@ADWeb"
 
     global_only = module.ReleaseGroupArrangementRegistry()
-    global_only.refresh([], default_connector=".", normalize_unknown=True)
+    global_only.refresh([], default_connector=".")
     output, trace = global_only.apply("A&B+C")
     assert output == "A.B.C"
     assert trace["applied"] is True

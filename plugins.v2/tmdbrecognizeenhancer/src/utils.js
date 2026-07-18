@@ -48,7 +48,6 @@ export const DEFAULT_CONFIG = {
   rename_separator_fields: [],
   customization_separator: '@',
   release_group_default_connector: '@',
-  release_group_normalize_unknown_connectors: false,
 }
 
 export const UI_VERSION = __TMDB_ENHANCER_UI_VERSION__
