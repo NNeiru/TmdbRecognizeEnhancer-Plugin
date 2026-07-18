@@ -151,6 +151,45 @@ def test_federation_path_is_versioned(monkeypatch):
     assert dist_path.endswith("/assets")
 
 
+def test_transfer_complete_queues_only_the_applied_episode_group(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "episode_normalizer_enabled": True,
+        "emby_episode_group_sync_enabled": True,
+        "emby_episode_group_sync_initial_delay_seconds": 0,
+    })
+    plugin._emby_sync_active = Mock(return_value=True)
+    plugin.save_data(plugin.DATA_KEY_EPISODE_RULES, [{
+        "tmdb_id": 223564,
+        "title": "Anime",
+        "enabled": True,
+        "target_type": "group",
+        "episode_group_id": "production-group",
+        "installments": [],
+    }])
+    event = SimpleNamespace(event_data={
+        "meta": SimpleNamespace(episode_group="production-group"),
+        "mediainfo": SimpleNamespace(
+            tmdb_id=223564, type=module.MediaType.TV, title="Anime", year="2026",
+            episode_group="production-group",
+        ),
+        "transferinfo": SimpleNamespace(
+            target_item=SimpleNamespace(path="/media/TV/Anime/Season 03/E01.mkv"),
+            target_diritem=SimpleNamespace(path="/media/TV/Anime"),
+        ),
+    })
+
+    plugin.on_transfer_complete(event)
+
+    jobs = plugin.get_data(plugin.DATA_KEY_EMBY_EPISODE_GROUP_JOBS)
+    assert len(jobs) == 1
+    assert jobs[0]["tmdb_id"] == 223564
+    assert jobs[0]["episode_group_id"] == "production-group"
+    assert jobs[0]["target_path"].endswith("Season 03/E01.mkv")
+
+
 def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
     module = _load_plugin(monkeypatch)
 
@@ -721,19 +760,63 @@ def test_comprehensive_preview_includes_group_arrangement_and_final_naming(monke
         {"stage": "final_result", "pattern": "AB/C", "replacement": "ABC", "priority": 120},
         {"stage": "final_result", "pattern": ".chi.zh-cn", "replacement": ".chs", "priority": 110},
     ])
+    plugin._preview_final_name = Mock(return_value={
+        "available": True,
+        "output": "ABC.chs.ass",
+        "reason": "已按 MoviePilot 当前命名模板生成",
+        "template_source": "MoviePilot 当前命名模板",
+    })
 
     response = plugin.preview_api({
         "title": "[A@VCB] Example S01E02.ass",
-        "rendered_path": "AB/C.chi.zh-cn.ass",
     })
 
     assert response.success is True
     assert response.data["release_group_arrangement"]["output"] == "A&VCB-Studio"
     assert response.data["final_naming"]["output"] == "ABC.chs.ass"
-    assert response.data["final_naming"]["exact_input"] is True
-    assert [step["module"] for step in response.data["pipeline"]][-3:] == [
-        "制作组命名编排", "自定义命名字段", "最终命名二次渲染",
+    assert [step["module"] for step in response.data["pipeline"]][-4:] == [
+        "制作组命名编排", "自定义命名字段", "MoviePilot 模板与最终命名",
+        "Emby 剧集组联动（入库后）",
     ]
+
+
+def test_final_name_preview_uses_moviepilot_template_with_adjusted_coordinates(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    captured = {}
+
+    class FakeMediaInfo:
+        def __init__(self, tmdb_info):
+            self.tmdb_info = tmdb_info
+            self.season = None
+            self.episode_group = None
+
+    class FakeFileManager:
+        @staticmethod
+        def recommend_name(meta, mediainfo):
+            captured["meta"] = meta
+            captured["mediainfo"] = mediainfo
+            return "TV/Example/Season 03/Example.S03E14.mkv"
+
+    monkeypatch.setattr(module, "MoviePilotMediaInfo", FakeMediaInfo)
+    monkeypatch.setattr(module, "FileManagerModule", FakeFileManager)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._tmdb_api = SimpleNamespace(get_info=lambda **kwargs: {"id": 123, "name": "Example"})
+
+    result = plugin._preview_final_name(
+        raw_title="[Group] Example.S01E26.mkv",
+        parsed_title="Example",
+        best={"tmdb_id": 123, "media_type": module.MediaType.TV},
+        hints={"season": 1, "episode": 26},
+        episode_result={"season": 3, "episode": 14, "episode_group": "group-id"},
+    )
+
+    assert result["available"] is True
+    assert result["output"].endswith("Example.S03E14.mkv")
+    assert captured["meta"].begin_season == 3
+    assert captured["meta"].begin_episode == 14
+    assert captured["mediainfo"].season == 3
+    assert captured["mediainfo"].episode_group == "group-id"
+    assert plugin._preview_state.active is False
 
 
 def test_duplicate_tmdb_entries_share_one_decision_slot(monkeypatch):

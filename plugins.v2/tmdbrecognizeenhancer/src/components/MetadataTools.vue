@@ -7,13 +7,14 @@ const props = defineProps({
   pluginId: { type: String, default: 'TmdbRecognizeEnhancer' },
   modelValue: { type: Object, default: () => ({}) },
   savingConfig: { type: Boolean, default: false },
+  mode: { type: String, default: 'metadata' },
 })
 const emit = defineEmits(['update:modelValue', 'save-config'])
 const loading = ref(false)
 const saving = ref('')
 const error = ref('')
 const data = ref({ release_groups: { items: [] }, recognition_rules: { items: [], fields: [], overrides: [] }, rename_fields: { builtin: [], context: [], custom: [] }, rename_mappings: { items: [], stages: [] }, release_group_arrangements: { items: [], positions: [], connectors: [] }, capabilities: {} })
-const section = ref('rules')
+const section = ref(props.mode === 'naming' ? 'mapping' : 'rules')
 const search = ref('')
 const field = ref('all')
 const source = ref('all')
@@ -34,7 +35,7 @@ const mappingDialog = ref(false)
 const mappingForm = ref({ id: '', label: '', stage: 'final_result', mode: 'literal', pattern: '', replacement: '', enabled: true, priority: 100 })
 const mappingPreviewInput = ref({ value: 'AB/C.chi.zh-cn.ass' })
 const mappingPreview = ref(null)
-const renameRuleSection = ref('fields')
+const renameRuleSection = ref('defaults')
 const groupArrangementDialog = ref(false)
 const groupArrangementForm = ref({ id: '', label: '', match_name: '', aliases: '', output_name: '', position: 'keep', connector: '__default__', order: 100, enabled: true })
 const groupArrangementPreviewInput = ref('ADWeb@A@VCB')
@@ -371,31 +372,35 @@ onMounted(load)
   <div>
     <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
     <div class="d-flex align-center flex-wrap ga-3 mb-4">
-      <div><div class="text-h6">MP 内置识别词管理</div><div class="text-body-2 text-medium-emphasis">查看 MP 当前版本实际加载的规则；修改保存在插件覆盖层，不改 MP 或 Rust 文件。</div></div>
+      <div v-if="props.mode === 'naming'"><div class="text-h6">命名规则</div><div class="text-body-2 text-medium-emphasis">统一管理连接符、制作组、自定义字段和最终文本映射，并按实际执行顺序排列。</div></div>
+      <div v-else><div class="text-h6">字段与制作组</div><div class="text-body-2 text-medium-emphasis">查看 MP 当前版本实际加载的识别规则，并为制作组提供候选类型证据。</div></div>
       <VSpacer /><VBtn variant="text" prepend-icon="mdi-refresh" :loading="loading" @click="load">重新读取 MP 规则</VBtn>
     </div>
     <VCard variant="outlined" class="mb-4"><VCardText class="d-flex align-center flex-wrap ga-6">
-      <VSwitch v-model="config.recognition_rule_overrides_enabled" color="primary" label="启用识别字段覆盖" hide-details />
-      <VSwitch v-model="config.release_group_assist_enabled" color="success" label="制作组辅助 TMDB 判断" hide-details />
-      <VSwitch v-model="config.custom_rename_fields_enabled" color="secondary" label="启用自定义命名字段" hide-details />
-      <VSwitch v-model="config.rename_mapping_enabled" color="orange" label="启用命名规则" hide-details />
+      <template v-if="props.mode === 'naming'">
+        <VSwitch v-model="config.custom_rename_fields_enabled" color="secondary" label="启用自定义命名字段" hide-details />
+        <VSwitch v-model="config.rename_mapping_enabled" color="orange" label="启用最终文本映射" hide-details />
+      </template>
+      <template v-else>
+        <VSwitch v-model="config.recognition_rule_overrides_enabled" color="primary" label="启用识别字段覆盖" hide-details />
+        <VSwitch v-model="config.release_group_assist_enabled" color="success" label="制作组辅助 TMDB 判断" hide-details />
+      </template>
       <VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存模块开关</VBtn>
     </VCardText></VCard>
     <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-      内置字段覆盖作用于 MP 解析结果；自定义命名字段则在文件整理的 Jinja2 渲染上下文中新增变量，不修改 MP/Rust 文件，也不会覆盖同名内置字段。
+      {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : '内置字段覆盖作用于 MP 解析结果；制作组类型只为 TMDB 候选提供辅助证据，不修改 MP/Rust 文件。' }}
     </VAlert>
     <VAlert v-if="data.recognition_rules?.errors?.length" type="warning" variant="tonal" density="compact" class="mb-4">
       部分规则读取失败：{{ data.recognition_rules.errors.join('；') }}
     </VAlert>
 
-    <VTabs v-model="section" color="primary" class="mb-4">
+    <VTabs v-if="props.mode !== 'naming'" v-model="section" color="primary" class="mb-4">
       <VTab value="rules" prepend-icon="mdi-text-box-search-outline">内置识别字段</VTab>
       <VTab value="groups" prepend-icon="mdi-account-group-outline">制作组类型</VTab>
-      <VTab value="mapping" prepend-icon="mdi-rename-box-outline">命名规则</VTab>
       <VTab value="test" prepend-icon="mdi-flask-outline">覆盖试算</VTab>
     </VTabs>
 
-    <section v-if="section === 'rules'">
+    <section v-if="props.mode !== 'naming' && section === 'rules'">
       <div class="filter-row mb-3">
         <VTextField v-model="search" label="搜索字段、名称或正则" prepend-inner-icon="mdi-magnify" clearable hide-details />
         <VSelect v-model="field" label="识别字段" :items="fieldItems" hide-details />
@@ -423,14 +428,11 @@ onMounted(load)
       <VPagination v-if="groupPageCount > 1" v-model="page" :length="groupPageCount" :total-visible="7" class="mt-3" />
     </section>
 
-    <section v-else-if="section === 'mapping'">
-      <div class="d-flex align-center flex-wrap ga-3 mb-4">
-        <div class="flex-grow-1"><div class="text-h6">统一命名规则</div><div class="text-body-2 text-medium-emphasis">先编排制作组；MP 完成首次命名及字幕后缀后，再对完整相对路径统一二次渲染一次。</div></div>
-      </div>
+    <section v-else-if="props.mode === 'naming'">
       <VTabs v-model="renameRuleSection" color="secondary" class="sub-tabs mb-4">
-        <VTab value="fields" prepend-icon="mdi-code-braces">自定义字段</VTab>
         <VTab value="defaults" prepend-icon="mdi-tune-variant">连接与分隔</VTab>
         <VTab value="groups" prepend-icon="mdi-account-multiple-check-outline">制作组编排</VTab>
+        <VTab value="fields" prepend-icon="mdi-code-braces">自定义字段</VTab>
         <VTab value="text" prepend-icon="mdi-find-replace">文本映射</VTab>
       </VTabs>
       <div v-if="renameRuleSection === 'fields'">
@@ -532,9 +534,9 @@ onMounted(load)
             </VCardText>
           </VCard>
         </div>
-        <div v-else class="empty-fields"><VIcon icon="mdi-find-replace" size="48" /><div class="mt-2">尚未设置最终命名规则</div><div class="text-caption mt-1">可先添加简繁字幕预设，或按 MP 首次命名结果建立任意文字替换</div></div>
-        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>最终结果试算</VCardTitle><VCardSubtitle>输入 MP 第一次生成的相对路径或文件名；这里只试算，不执行文件整理。</VCardSubtitle></VCardItem><VCardText>
-          <div class="mapping-preview-form final-mapping-preview"><VTextField v-model="mappingPreviewInput.value" label="MP 首次命名结果" placeholder="AB/C.chi.zh-cn.ass" hide-details /><VBtn color="secondary" prepend-icon="mdi-play" :loading="saving === 'mapping-preview'" @click="previewMappingRules">开始试算</VBtn></div>
+        <div v-else class="empty-fields"><VIcon icon="mdi-find-replace" size="48" /><div class="mt-2">尚未设置最终命名规则</div><div class="text-caption mt-1">可先添加简繁字幕预设，或按 MP 模板生成的完整路径建立任意文字替换</div></div>
+        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>最终结果试算</VCardTitle><VCardSubtitle>输入 MP 模板生成的相对路径或文件名；这里只试算，不执行文件整理。</VCardSubtitle></VCardItem><VCardText>
+          <div class="mapping-preview-form final-mapping-preview"><VTextField v-model="mappingPreviewInput.value" label="模板生成的完整路径" placeholder="AB/C.chi.zh-cn.ass" hide-details /><VBtn color="secondary" prepend-icon="mdi-play" :loading="saving === 'mapping-preview'" @click="previewMappingRules">开始试算</VBtn></div>
           <VAlert v-if="mappingPreview" :type="mappingPreview.changes?.length ? 'success' : 'info'" variant="tonal" class="mt-4"><div>输出：<code>{{ mappingPreview.output }}</code></div><div class="text-caption mt-1">命中 {{ mappingPreview.changes?.length || 0 }} 条规则</div></VAlert>
         </VCardText></VCard>
       </div>
@@ -592,7 +594,7 @@ onMounted(load)
     </VDialog>
 
     <VDialog v-model="mappingDialog" max-width="820">
-      <VCard><VCardItem><VCardTitle>{{ mappingForm.id ? '编辑最终命名规则' : '新增最终命名规则' }}</VCardTitle><VCardSubtitle>规则以 MP 的完整首次命名结果为输入，并按优先级从高到低连续执行。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
+      <VCard><VCardItem><VCardTitle>{{ mappingForm.id ? '编辑最终命名规则' : '新增最终命名规则' }}</VCardTitle><VCardSubtitle>规则处理 MP 模板生成的完整相对路径，并按优先级从高到低连续执行。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
         <VSelect v-model="mappingForm.mode" label="匹配模式" :items="[{title:'字面替换',value:'literal'},{title:'正则替换',value:'regex'}]" />
         <VTextField v-model="mappingForm.label" label="规则名称" placeholder="例如：统一合作字幕组顺序" />
         <VTextarea v-model="mappingForm.pattern" :label="mappingForm.mode === 'regex' ? '匹配正则' : '查找文字'" rows="3" auto-grow />

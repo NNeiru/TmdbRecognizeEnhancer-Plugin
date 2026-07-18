@@ -13,6 +13,7 @@
 - 提供候选试跑、评分解释、运行记录和 Vue 联邦管理页
 - 目标编集可选 TMDB 默认编集或具体剧集组（支持优先查看 Production/Absolute）
 - 通过 TMDB Episode ID、其它编集坐标和全局序号归一化 Season/Episode
+- 可在实际使用剧集组整理后联动 Emby/StrmAssistant，以 TMDBID 与最终路径安全定位 Series 并幂等写入 `TmdbEg`
 - 支持 AniList 季度目录、AniBridge 跨库映射、续作别名片段和目标起始集定位
 - 季度选择自动加载，支持地区/载体/续作筛选、标题搜索以及单条或批量直接建立规则
 - 运行时捕获 MoviePilot 已应用识别词后的 MetaBase，不修改或覆盖 MoviePilot/Rust 源码
@@ -21,7 +22,7 @@
 - 统一管理制作组、标题、路径和字幕命名规则；制作组可按单个组设置别名、固定位置、连接符和稳定顺序
 - 手动采样 MP 进程、整机负载、插件缓存和浏览器页面性能
 
-当前正式版本：`0.5.1`
+当前测试版本：`0.6.0-beta.1`
 
 ## 在 MoviePilot 中安装
 
@@ -30,7 +31,8 @@
 3. 添加仓库地址：`https://github.com/你的用户名/仓库名`
 4. 保存并刷新插件市场，安装“媒体整理增强”。
 5. 打开插件设置，启用插件并保存。
-6. 如需使用集数归一化，请在 MoviePilot 中开启“识别插件优先”，再在插件的“集数归一化”页启用并维护目标编集。
+6. 如需使用集数偏移，请在 MoviePilot 中开启“识别插件优先”，再在插件的“集数偏移”页启用并维护目标编集。
+7. 如需联动 Emby，请安装支持 TMDB 剧集组的 StrmAssistant，在“集数偏移 → Emby 剧集组联动”中直接选择 MP 已配置的 Emby。
 
 以后更新时，只需提高 `package.v2.json`、后端 `plugin_version` 和前端 `package.json` 的版本号，然后提交并同步到 GitHub。MoviePilot 刷新市场后会显示更新。
 

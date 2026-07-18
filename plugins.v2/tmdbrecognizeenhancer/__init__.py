@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import threading
+import time
 import unicodedata
 from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,6 +28,24 @@ from app.plugins import _PluginBase
 from app.schemas.types import ChainEventType, MediaType
 from app.utils.http import RequestUtils
 
+try:
+    from app.core.context import MediaInfo as MoviePilotMediaInfo
+    from app.modules.filemanager import FileManagerModule
+except ImportError:  # pragma: no cover - 旧版 MP 或测试桩没有命名试算入口。
+    MoviePilotMediaInfo = None
+    FileManagerModule = None
+
+try:
+    from app.helper.mediaserver import MediaServerHelper
+except ImportError:  # pragma: no cover - 旧版 MP 能加载插件，但界面会提示能力不可用。
+    MediaServerHelper = None
+
+try:
+    from app.schemas.types import EventType
+except ImportError:  # pragma: no cover - 仅用于兼容缺少异步事件枚举的旧版 MP。
+    EventType = None
+
+from .emby_episode_group_sync import EmbyEpisodeGroupSynchronizer
 from .episode_normalizer import EpisodeNormalizer
 from .metadata_tools import ReleaseGroupRegistry, RenameFieldRegistry
 from .performance_diagnostics import PerformanceDiagnostics
@@ -46,7 +65,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、集数归一化、命名字段、制作组编排、二次重命名与运行诊断。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.1"
+    plugin_version = "0.6.0-beta.1"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -62,6 +81,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     DATA_KEY_CUSTOM_RENAME_FIELDS = "custom_rename_fields"
     DATA_KEY_RENAME_MAPPINGS = "rename_mappings"
     DATA_KEY_RELEASE_GROUP_ARRANGEMENTS = "release_group_arrangements"
+    DATA_KEY_EMBY_EPISODE_GROUP_JOBS = "emby_episode_group_jobs"
     # 季度目录匹配使用独立策略，不继承整理识别的 max_queries、降级开关等参数。
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
@@ -101,6 +121,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "season_missing_penalty": 20.0,
         "history_limit": 30,
         "episode_normalizer_enabled": False,
+        "emby_episode_group_sync_enabled": False,
+        "emby_episode_group_sync_servers": [],
+        "emby_episode_group_sync_initial_delay_seconds": 15,
+        "emby_episode_group_sync_retry_seconds": 30,
+        "emby_episode_group_sync_max_wait_minutes": 15,
+        "emby_episode_group_sync_path_mappings": [],
+        "emby_episode_group_sync_conflict_policy": "skip",
+        "emby_episode_group_sync_refresh_metadata": True,
         "release_group_assist_enabled": True,
         "recognition_rule_overrides_enabled": True,
         "release_group_type_weight": 12.0,
@@ -162,12 +190,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._subtitle_rename_adapter = SubtitleRenameAdapter()
         self._customization_separator_adapter = CustomizationSeparatorAdapter()
         self._diagnostics = PerformanceDiagnostics()
+        self._preview_state = threading.local()
         self._history_lock = threading.RLock()
         self._web_cache_lock = threading.RLock()
         self._web_cache: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
         self._catalog_lock = threading.RLock()
         self._catalog_scans: set = set()
         self._memory_lock = threading.RLock()
+        self._emby_sync_lock = threading.RLock()
+        self._emby_sync_stop = threading.Event()
+        self._emby_sync_wakeup = threading.Event()
+        self._emby_sync_thread: Optional[threading.Thread] = None
+        self._emby_sync = EmbyEpisodeGroupSynchronizer(self._get_emby_services)
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
         """加载配置并启停名称识别事件处理器。"""
@@ -181,6 +215,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._sync_subtitle_adapter_state()
         self._sync_customization_separator_state()
         self._sync_event_handler_state()
+        self._recover_emby_sync_jobs()
+        self._sync_emby_worker_state()
 
     def get_state(self) -> bool:
         """返回插件是否启用。"""
@@ -353,6 +389,41 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "summary": "批量匹配季度动画并加入维护规则",
             },
             {
+                "path": "/episode-normalizer/emby-sync",
+                "endpoint": self.get_emby_sync_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取 Emby 剧集组联动状态",
+            },
+            {
+                "path": "/episode-normalizer/emby-sync/config",
+                "endpoint": self.save_emby_sync_config_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "保存 Emby 剧集组联动设置",
+            },
+            {
+                "path": "/episode-normalizer/emby-sync/preview",
+                "endpoint": self.preview_emby_sync_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "只读试跑 Emby Series 定位",
+            },
+            {
+                "path": "/episode-normalizer/emby-sync/retry",
+                "endpoint": self.retry_emby_sync_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重试 Emby 剧集组联动任务",
+            },
+            {
+                "path": "/episode-normalizer/emby-sync/delete",
+                "endpoint": self.delete_emby_sync_job_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "删除 Emby 剧集组联动任务",
+            },
+            {
                 "path": "/metadata-tools",
                 "endpoint": self.get_metadata_tools_api,
                 "methods": ["GET"],
@@ -461,6 +532,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def stop_service(self):
         """禁用事件处理器并释放 TMDB 客户端。"""
+        self._stop_emby_worker()
         self._sync_event_handler_state(enabled=False)
         self._runtime_adapter.uninstall()
         self._subtitle_rename_adapter.uninstall()
@@ -504,6 +576,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                             and self._runtime_adapter.compatible else "等待运行时适配"
                             if self.get_state() and self._config.get("episode_normalizer_enabled") else "已停用"
                         ),
+                    },
+                    "emby_episode_group_sync": {
+                        "enabled": bool(self._config.get("emby_episode_group_sync_enabled")),
+                        "status": self._emby_sync_module_status(),
+                        **self._emby_sync_counts(),
                     },
                     "release_group_assist": {
                         "enabled": bool(self._config.get("release_group_assist_enabled")),
@@ -553,6 +630,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "runtime_compatible": self._runtime_adapter.compatible,
                     "runtime_message": self._runtime_adapter.message,
                     "plugin_first": bool(getattr(settings, "RECOGNIZE_PLUGIN_FIRST", False)),
+                    "emby_sync": self._emby_sync_status_data(include_jobs=False),
                 },
             },
         )
@@ -566,6 +644,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._sync_subtitle_adapter_state()
         self._sync_customization_separator_state()
         self._sync_event_handler_state()
+        self._sync_emby_worker_state()
         return self.get_status()
 
     def clear_recognition_memory_api(self) -> schemas.Response:
@@ -822,6 +901,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "recognition_mode": self._config.get("recognition_mode"),
             "web_search_fallback": bool(self._config.get("web_search_fallback")),
             "fetch_aliases": bool(self._config.get("fetch_aliases")),
+            "emby_sync_enabled": bool(self._config.get("emby_episode_group_sync_enabled")),
+            "emby_sync_worker_running": bool(self._emby_sync_thread and self._emby_sync_thread.is_alive()),
+            "emby_sync_jobs": len(self._read_emby_sync_jobs()),
+            **{f"emby_sync_{key}": value for key, value in self._emby_sync_counts().items()},
         }
         return schemas.Response(success=True, data=self._diagnostics.snapshot(plugin_stats))
 
@@ -876,10 +959,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "legacy_changes": legacy_group_changes,
                 "applied": bool(group_trace.get("applied") or legacy_group_changes),
             })
-            rendered_input = str(payload.get("rendered_path") or raw_title)
-            final_output, final_changes = self._apply_final_naming_mapping(
-                rendered_input, include_changes=True,
-            )
             final_coordinates = episode_preview.get("result") or {}
             best = result.get("best") or {}
             media_type = self._normalize_media_type(best.get("media_type") or hints.get("media_type"))
@@ -895,7 +974,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "releaseGroup": arranged_group,
             }
             rename_context.update(self._build_rename_source_context(raw_title))
-            rename_context.update(self._build_rename_target_context("", rendered_input))
+            rename_context.update(self._build_rename_target_context("", raw_title))
             custom_values, custom_errors = self._rename_fields.evaluate(
                 self._custom_rename_fields, rename_context,
             ) if self._config.get("custom_rename_fields_enabled") else ({}, [])
@@ -907,13 +986,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "configured": len(self._custom_rename_fields),
                 "simulated": True,
             }
-            result["final_naming"] = {
-                "input": rendered_input,
-                "output": final_output,
-                "changes": final_changes,
-                "exact_input": bool(str(payload.get("rendered_path") or "").strip()),
-                "source": "mp_rendered_path" if str(payload.get("rendered_path") or "").strip() else "original_title_fallback",
-            }
+            result["final_naming"] = self._preview_final_name(
+                raw_title=raw_title,
+                parsed_title=title,
+                best=best if result.get("accepted") else {},
+                hints=hints,
+                episode_result=final_coordinates,
+            )
+            final_output = str((result.get("final_naming") or {}).get("output") or "")
             result["pipeline"] = [
                 {
                     "module": "MoviePilot 标题解析（识别前）",
@@ -973,11 +1053,25 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     ),
                 },
                 {
-                    "module": "最终命名二次渲染",
-                    "status": "applied" if final_changes else "skipped",
+                    "module": "MoviePilot 模板与最终命名",
+                    "status": "completed" if final_output else "skipped",
                     "summary": (
-                        f"{rendered_input} → {final_output}"
-                        if final_changes else "没有最终命名规则命中，保持首次结果"
+                        final_output
+                        if final_output else (result.get("final_naming") or {}).get("reason", "未生成最终命名")
+                    ),
+                },
+                {
+                    "module": "Emby 剧集组联动（入库后）",
+                    "status": (
+                        "applied" if (episode_preview.get("result") or {}).get("episode_group")
+                        and self._emby_sync_active() else "skipped"
+                    ),
+                    "summary": (
+                        f"实际整理完成后将以 TMDB {best.get('tmdb_id')} 和最终路径定位 Series，"
+                        f"写入 TmdbEg {(episode_preview.get('result') or {}).get('episode_group')}"
+                        if (episode_preview.get("result") or {}).get("episode_group")
+                        and self._emby_sync_active() else
+                        "本次未采用剧集组，或 Emby 剧集组联动尚未启用"
                     ),
                 },
             ]
@@ -985,6 +1079,66 @@ class TmdbRecognizeEnhancer(_PluginBase):
         except Exception as err:
             logger.error(f"[TMDB识别增强] 试跑失败：{err}")
             return schemas.Response(success=False, message=f"试跑失败：{err}")
+
+    def _preview_final_name(
+            self,
+            raw_title: str,
+            parsed_title: str,
+            best: Dict[str, Any],
+            hints: Dict[str, Any],
+            episode_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """调用 MP 当前命名模板得到最终相对路径，不执行任何文件操作。"""
+        if not best:
+            return {"available": False, "output": "", "reason": "TMDB 候选未通过，无法生成最终命名"}
+        if MoviePilotMediaInfo is None or FileManagerModule is None:
+            return {
+                "available": False,
+                "output": "",
+                "reason": "当前 MoviePilot 版本未提供命名模板试算入口",
+            }
+        media_type = self._normalize_media_type(best.get("media_type") or hints.get("media_type"))
+        tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
+        if not media_type or not tmdb_id:
+            return {"available": False, "output": "", "reason": "缺少媒体类型或 TMDBID"}
+        try:
+            tmdb_info = self._tmdb_api.get_info(mtype=media_type, tmdbid=tmdb_id)
+            if not tmdb_info:
+                return {"available": False, "output": "", "reason": "无法读取 TMDB 详情"}
+            mediainfo = MoviePilotMediaInfo(tmdb_info=tmdb_info)
+            meta = MetaInfo(raw_title)
+            season = self._optional_int(episode_result.get("season"))
+            episode = self._optional_int(episode_result.get("episode"))
+            end_episode = self._optional_int(episode_result.get("end_episode"))
+            group_id = str(episode_result.get("episode_group") or "").strip()
+            meta.type = media_type
+            meta.name = parsed_title or getattr(meta, "name", None)
+            meta.tmdbid = str(tmdb_id)
+            if season is not None:
+                meta.begin_season = season
+                meta.end_season = season
+                mediainfo.season = season
+            if episode is not None:
+                meta.begin_episode = episode
+                meta.end_episode = end_episode or episode
+            if group_id:
+                meta.episode_group = group_id
+                mediainfo.episode_group = group_id
+            self._preview_state.active = True
+            try:
+                output = str(FileManagerModule.recommend_name(meta=meta, mediainfo=mediainfo) or "")
+            finally:
+                self._preview_state.active = False
+            return {
+                "available": bool(output),
+                "output": output,
+                "reason": "已按 MoviePilot 当前命名模板生成" if output else "MoviePilot 命名模板没有生成结果",
+                "template_source": "MoviePilot 当前命名模板",
+            }
+        except Exception as err:
+            self._preview_state.active = False
+            logger.warning(f"[TMDB识别增强] 最终命名试算失败：{err}")
+            return {"available": False, "output": "", "reason": f"最终命名试算失败：{err}"}
 
     def _preview_episode_pipeline(
             self,
@@ -1049,7 +1203,115 @@ class TmdbRecognizeEnhancer(_PluginBase):
             data={
                 "rules": self._read_episode_rules(),
                 "enabled": bool(self._config.get("episode_normalizer_enabled")),
+                "emby_sync": self._emby_sync_status_data(include_jobs=False),
             },
+        )
+
+    def get_emby_sync_api(self) -> schemas.Response:
+        """返回 Emby 剧集组联动设置、服务目录和持久任务。"""
+        return schemas.Response(success=True, data=self._emby_sync_status_data(include_jobs=True))
+
+    def save_emby_sync_config_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """独立保存联动设置，不要求用户在总开关页编辑复杂路径映射。"""
+        payload = payload or {}
+        updates = {
+            "emby_episode_group_sync_enabled": payload.get("enabled"),
+            "emby_episode_group_sync_servers": payload.get("servers"),
+            "emby_episode_group_sync_initial_delay_seconds": payload.get("initial_delay_seconds"),
+            "emby_episode_group_sync_retry_seconds": payload.get("retry_seconds"),
+            "emby_episode_group_sync_max_wait_minutes": payload.get("max_wait_minutes"),
+            "emby_episode_group_sync_path_mappings": payload.get("path_mappings"),
+            "emby_episode_group_sync_conflict_policy": payload.get("conflict_policy"),
+            "emby_episode_group_sync_refresh_metadata": payload.get("refresh_metadata"),
+        }
+        merged = {**self._config, **{key: value for key, value in updates.items() if value is not None}}
+        self._config = self._normalize_config(merged)
+        self.update_config(self._current_config())
+        self._sync_emby_worker_state()
+        return self.get_emby_sync_api()
+
+    def preview_emby_sync_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """只读定位一个 TMDB 剧集组对应的 Emby Series，不执行写入。"""
+        payload = payload or {}
+        tmdb_id = self._safe_int(payload.get("tmdb_id"), 0)
+        group_id = str(payload.get("episode_group_id") or "").strip()
+        target_path = str(payload.get("target_path") or "").strip()
+        if not tmdb_id or not group_id:
+            return schemas.Response(success=False, message="请选择剧集组维护规则")
+        if not target_path:
+            return schemas.Response(success=False, message="请输入 MP 整理后的实际文件路径")
+        rule = next((
+            item for item in self._read_episode_rules()
+            if item.get("enabled", True)
+            and self._safe_int(item.get("tmdb_id"), 0) == tmdb_id
+            and item.get("target_type") == "group"
+            and str(item.get("episode_group_id") or "") == group_id
+        ), None)
+        if not rule:
+            return schemas.Response(success=False, message="该 TMDBID 当前没有匹配的剧集组维护规则")
+        config = self._emby_sync_runtime_config()
+        requested_servers = [str(value) for value in payload.get("servers") or [] if str(value).strip()]
+        if requested_servers:
+            config["servers"] = requested_servers
+        outcome = self._emby_sync.reconcile(
+            job={
+                "tmdb_id": tmdb_id,
+                "episode_group_id": group_id,
+                "title": rule.get("title") or f"TMDB {tmdb_id}",
+                "target_path": target_path,
+            },
+            config=config,
+            dry_run=True,
+        )
+        return schemas.Response(success=True, data=outcome)
+
+    def retry_emby_sync_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """重置一个或全部未成功任务，并立即唤醒后台工作器。"""
+        job_id = str((payload or {}).get("job_id") or "").strip()
+        changed = 0
+        with self._emby_sync_lock:
+            jobs = self._read_emby_sync_jobs()
+            for job in jobs:
+                if job_id and str(job.get("id")) != job_id:
+                    continue
+                if job.get("status") == "completed":
+                    continue
+                job["status"] = "pending"
+                job["reason"] = "用户请求重新检查"
+                job["attempts"] = 0
+                job["next_attempt_ts"] = time.time()
+                job["server_results"] = {
+                    name: result for name, result in (job.get("server_results") or {}).items()
+                    if result.get("status") in EmbyEpisodeGroupSynchronizer.SUCCESS_STATUSES
+                }
+                job["history_logged"] = False
+                changed += 1
+            self._save_emby_sync_jobs(jobs)
+        self._emby_sync_wakeup.set()
+        return schemas.Response(
+            success=True,
+            message=f"已重新排队 {changed} 个任务",
+            data=self._emby_sync_status_data(include_jobs=True),
+        )
+
+    def delete_emby_sync_job_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """删除单个任务，或清理全部已结束任务。"""
+        job_id = str((payload or {}).get("job_id") or "").strip()
+        finished_only = bool((payload or {}).get("finished_only", not bool(job_id)))
+        with self._emby_sync_lock:
+            jobs = self._read_emby_sync_jobs()
+            before = len(jobs)
+            if job_id:
+                jobs = [item for item in jobs if str(item.get("id")) != job_id]
+            elif finished_only:
+                jobs = [item for item in jobs if item.get("status") in {"pending", "running"}]
+            else:
+                jobs = []
+            self._save_emby_sync_jobs(jobs)
+        return schemas.Response(
+            success=True,
+            message=f"已删除 {before - len(jobs)} 个任务",
+            data=self._emby_sync_status_data(include_jobs=True),
         )
 
     def save_episode_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
@@ -1820,6 +2082,318 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "catalog": catalog,
             },
         )
+
+    @eventmanager.register(getattr(EventType, "TransferComplete", "transfer.complete"))
+    def on_transfer_complete(self, event: Event) -> None:
+        """仅为本次实际采用剧集组归一化的整理结果建立 Emby 联动任务。"""
+        if not self._emby_sync_active() or not event or not event.event_data:
+            return
+        data = event.event_data
+        meta = self._event_get(data, "meta")
+        mediainfo = self._event_get(data, "mediainfo")
+        transferinfo = self._event_get(data, "transferinfo")
+        group_id = str(
+            self._event_get(meta, "episode_group")
+            or self._event_get(mediainfo, "episode_group")
+            or ""
+        ).strip()
+        tmdb_id = self._safe_int(
+            self._event_get(mediainfo, "tmdb_id")
+            or self._event_get(mediainfo, "tmdbid"),
+            0,
+        )
+        if not group_id or not tmdb_id:
+            return
+        media_type = self._normalize_media_type(self._event_get(mediainfo, "type"))
+        if media_type != MediaType.TV:
+            return
+        rule = next((
+            item for item in self._read_episode_rules()
+            if item.get("enabled", True)
+            and self._safe_int(item.get("tmdb_id"), 0) == tmdb_id
+            and item.get("target_type") == "group"
+            and str(item.get("episode_group_id") or "") == group_id
+        ), None)
+        if not rule:
+            logger.warning(
+                f"[媒体整理增强] 已收到剧集组 {group_id}，但 TMDB {tmdb_id} 的维护规则不一致，"
+                "不会写入 Emby"
+            )
+            return
+        target_item = self._event_get(transferinfo, "target_item")
+        target_diritem = self._event_get(transferinfo, "target_diritem")
+        target_path = str(self._event_get(target_item, "path") or "").strip()
+        series_path = str(self._event_get(target_diritem, "path") or target_path).strip()
+        if not target_path:
+            logger.warning(f"[媒体整理增强] TMDB {tmdb_id} 整理完成事件缺少目标路径，无法安全联动 Emby")
+            return
+        job_key = f"{tmdb_id}|{group_id}|{EmbyEpisodeGroupSynchronizer.normalize_path(series_path).casefold()}"
+        job_id = hashlib.sha1(job_key.encode("utf-8", errors="ignore")).hexdigest()[:20]
+        now = time.time()
+        with self._emby_sync_lock:
+            jobs = self._read_emby_sync_jobs()
+            existing = next((item for item in jobs if str(item.get("id")) == job_id), None)
+            if existing and existing.get("status") == "completed":
+                return
+            job = existing or {
+                "id": job_id,
+                "tmdb_id": tmdb_id,
+                "episode_group_id": group_id,
+                "title": str(self._event_get(mediainfo, "title") or rule.get("title") or f"TMDB {tmdb_id}"),
+                "year": str(self._event_get(mediainfo, "year") or ""),
+                "series_path": series_path,
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "created_ts": now,
+                "attempts": 0,
+                "server_results": {},
+            }
+            job.update({
+                "target_path": target_path,
+                "status": "pending",
+                "reason": "等待 Emby 入库扫描",
+                "next_attempt_ts": now + int(self._config.get("emby_episode_group_sync_initial_delay_seconds", 15)),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "history_logged": False,
+            })
+            jobs = [item for item in jobs if str(item.get("id")) != job_id]
+            jobs.insert(0, job)
+            self._save_emby_sync_jobs(jobs)
+        logger.info(
+            f"[媒体整理增强] Emby 剧集组联动已排队：{job['title']}，"
+            f"TMDB {tmdb_id}，TmdbEg {group_id}"
+        )
+        self._emby_sync_wakeup.set()
+
+    def _get_emby_services(self) -> Dict[str, Any]:
+        """复用 MoviePilot 媒体服务器配置，不向插件复制地址或 API Key。"""
+        if MediaServerHelper is None:
+            return {}
+        try:
+            return MediaServerHelper().get_services(type_filter="emby") or {}
+        except Exception as err:
+            logger.warning(f"[媒体整理增强] 读取 MoviePilot Emby 配置失败：{err}")
+            return {}
+
+    def _emby_sync_active(self) -> bool:
+        return bool(
+            self.get_state()
+            and self._config.get("episode_normalizer_enabled")
+            and self._config.get("emby_episode_group_sync_enabled")
+            and MediaServerHelper is not None
+        )
+
+    def _sync_emby_worker_state(self) -> None:
+        if self._emby_sync_active():
+            self._start_emby_worker()
+        else:
+            self._stop_emby_worker()
+
+    def _start_emby_worker(self) -> None:
+        if self._emby_sync_thread and self._emby_sync_thread.is_alive():
+            self._emby_sync_wakeup.set()
+            return
+        self._emby_sync_stop = threading.Event()
+        self._emby_sync_wakeup = threading.Event()
+        self._emby_sync_thread = threading.Thread(
+            target=self._emby_sync_worker,
+            name="tmdb-enhancer-emby-group-sync",
+            daemon=True,
+        )
+        self._emby_sync_thread.start()
+
+    def _stop_emby_worker(self) -> None:
+        self._emby_sync_stop.set()
+        self._emby_sync_wakeup.set()
+        thread = self._emby_sync_thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.5)
+        if not thread or not thread.is_alive():
+            self._emby_sync_thread = None
+
+    def _emby_sync_worker(self) -> None:
+        """串行处理网络任务，避免整理线程被 Emby 扫描和重试阻塞。"""
+        while not self._emby_sync_stop.is_set():
+            job = self._next_emby_sync_job()
+            if not job:
+                self._emby_sync_wakeup.wait(timeout=2.0)
+                self._emby_sync_wakeup.clear()
+                continue
+            try:
+                self._process_emby_sync_job(job)
+            except Exception as err:
+                logger.error(f"[媒体整理增强] Emby 剧集组联动任务异常：{err}")
+                self._mark_emby_job_error(str(job.get("id") or ""), str(err))
+
+    def _next_emby_sync_job(self) -> Optional[Dict[str, Any]]:
+        now = time.time()
+        with self._emby_sync_lock:
+            jobs = self._read_emby_sync_jobs()
+            return next((
+                deepcopy(item) for item in jobs
+                if item.get("status") == "pending"
+                and float(item.get("next_attempt_ts") or 0) <= now
+            ), None)
+
+    def _process_emby_sync_job(self, job: Dict[str, Any]) -> None:
+        job_id = str(job.get("id") or "")
+        with self._emby_sync_lock:
+            jobs = self._read_emby_sync_jobs()
+            current = next((item for item in jobs if str(item.get("id")) == job_id), None)
+            if not current or current.get("status") != "pending":
+                return
+            current["status"] = "running"
+            current["attempts"] = self._safe_int(current.get("attempts"), 0) + 1
+            current["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._save_emby_sync_jobs(jobs)
+            job = deepcopy(current)
+
+        outcome = self._emby_sync.reconcile(
+            job=job,
+            config=self._emby_sync_runtime_config(),
+            previous=job.get("server_results") or {},
+        )
+        now = time.time()
+        max_wait = int(self._config.get("emby_episode_group_sync_max_wait_minutes", 15)) * 60
+        elapsed = max(0.0, now - float(job.get("created_ts") or now))
+        results = outcome.get("results") or {}
+        retryable = bool(outcome.get("retryable"))
+        if retryable and elapsed < max_wait:
+            status = "pending"
+            reason = outcome.get("reason") or "等待 Emby 扫描或连接恢复"
+            next_attempt = now + int(self._config.get("emby_episode_group_sync_retry_seconds", 30))
+        elif retryable:
+            status = "timeout"
+            reason = f"等待 {int(max_wait / 60)} 分钟后仍未完成，请检查入库扫描、路径映射和服务器连接"
+            next_attempt = 0
+        else:
+            statuses = {str(value.get("status") or "") for value in results.values()}
+            if statuses and statuses <= EmbyEpisodeGroupSynchronizer.SUCCESS_STATUSES:
+                status = "completed"
+                reason = "所有目标 Emby 均已配置正确剧集组"
+            else:
+                status = "attention"
+                reason = "存在冲突、定位歧义或服务器不支持，请检查任务详情"
+            next_attempt = 0
+
+        log_record = None
+        with self._emby_sync_lock:
+            jobs = self._read_emby_sync_jobs()
+            current = next((item for item in jobs if str(item.get("id")) == job_id), None)
+            if not current:
+                return
+            current.update({
+                "status": status,
+                "reason": reason,
+                "server_results": results,
+                "next_attempt_ts": next_attempt,
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            if status in {"completed", "attention", "timeout"} and not current.get("history_logged"):
+                current["history_logged"] = True
+                log_record = deepcopy(current)
+            self._save_emby_sync_jobs(jobs)
+        if log_record:
+            self._append_module_history(
+                module="Emby 剧集组联动",
+                title=str(log_record.get("title") or f"TMDB {log_record.get('tmdb_id')}"),
+                reason=reason,
+                stages=[
+                    f"TMDB {log_record.get('tmdb_id')}",
+                    f"TmdbEg {log_record.get('episode_group_id')}",
+                    *[f"{name}：{value.get('status')}" for name, value in results.items()],
+                ],
+                accepted=status == "completed",
+            )
+
+    def _mark_emby_job_error(self, job_id: str, reason: str) -> None:
+        with self._emby_sync_lock:
+            jobs = self._read_emby_sync_jobs()
+            current = next((item for item in jobs if str(item.get("id")) == job_id), None)
+            if current:
+                current.update({
+                    "status": "pending",
+                    "reason": reason,
+                    "next_attempt_ts": time.time() + int(self._config.get("emby_episode_group_sync_retry_seconds", 30)),
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                self._save_emby_sync_jobs(jobs)
+
+    def _read_emby_sync_jobs(self) -> List[Dict[str, Any]]:
+        value = self.get_data(self.DATA_KEY_EMBY_EPISODE_GROUP_JOBS) or []
+        return value if isinstance(value, list) else []
+
+    def _recover_emby_sync_jobs(self) -> None:
+        """插件或容器在请求中退出时，把遗留 running 任务恢复为可重试状态。"""
+        with self._emby_sync_lock:
+            jobs = self._read_emby_sync_jobs()
+            changed = False
+            for job in jobs:
+                if job.get("status") != "running":
+                    continue
+                job.update({
+                    "status": "pending",
+                    "reason": "上次处理被插件重载或容器重启中断，已恢复排队",
+                    "next_attempt_ts": time.time(),
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                changed = True
+            if changed:
+                self._save_emby_sync_jobs(jobs)
+
+    def _save_emby_sync_jobs(self, jobs: List[Dict[str, Any]]) -> None:
+        active = [item for item in jobs if item.get("status") in {"pending", "running"}]
+        finished = [item for item in jobs if item.get("status") not in {"pending", "running"}]
+        self.save_data(self.DATA_KEY_EMBY_EPISODE_GROUP_JOBS, [*active, *finished[:80]])
+
+    def _emby_sync_runtime_config(self) -> Dict[str, Any]:
+        return {
+            "servers": list(self._config.get("emby_episode_group_sync_servers") or []),
+            "path_mappings": deepcopy(self._config.get("emby_episode_group_sync_path_mappings") or []),
+            "conflict_policy": str(self._config.get("emby_episode_group_sync_conflict_policy") or "skip"),
+            "refresh_metadata": bool(self._config.get("emby_episode_group_sync_refresh_metadata", True)),
+        }
+
+    def _emby_sync_status_data(self, include_jobs: bool) -> Dict[str, Any]:
+        data = {
+            "available": MediaServerHelper is not None,
+            "enabled": bool(self._config.get("emby_episode_group_sync_enabled")),
+            "active": self._emby_sync_active(),
+            "worker_running": bool(self._emby_sync_thread and self._emby_sync_thread.is_alive()),
+            "servers": self._emby_sync.server_catalog(),
+            "config": {
+                "enabled": bool(self._config.get("emby_episode_group_sync_enabled")),
+                "servers": list(self._config.get("emby_episode_group_sync_servers") or []),
+                "initial_delay_seconds": int(self._config.get("emby_episode_group_sync_initial_delay_seconds", 15)),
+                "retry_seconds": int(self._config.get("emby_episode_group_sync_retry_seconds", 30)),
+                "max_wait_minutes": int(self._config.get("emby_episode_group_sync_max_wait_minutes", 15)),
+                "path_mappings": deepcopy(self._config.get("emby_episode_group_sync_path_mappings") or []),
+                "conflict_policy": str(self._config.get("emby_episode_group_sync_conflict_policy") or "skip"),
+                "refresh_metadata": bool(self._config.get("emby_episode_group_sync_refresh_metadata", True)),
+            },
+            "counts": self._emby_sync_counts(),
+        }
+        if include_jobs:
+            data["jobs"] = self._read_emby_sync_jobs()
+        return data
+
+    def _emby_sync_counts(self) -> Dict[str, int]:
+        jobs = self._read_emby_sync_jobs()
+        return {
+            "pending": sum(1 for item in jobs if item.get("status") in {"pending", "running"}),
+            "completed": sum(1 for item in jobs if item.get("status") == "completed"),
+            "attention": sum(1 for item in jobs if item.get("status") in {"attention", "timeout"}),
+        }
+
+    def _emby_sync_module_status(self) -> str:
+        if not self.get_state() or not self._config.get("emby_episode_group_sync_enabled"):
+            return "已停用"
+        if not self._config.get("episode_normalizer_enabled"):
+            return "等待启用集数偏移"
+        if MediaServerHelper is None:
+            return "当前 MP 不支持媒体服务器服务目录"
+        if not self._emby_sync.server_catalog():
+            return "未配置 Emby"
+        return "监听整理入库" if self._emby_sync_thread and self._emby_sync_thread.is_alive() else "工作器未运行"
 
     @eventmanager.register(ChainEventType.TransferRenameBuild, priority=1)
     def on_transfer_rename_build(self, event: Event) -> None:
@@ -3782,6 +4356,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "use_year_hint", "use_original_title_evidence", "web_search_fallback",
             "main_title_fallback",
             "progressive_fallback", "fetch_aliases", "episode_normalizer_enabled",
+            "emby_episode_group_sync_enabled", "emby_episode_group_sync_refresh_metadata",
             "release_group_assist_enabled", "recognition_rule_overrides_enabled",
             "seasonal_evidence_enabled", "recognition_memory_enabled",
             "custom_rename_fields_enabled", "rename_mapping_enabled",
@@ -3799,6 +4374,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "web_search_timeout": (5, 30),
             "recognition_memory_min_hits": (2, 10),
             "recognition_memory_ttl_days": (1, 90),
+            "emby_episode_group_sync_initial_delay_seconds": (0, 300),
+            "emby_episode_group_sync_retry_seconds": (10, 600),
+            "emby_episode_group_sync_max_wait_minutes": (1, 1440),
         }
         for key, (minimum, maximum) in ranges.items():
             merged[key] = max(minimum, min(maximum, self._safe_int(merged.get(key), int(self.DEFAULT_CONFIG[key]))))
@@ -3854,6 +4432,28 @@ class TmdbRecognizeEnhancer(_PluginBase):
             field for field in dict.fromkeys(str(item) for item in fields)
             if field in self.RENAME_SEPARATOR_FIELDS
         ]
+        servers = merged.get("emby_episode_group_sync_servers") or []
+        if not isinstance(servers, (list, tuple, set)):
+            servers = []
+        merged["emby_episode_group_sync_servers"] = list(dict.fromkeys(
+            str(value).strip() for value in servers if str(value).strip()
+        ))
+        policy = str(merged.get("emby_episode_group_sync_conflict_policy") or "skip").strip().lower()
+        merged["emby_episode_group_sync_conflict_policy"] = policy if policy in {"skip", "overwrite"} else "skip"
+        mappings = []
+        for item in merged.get("emby_episode_group_sync_path_mappings") or []:
+            if not isinstance(item, dict):
+                continue
+            source = EmbyEpisodeGroupSynchronizer.normalize_path(str(item.get("source") or ""))
+            target = EmbyEpisodeGroupSynchronizer.normalize_path(str(item.get("target") or ""))
+            if not source or not target:
+                continue
+            mappings.append({
+                "server": str(item.get("server") or "*").strip() or "*",
+                "source": source,
+                "target": target,
+            })
+        merged["emby_episode_group_sync_path_mappings"] = mappings
         return merged
 
     def _current_config(self) -> Dict[str, Any]:
@@ -3907,6 +4507,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             accepted: bool = True,
     ) -> None:
         """记录非识别模块的实际改写结果，不影响识别接纳率统计。"""
+        if bool(getattr(getattr(self, "_preview_state", None), "active", False)):
+            return
         record = {
             "kind": "operation",
             "module": str(module or "插件处理"),
