@@ -151,6 +151,24 @@ def test_federation_path_is_versioned(monkeypatch):
     assert dist_path.endswith("/assets")
 
 
+def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
+    module = _load_plugin(monkeypatch)
+
+    builtin = module.RenameFieldRegistry.builtin_catalog()
+    context = module.RenameFieldRegistry.context_catalog()
+    builtin_keys = {item["key"] for item in builtin}
+
+    assert {"title", "type", "category", "original_name", "fileExt"} <= builtin_keys
+    assert not {
+        "torrent_title", "pubdate", "seeders",
+        "transfer_type", "file_count", "total_size", "err_msg",
+    } & builtin_keys
+    assert all(item.get("description") and item.get("availability") for item in builtin + context)
+    target = next(item for item in context if item["key"] == "target_dir")
+    assert target["phase"] == "target_rerender"
+    assert "文件操作前" in target["description"]
+
+
 def test_current_quarter_catalog_prioritizes_mapped_anime_candidate(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

@@ -52,7 +52,7 @@ const DEFAULT_CONFIG = {
   recognition_memory_ttl_days: 14,
   custom_rename_fields_enabled: true
 };
-const UI_VERSION = "0.5.0-beta.5";
+const UI_VERSION = "0.5.0-beta.6";
 function ensureUiVersion(backendVersion) {
   const backend = String(backendVersion || "").trim();
   if (!backend || backend === UI_VERSION || typeof window === "undefined") return false;

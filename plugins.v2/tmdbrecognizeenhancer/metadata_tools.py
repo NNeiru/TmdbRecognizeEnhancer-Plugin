@@ -164,74 +164,63 @@ class RenameFieldRegistry:
 
     _key_pattern = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
     _environment = None
-    BUILTIN_FIELDS: Tuple[Tuple[str, str, str, str], ...] = (
-        ("title", "媒体标题", "媒体信息", "TMDB/豆瓣标题"),
-        ("en_title", "英文标题", "媒体信息", "TMDB 英文标题"),
-        ("original_title", "原语种标题", "媒体信息", "TMDB/豆瓣原语种标题"),
-        ("name", "识别名称", "文件解析", "文件名中识别的名称"),
-        ("en_name", "识别英文名", "文件解析", "文件名中识别的英文名称"),
-        ("original_name", "原文件名", "文件解析", "识别前的原始文件名"),
-        ("year", "年份", "媒体信息", "媒体年份"),
-        ("title_year", "标题与年份", "媒体信息", "标题和年份组合"),
-        ("type", "媒体类型", "媒体信息", "电影或电视剧"),
-        ("category", "媒体分类", "媒体信息", "MoviePilot 媒体分类"),
-        ("vote_average", "评分", "媒体信息", "媒体评分"),
-        ("poster", "海报", "媒体信息", "海报图片地址"),
-        ("backdrop", "背景图", "媒体信息", "背景图片地址"),
-        ("actors", "演员", "媒体信息", "最多五位演员"),
-        ("overview", "简介", "媒体信息", "媒体简介"),
-        ("tmdbid", "TMDB ID", "媒体信息", "TMDB 媒体编号"),
-        ("imdbid", "IMDB ID", "媒体信息", "IMDB 媒体编号"),
-        ("doubanid", "豆瓣 ID", "媒体信息", "豆瓣媒体编号"),
-        ("season", "季号", "季集信息", "数字季号"),
-        ("season_fmt", "格式化季号", "季集信息", "Sxx 格式季号"),
-        ("episode", "集号", "季集信息", "当前集号或集号列表"),
-        ("total_episodes", "本季总集数", "季集信息", "TMDB 当前季总集数"),
-        ("season_episode", "季集组合", "季集信息", "SxxExx 格式季集"),
-        ("episode_title", "单集标题", "季集信息", "TMDB 单集标题"),
-        ("episode_date", "单集日期", "季集信息", "TMDB 单集播出日期"),
-        ("season_year", "季度年份", "季集信息", "当前季首播年份"),
-        ("part", "分段", "文件解析", "Part/段编号"),
-        ("fileExt", "文件扩展名", "文件解析", "例如 .mkv"),
-        ("customization", "自定义占位符", "文件解析", "MP 自定义占位符结果"),
-        ("resourceType", "资源类型", "技术参数", "WEB-DL、BluRay 等"),
-        ("effect", "特效", "技术参数", "HDR、杜比视界等"),
-        ("edition", "版本", "技术参数", "资源类型与特效组合"),
-        ("videoFormat", "分辨率", "技术参数", "1080p、2160p 等"),
-        ("resource_term", "质量", "技术参数", "资源类型、特效和分辨率组合"),
-        ("releaseGroup", "制作组/字幕组", "技术参数", "识别到的发布组"),
-        ("videoCodec", "视频编码", "技术参数", "H264、H265 等"),
-        ("videoBit", "视频位深", "技术参数", "8bit、10bit 等"),
-        ("audioCodec", "音频编码", "技术参数", "AAC、FLAC 等"),
-        ("fps", "帧率", "技术参数", "视频帧率"),
-        ("webSource", "流媒体平台", "技术参数", "Netflix、Amazon 等"),
-        ("torrent_title", "种子标题", "种子信息", "下载种子标题"),
-        ("pubdate", "发布时间", "种子信息", "种子发布时间"),
-        ("freedate", "免费剩余时间", "种子信息", "免费促销剩余时间"),
-        ("seeders", "做种数", "种子信息", "种子做种人数"),
-        ("volume_factor", "促销信息", "种子信息", "种子促销系数"),
-        ("hit_and_run", "Hit&Run", "种子信息", "是否为 Hit&Run"),
-        ("labels", "种子标签", "种子信息", "种子标签列表"),
-        ("description", "种子描述", "种子信息", "已清理 HTML 的种子描述"),
-        ("site_name", "站点名称", "种子信息", "来源站点"),
-        ("size", "资源大小", "种子信息", "格式化资源大小"),
-        ("transfer_type", "整理方式", "整理结果", "复制、硬链接等"),
-        ("file_count", "文件数", "整理结果", "整理文件数量"),
-        ("total_size", "整理总大小", "整理结果", "整理文件总大小"),
-        ("err_msg", "错误信息", "整理结果", "整理失败信息"),
+    # 这里只列出 TransHandler.get_naming_dict() 在命名渲染前真实传入的字段。
+    # TemplateContextBuilder 还支持 torrentinfo / transferinfo，但文件命名调用并未传入
+    # 这两个对象；相应字段只服务于通知模板，不能冒充为可用的命名字段。
+    BUILTIN_FIELDS: Tuple[Tuple[str, str, str, str, str], ...] = (
+        ("title", "媒体标题", "媒体信息", "TMDB/豆瓣识别后的主标题。", "识别成功后可用"),
+        ("en_title", "英文标题", "媒体信息", "TMDB 返回的英文标题；识别源没有英文资料时为空。", "可能为空"),
+        ("original_title", "原语种标题", "媒体信息", "TMDB/豆瓣返回的原语种标题，不是源文件名。", "可能为空"),
+        ("name", "文件识别名称", "文件解析", "MoviePilot 从文件名中解析出的名称，存在中英文时通常优先中文。", "解析成功后可用"),
+        ("en_name", "文件识别英文名", "文件解析", "MoviePilot 从文件名中解析出的英文名称。", "可能为空"),
+        ("original_name", "MP 原始标题", "文件解析", "MetaBase 保存的原始标题；它不是完整路径，真实文件名请使用 source_name。", "解析阶段可用"),
+        ("year", "年份", "媒体信息", "媒体年份；优先采用识别结果，识别结果缺失时可能沿用文件解析年份。", "可能为空"),
+        ("title_year", "标题与年份", "媒体信息", "MoviePilot 组合的“标题 (年份)”文本；无年份时通常只有标题。", "识别成功后可用"),
+        ("type", "媒体类型", "媒体信息", "MoviePilot 媒体类型，通常为“电影”或“电视剧”。", "识别成功后可用"),
+        ("category", "二级分类", "媒体信息", "MoviePilot 根据分类配置得到的媒体分类，例如动漫；未配置或未命中时为空。", "可能为空"),
+        ("vote_average", "评分", "媒体信息", "识别源返回的媒体评分。", "可能为空"),
+        ("poster", "海报", "媒体信息", "识别源返回的海报图片地址。", "可能为空"),
+        ("backdrop", "背景图", "媒体信息", "识别源返回的背景图片地址。", "可能为空"),
+        ("actors", "演员", "媒体信息", "识别结果中的前五位演员，以顿号连接。", "可能为空"),
+        ("overview", "简介", "媒体信息", "识别源返回的媒体简介。", "可能为空"),
+        ("tmdbid", "TMDB ID", "媒体信息", "TMDB 媒体编号；非 TMDB 识别源时为空。", "按识别源可用"),
+        ("imdbid", "IMDB ID", "媒体信息", "IMDB 媒体编号；识别结果未提供时为空。", "可能为空"),
+        ("doubanid", "豆瓣 ID", "媒体信息", "豆瓣媒体编号；非豆瓣识别源时为空。", "按识别源可用"),
+        ("season", "季号", "季集信息", "数值季号，例如 1；仅电视剧且成功解析季信息时有意义。", "电视剧可用"),
+        ("season_fmt", "格式化季号", "季集信息", "格式化季号，例如 S01。", "电视剧可用"),
+        ("episode", "集号", "季集信息", "当前集号或多集列表。", "剧集文件可用"),
+        ("total_episodes", "本季总集数", "季集信息", "本次识别取得的 TMDB 当前季集数；未拉取集详情时为 0。", "电视剧可用"),
+        ("season_episode", "季集组合", "季集信息", "MoviePilot 组合的 SxxExx 季集文本。", "剧集文件可用"),
+        ("episode_title", "单集标题", "季集信息", "TMDB 对应集的标题；需要取得剧集详情且集号命中。", "可能为空"),
+        ("episode_date", "单集日期", "季集信息", "TMDB 对应集的播出日期；需要取得剧集详情且集号命中。", "可能为空"),
+        ("season_year", "季度年份", "季集信息", "识别结果中当前季的首播年份。", "可能为空"),
+        ("part", "分段", "文件解析", "从文件名识别的 Part/Disc 分段编号。", "可能为空"),
+        ("fileExt", "文件扩展名", "文件解析", "当前待整理文件扩展名，例如 .mkv；整目录资源时可能为空。", "文件整理可用"),
+        ("customization", "MP 自定义占位符", "文件解析", "MoviePilot 识别词产生的自定义占位符结果。", "命中规则时可用"),
+        ("resourceType", "资源类型", "技术参数", "从文件名解析的 WEB-DL、BluRay 等资源类型。", "可能为空"),
+        ("effect", "特效", "技术参数", "从文件名解析的 HDR、杜比视界等效果。", "可能为空"),
+        ("edition", "版本", "技术参数", "MoviePilot 组合的资源类型与特效信息。", "可能为空"),
+        ("videoFormat", "分辨率", "技术参数", "从文件名解析的 1080p、2160p 等分辨率。", "可能为空"),
+        ("resource_term", "质量组合", "技术参数", "MoviePilot 组合的资源类型、特效和分辨率。", "可能为空"),
+        ("releaseGroup", "制作组/字幕组", "技术参数", "从文件名中识别到的发布组。", "可能为空"),
+        ("videoCodec", "视频编码", "技术参数", "从文件名解析的 H264、H265 等视频编码。", "可能为空"),
+        ("videoBit", "视频位深", "技术参数", "从文件名解析的 8bit、10bit 等视频位深。", "可能为空"),
+        ("audioCodec", "音频编码", "技术参数", "从文件名解析的 AAC、FLAC 等音频编码。", "可能为空"),
+        ("fps", "帧率", "技术参数", "从文件名解析的帧率；不会自动读取文件媒体流。", "可能为空"),
+        ("webSource", "流媒体平台", "技术参数", "从文件名解析的 Netflix、Amazon 等平台。", "可能为空"),
     )
-    CONTEXT_FIELDS: Tuple[Tuple[str, str, str, str], ...] = (
-        ("source_path", "源文件完整路径", "源文件上下文", "待整理文件或目录的完整源路径"),
-        ("source_dir", "源文件所在目录", "源文件上下文", "源文件父目录；目录资源则为其上级目录"),
-        ("source_name", "源文件名", "源文件上下文", "包含扩展名的源文件名"),
-        ("source_stem", "源文件主名", "源文件上下文", "不包含扩展名的源文件名"),
-        ("source_ext", "源文件扩展名", "源文件上下文", "例如 .mkv"),
-        ("source_storage", "源存储名称", "源文件上下文", "MoviePilot FileItem 的存储标识"),
-        ("source_item_type", "源项目类型", "源文件上下文", "file 或 dir"),
-        ("source_size", "源文件大小", "源文件上下文", "字节数；不可用时为 0"),
-        ("target_dir", "目标根目录", "目标目录上下文", "分类完成后、套用命名模板前的目标目录"),
-        ("rendered_relative_path", "初次渲染相对路径", "目标目录上下文", "自定义目标字段补算前的模板渲染结果"),
-        ("target_path_before_custom", "初次渲染目标路径", "目标目录上下文", "目标根目录与初次渲染结果组合后的路径"),
+    CONTEXT_FIELDS: Tuple[Tuple[str, str, str, str, str], ...] = (
+        ("source_path", "源文件完整路径", "源文件上下文", "待整理文件或目录的完整路径；MP 仅做命名预览而未提供源对象时为空。", "实际整理渲染前可用"),
+        ("source_dir", "源文件所在目录", "源文件上下文", "源文件的父目录；待整理对象是目录时则为该目录的上级目录。", "实际整理渲染前可用"),
+        ("source_name", "真实源文件名", "源文件上下文", "FileItem 中包含扩展名的真实文件名；需要完整文件名时应使用它而不是 original_name。", "实际整理渲染前可用"),
+        ("source_stem", "源文件主名", "源文件上下文", "真实源文件名去掉最后一个扩展名后的部分。", "实际整理渲染前可用"),
+        ("source_ext", "源文件扩展名", "源文件上下文", "真实源文件扩展名，例如 .mkv。", "实际整理渲染前可用"),
+        ("source_storage", "源存储标识", "源文件上下文", "MoviePilot FileItem 的存储标识，不一定是用户看到的显示名称。", "实际整理渲染前可用"),
+        ("source_item_type", "源项目类型", "源文件上下文", "待整理对象类型，通常为 file 或 dir。", "实际整理渲染前可用"),
+        ("source_size", "源文件大小", "源文件上下文", "FileItem 提供的字节数；不可用、命名预览或目录资源时可能为 0。", "实际整理渲染前可用"),
+        ("target_dir", "分类后目标根目录", "目标路径上下文（整理前）", "MP 已完成媒体库及二级分类选择后的目标根目录。它在文件操作前已确定，但插件只能在首次模板渲染后取得。", "第二阶段重渲染可用"),
+        ("rendered_relative_path", "首次命名结果", "目标路径上下文（整理前）", "MP 使用原命名上下文首次渲染出的相对路径；此时尚未复制、移动或链接文件。", "第二阶段重渲染可用"),
+        ("target_path_before_custom", "自定义处理前目标路径", "目标路径上下文（整理前）", "目标根目录与首次命名结果组合后的路径，用于根据原定目标做条件判断；并非整理完成后的实际结果。", "第二阶段重渲染可用"),
     )
     TARGET_CONTEXT_KEYS = {"target_dir", "rendered_relative_path", "target_path_before_custom"}
     _builtin_keys = {item[0] for item in BUILTIN_FIELDS}
@@ -254,16 +243,30 @@ class RenameFieldRegistry:
     def builtin_catalog(cls) -> List[Dict[str, str]]:
         """返回内置重命名字段说明。"""
         return [
-            {"key": key, "label": label, "category": category, "description": description}
-            for key, label, category, description in cls.BUILTIN_FIELDS
+            {
+                "key": key,
+                "label": label,
+                "category": category,
+                "description": description,
+                "availability": availability,
+                "phase": "mp_naming",
+            }
+            for key, label, category, description, availability in cls.BUILTIN_FIELDS
         ]
 
     @classmethod
     def context_catalog(cls) -> List[Dict[str, str]]:
         """返回插件在重命名事件中补充的源文件与目标目录字段。"""
         return [
-            {"key": key, "label": label, "category": category, "description": description}
-            for key, label, category, description in cls.CONTEXT_FIELDS
+            {
+                "key": key,
+                "label": label,
+                "category": category,
+                "description": description,
+                "availability": availability,
+                "phase": "target_rerender" if key in cls.TARGET_CONTEXT_KEYS else "plugin_pre_render",
+            }
+            for key, label, category, description, availability in cls.CONTEXT_FIELDS
         ]
 
     @classmethod
