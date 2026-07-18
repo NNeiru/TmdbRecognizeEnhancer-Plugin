@@ -129,17 +129,27 @@ class MoviePilotRuntimeAdapter:
 
 
 class SubtitleRenameAdapter:
-    """在 MP 生成标准字幕语言后缀后提供插件映射点，不修改源码文件。"""
+    """在 MP 生成字幕语言后缀后，对完整相对结果提供一次映射点。"""
 
     _method_name = "_TransHandler__rename_subtitles"
     _marker = "_tmdb_enhancer_subtitle_wrapper"
     _processor_attr = "_tmdb_enhancer_subtitle_processor"
     _processor_owner_attr = "_tmdb_enhancer_subtitle_processor_owner"
+    _target_root_context: ContextVar[Optional[Path]] = ContextVar(
+        "tmdb_enhancer_subtitle_root", default=None
+    )
 
     def __init__(self) -> None:
         self.compatible = False
         self.message = "尚未安装字幕命名适配器"
         self._owner_token = object()
+
+    def prepare(self, target_root: Any) -> None:
+        """TransferRename 与字幕后缀生成紧邻执行，在当前上下文记录媒体库根目录。"""
+        self._target_root_context.set(Path(target_root) if target_root else None)
+
+    def clear_pending(self) -> None:
+        self._target_root_context.set(None)
 
     def install(self, processor=None) -> bool:
         try:
@@ -164,10 +174,22 @@ class SubtitleRenameAdapter:
                 if not callable(active_processor):
                     return result
                 try:
-                    # 只允许修改最终文件名，禁止映射规则改变目标目录。
-                    mapped_name = active_processor(Path(result).name)
-                    return Path(result).with_name(str(mapped_name or Path(result).name))
+                    result_path = Path(result)
+                    target_root = SubtitleRenameAdapter._target_root_context.get()
+                    SubtitleRenameAdapter._target_root_context.set(None)
+                    if target_root:
+                        try:
+                            relative = result_path.relative_to(target_root)
+                        except ValueError:
+                            relative = None
+                        if relative is not None:
+                            mapped = active_processor(str(relative))
+                            return target_root / str(mapped or relative)
+                    # 旧版 MP 无法传递目标根目录时安全退化为只改文件名。
+                    mapped_name = active_processor(result_path.name)
+                    return result_path.with_name(str(mapped_name or result_path.name))
                 except Exception:
+                    SubtitleRenameAdapter._target_root_context.set(None)
                     return result
 
             setattr(wrapper, self._marker, True)
@@ -178,7 +200,7 @@ class SubtitleRenameAdapter:
             setattr(current, "_tmdb_enhancer_owner", self._owner_token)
 
         self.compatible = True
-        self.message = "已接入 MP 字幕语言后缀生成阶段"
+        self.message = "已接入 MP 字幕后缀后的最终命名阶段"
         return True
 
     def uninstall(self) -> None:

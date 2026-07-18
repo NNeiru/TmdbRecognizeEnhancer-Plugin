@@ -1,4 +1,4 @@
-"""文件命名各阶段的可配置顺序映射。"""
+"""最终命名结果的可配置顺序映射。"""
 
 from __future__ import annotations
 
@@ -10,19 +10,17 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 
 RENAME_MAPPING_STAGES: Dict[str, Dict[str, str]] = {
+    "final_result": {
+        "label": "最终命名结果",
+        "description": "以 MP 首次渲染及字幕后缀处理完成后的相对路径为输入，在文件操作前统一改写一次。",
+    },
     "release_group": {
-        "label": "制作组字段",
-        "description": "在 Jinja2 首次渲染前处理 releaseGroup，可统一合作组顺序、别名和连接符。",
-    },
-    "rendered_path": {
-        "label": "命名结果",
-        "description": "处理 MP 渲染出的相对目录与文件名，发生在实际复制、移动或链接之前。",
-    },
-    "subtitle_name": {
-        "label": "字幕文件名",
-        "description": "在 MP 追加字幕语言后缀后处理文件名，例如 .chi.zh-cn.srt → .chs.srt。",
+        "label": "旧版制作组映射",
+        "description": "兼容旧配置；新制作组规则请使用结构化制作组编排。",
     },
 }
+
+_LEGACY_FINAL_STAGES = {"rendered_path", "subtitle_name"}
 
 
 class RenameMappingRegistry:
@@ -59,10 +57,13 @@ class RenameMappingRegistry:
             return []
         output: List[Dict[str, Any]] = []
         seen = set()
+        seen_semantics = set()
         for raw in value[:cls._MAX_RULES]:
             if not isinstance(raw, dict):
                 continue
-            stage = str(raw.get("stage") or "rendered_path").strip().lower()
+            stage = str(raw.get("stage") or "final_result").strip().lower()
+            if stage in _LEGACY_FINAL_STAGES:
+                stage = "final_result"
             mode = str(raw.get("mode") or "literal").strip().lower()
             pattern = str(raw.get("pattern") or "")
             replacement = str(raw.get("replacement") or "")
@@ -70,6 +71,10 @@ class RenameMappingRegistry:
                 continue
             if not pattern or len(pattern) > 2000 or len(replacement) > 1000:
                 continue
+            semantic_key = (stage, mode, pattern, replacement)
+            if semantic_key in seen_semantics:
+                continue
+            seen_semantics.add(semantic_key)
             rule_id = str(raw.get("id") or "").strip() or cls._rule_id(
                 stage, mode, pattern, replacement
             )
@@ -161,7 +166,7 @@ class RenameMappingRegistry:
         candidate = dict(rule or {})
         if not str(candidate.get("id") or "").strip():
             candidate["id"] = cls._rule_id(
-                str(candidate.get("stage") or "rendered_path"),
+                str(candidate.get("stage") or "final_result"),
                 str(candidate.get("mode") or "literal"),
                 str(candidate.get("pattern") or ""),
                 str(candidate.get("replacement") or ""),

@@ -42,7 +42,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.0-beta.8"
+    plugin_version = "0.5.0-beta.9"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -694,10 +694,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
         })
 
     def save_rename_mapping_api(self, payload: dict = Body(...)) -> schemas.Response:
-        """新增或更新一条制作组、命名结果或字幕文件名映射。"""
+        """新增或更新一条最终命名映射；旧版制作组规则继续只做兼容。"""
         current = self._read_rename_mappings()
         rule_id = str(payload.get("id") or "").strip()
         candidate = [item for item in current if not rule_id or item.get("id") != rule_id]
+        payload = dict(payload or {})
+        existing = next((item for item in current if item.get("id") == rule_id), None)
+        if not existing or existing.get("stage") != "release_group":
+            payload["stage"] = "final_result"
         try:
             normalized = RenameMappingRegistry.validate_rule(payload, candidate)
         except ValueError as err:
@@ -749,8 +753,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return self.get_metadata_tools_api()
 
     def preview_rename_mapping_api(self, payload: dict = Body(...)) -> schemas.Response:
-        """按实际顺序试算某一个命名阶段。"""
-        stage = str(payload.get("stage") or "rendered_path").strip().lower()
+        """按实际顺序试算文件操作前的完整相对命名结果。"""
+        stage = "final_result"
         value = str(payload.get("value") or "")
         output, changes = self._rename_mappings.apply(value, stage)
         return schemas.Response(success=True, data={
@@ -814,6 +818,56 @@ class TmdbRecognizeEnhancer(_PluginBase):
             )
             result["episode_rule"] = episode_preview.get("rule")
             result["episode_adjustment"] = episode_preview.get("result")
+            raw_group = str(hints.get("release_group") or "")
+            arranged_group, group_trace = self._release_group_arrangements.apply(raw_group)
+            arranged_group, legacy_group_changes = self._rename_mappings.apply(
+                arranged_group, "release_group"
+            )
+            group_trace = dict(group_trace or {})
+            group_trace.update({
+                "input": raw_group,
+                "output": arranged_group,
+                "legacy_changes": legacy_group_changes,
+                "applied": bool(group_trace.get("applied") or legacy_group_changes),
+            })
+            rendered_input = str(payload.get("rendered_path") or raw_title)
+            final_output, final_changes = self._apply_final_naming_mapping(
+                rendered_input, include_changes=True,
+            )
+            final_coordinates = episode_preview.get("result") or {}
+            best = result.get("best") or {}
+            media_type = self._normalize_media_type(best.get("media_type") or hints.get("media_type"))
+            rename_context = {
+                "title": best.get("name") or title,
+                "name": title,
+                "original_name": raw_title,
+                "year": best.get("year") or hints.get("year") or "",
+                "type": getattr(media_type, "value", media_type) or "",
+                "tmdbid": best.get("tmdb_id") or "",
+                "season": final_coordinates.get("season", hints.get("season")),
+                "episode": final_coordinates.get("episode", hints.get("episode")),
+                "releaseGroup": arranged_group,
+            }
+            rename_context.update(self._build_rename_source_context(raw_title))
+            rename_context.update(self._build_rename_target_context("", rendered_input))
+            custom_values, custom_errors = self._rename_fields.evaluate(
+                self._custom_rename_fields, rename_context,
+            ) if self._config.get("custom_rename_fields_enabled") else ({}, [])
+            result["release_group_arrangement"] = group_trace
+            result["recognition_rule_changes"] = hints.get("recognition_rule_changes") or []
+            result["custom_rename_fields"] = {
+                "values": custom_values,
+                "errors": custom_errors,
+                "configured": len(self._custom_rename_fields),
+                "simulated": True,
+            }
+            result["final_naming"] = {
+                "input": rendered_input,
+                "output": final_output,
+                "changes": final_changes,
+                "exact_input": bool(str(payload.get("rendered_path") or "").strip()),
+                "source": "mp_rendered_path" if str(payload.get("rendered_path") or "").strip() else "original_title_fallback",
+            }
             result["pipeline"] = [
                 {
                     "module": "MoviePilot 标题解析（识别前）",
@@ -821,7 +875,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "summary": f"{title} · 年份 {hints.get('year') or '未提供'} · S{hints.get('season') or '?'}E{hints.get('episode') or '?'}",
                 },
                 {
-                    "module": "制作组辅助",
+                    "module": "识别字段覆盖",
+                    "status": "applied" if hints.get("recognition_rule_changes") else "skipped",
+                    "summary": (
+                        f"命中 {len(hints.get('recognition_rule_changes') or [])} 条用户覆盖规则"
+                        if hints.get("recognition_rule_changes") else
+                        "没有识别字段覆盖规则命中"
+                    ),
+                },
+                {
+                    "module": "制作组类型辅助",
                     "status": "applied" if hints.get("release_group_profile") else "skipped",
                     "summary": (
                         f"{hints['release_group_profile'].get('release_group')} → "
@@ -844,6 +907,32 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         "applied" if (episode_preview.get("result") or {}).get("applied") else "skipped"
                     ),
                     "summary": (episode_preview.get("result") or {}).get("reason"),
+                },
+                {
+                    "module": "制作组命名编排",
+                    "status": "applied" if group_trace.get("applied") else "skipped",
+                    "summary": (
+                        f"{raw_group} → {arranged_group}"
+                        if group_trace.get("applied") else
+                        ("未识别到制作组" if not raw_group else "制作组保持原样")
+                    ),
+                },
+                {
+                    "module": "自定义命名字段",
+                    "status": "applied" if custom_values else "skipped",
+                    "summary": (
+                        f"试算 {len(custom_values)} 个字段"
+                        if custom_values else
+                        (f"已配置 {len(self._custom_rename_fields)} 个字段，本样本未产生值" if self._custom_rename_fields else "未配置自定义命名字段")
+                    ),
+                },
+                {
+                    "module": "最终命名二次渲染",
+                    "status": "applied" if final_changes else "skipped",
+                    "summary": (
+                        f"{rendered_input} → {final_output}"
+                        if final_changes else "没有最终命名规则命中，保持首次结果"
+                    ),
                 },
             ]
             return schemas.Response(success=True, data=result)
@@ -1769,23 +1858,24 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     @eventmanager.register(ChainEventType.TransferRename, priority=100)
     def on_transfer_rename_mapping(self, event: Event) -> None:
-        """在其它命名处理完成后顺序映射相对路径；字幕语言后缀由运行时适配器随后处理。"""
+        """在文件操作前统一改写最终相对路径；字幕延迟到 MP 追加语言后缀之后。"""
         if not self.get_state() or not self._config.get("rename_mapping_enabled"):
             return
         if not event or not event.event_data:
             return
         data = event.event_data
+        if self._is_subtitle_transfer(data) and self._subtitle_rename_adapter.compatible:
+            # __rename_subtitles 紧接 TransferRename 执行。这里只记录媒体库根目录，
+            # 等语言后缀生成完成后再对完整相对路径统一执行一次，避免重复替换。
+            self._subtitle_rename_adapter.prepare(self._event_get(data, "path"))
+            return
+        self._subtitle_rename_adapter.clear_pending()
         current = (
             self._event_get(data, "updated_str")
             if self._event_get(data, "updated") else self._event_get(data, "render_str")
         )
-        mapped, changes = self._rename_mappings.apply(current, "rendered_path")
+        mapped, changes = self._apply_final_naming_mapping(current, include_changes=True)
         if not changes:
-            return
-        # render_str 只能是相对路径；拒绝规则把整理目标逃逸到媒体库根目录之外。
-        candidate = Path(mapped)
-        if candidate.is_absolute() or ".." in candidate.parts:
-            logger.warning(f"[TMDB识别增强] 命名映射产生了不安全路径，已拒绝：{mapped}")
             return
         self._event_set(data, "render_str", mapped)
         self._event_set(data, "updated", True)
@@ -2027,18 +2117,40 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self._runtime_adapter.uninstall()
 
     def _sync_subtitle_adapter_state(self) -> None:
-        """按模块开关安装或恢复 MP 字幕后缀后的文件名映射点。"""
+        """按模块开关安装或恢复 MP 字幕后缀后的最终命名点。"""
         if self.get_state() and self._config.get("rename_mapping_enabled"):
-            self._subtitle_rename_adapter.install(self._apply_subtitle_name_mapping)
+            self._subtitle_rename_adapter.install(self._apply_final_naming_mapping)
         else:
             self._subtitle_rename_adapter.uninstall()
 
-    def _apply_subtitle_name_mapping(self, filename: Any) -> str:
-        """由字幕适配器调用；输入输出都只允许是文件名，不改变目录。"""
-        mapped, changes = self._rename_mappings.apply(filename, "subtitle_name")
+    def _apply_final_naming_mapping(
+            self, value: Any, include_changes: bool = False,
+    ) -> Any:
+        """统一执行最终命名规则，并拒绝绝对路径和父目录逃逸。"""
+        original = str(value or "")
+        mapped, changes = self._rename_mappings.apply(original, "final_result")
+        candidate = Path(mapped)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            logger.warning(f"[TMDB识别增强] 最终命名规则产生了不安全路径，已拒绝：{mapped}")
+            mapped, changes = original, []
         if changes and self._config.get("debug"):
-            logger.info(f"[TMDB识别增强] 字幕文件名映射：{changes}")
-        return Path(mapped).name
+            logger.info(f"[TMDB识别增强] 最终命名二次渲染：{changes}")
+        return (mapped, changes) if include_changes else mapped
+
+    @classmethod
+    def _is_subtitle_transfer(cls, data: Any) -> bool:
+        """从 TransferRename 事件识别字幕源文件，兼容字典与对象形式。"""
+        source_item = cls._event_get(data, "source_item")
+        if isinstance(source_item, dict):
+            extension = source_item.get("extension") or source_item.get("ext")
+            source_name = source_item.get("name") or source_item.get("path")
+        else:
+            extension = getattr(source_item, "extension", None) or getattr(source_item, "ext", None)
+            source_name = getattr(source_item, "name", None) or getattr(source_item, "path", None)
+        if not source_name:
+            source_name = cls._event_get(data, "source_path")
+        suffix = str(extension or Path(str(source_name or "")).suffix).lower().lstrip(".")
+        return suffix in {"ass", "ssa", "srt", "sub", "sup", "vtt"}
 
     def _prepare_recognition_input(self, raw_title: str) -> Tuple[str, Dict[str, Any]]:
         """复用 MoviePilot 元数据解析结果，返回搜索标题与识别提示。"""
@@ -2050,6 +2162,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
         try:
             meta = MetaInfo(raw_title)
+            recognition_rule_changes = []
+            if self._config.get("recognition_rule_overrides_enabled"):
+                recognition_rule_changes = self._recognition_rules.apply(meta)
             parsed_title = self._clean_title(getattr(meta, "name", ""))
             if parsed_title:
                 title = parsed_title
@@ -2066,6 +2181,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "release_group": self._clean_title(getattr(meta, "resource_team", "")),
             }
             hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "", 0)})
+            if recognition_rule_changes:
+                hints["recognition_rule_changes"] = recognition_rule_changes
             if parsed_hints["media_type"]:
                 hints["media_type_source"] = "moviepilot"
             if self._config.get("debug") and title != raw_title:

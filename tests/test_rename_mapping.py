@@ -17,7 +17,7 @@ def _load_file(name, filename):
     return module
 
 
-def test_sequential_mapping_covers_group_title_and_subtitle():
+def test_sequential_mapping_migrates_old_title_and_subtitle_stages_to_final_result():
     module = _load_file("test_rename_mapping_module", "rename_mapping.py")
     registry = module.RenameMappingRegistry()
     registry.refresh([
@@ -36,21 +36,34 @@ def test_sequential_mapping_covers_group_title_and_subtitle():
     ])
 
     assert registry.apply("B&A", "release_group")[0] == "A@B"
-    assert registry.apply("命运／奇异赝品/S01E01.mkv", "rendered_path")[0] == "命运-奇异赝品/S01E01.mkv"
-    assert registry.apply("Title.chi.zh-cn.srt", "subtitle_name")[0] == "Title.chs.srt"
+    output, changes = registry.apply(
+        "命运／奇异赝品/Title.chi.zh-cn.srt", "final_result"
+    )
+    assert output == "命运-奇异赝品/Title.chs.srt"
+    assert len(changes) == 2
 
 
 def test_new_rule_with_empty_frontend_id_is_accepted():
     module = _load_file("test_rename_mapping_validation", "rename_mapping.py")
     rules = module.RenameMappingRegistry.validate_rule({
-        "id": "", "label": "标题替换", "stage": "rendered_path", "mode": "literal",
+        "id": "", "label": "标题替换", "stage": "final_result", "mode": "literal",
         "pattern": "旧标题", "replacement": "新标题", "enabled": True,
     })
     assert len(rules) == 1
     assert rules[0]["id"].startswith("rename:")
 
 
-def test_subtitle_adapter_only_changes_filename(monkeypatch):
+def test_legacy_final_stages_are_deduplicated_during_migration():
+    module = _load_file("test_rename_mapping_migration", "rename_mapping.py")
+    rules = module.RenameMappingRegistry.normalize_rules([
+        {"id": "old-render", "stage": "rendered_path", "pattern": "A", "replacement": "B"},
+        {"id": "old-subtitle", "stage": "subtitle_name", "pattern": "A", "replacement": "B"},
+    ])
+    assert len(rules) == 1
+    assert rules[0]["stage"] == "final_result"
+
+
+def test_subtitle_adapter_changes_complete_relative_result_once(monkeypatch):
     runtime = _load_file("test_runtime_adapter_module", "runtime_adapter.py")
 
     class TransHandler:
@@ -69,17 +82,21 @@ def test_subtitle_adapter_only_changes_filename(monkeypatch):
     monkeypatch.setitem(sys.modules, "app.modules.filemanager.transhandler", transhandler_module)
 
     adapter = runtime.SubtitleRenameAdapter()
-    assert adapter.install(lambda filename: filename.replace(".chi.zh-cn", ".chs"))
-    output = TransHandler._TransHandler__rename_subtitles(
-        SimpleNamespace(name="source.chs.srt"), Path("/library/show/Title.srt")
+    relative_prefix = str(Path("AB") / "C")
+    assert adapter.install(
+        lambda value: value.replace(relative_prefix, "ABC").replace(".chi.zh-cn", ".chs")
     )
-    assert output == Path("/library/show/Title.chs.srt")
+    adapter.prepare(Path("/library"))
+    output = TransHandler._TransHandler__rename_subtitles(
+        SimpleNamespace(name="source.chs.srt"), Path("/library/AB/C.srt")
+    )
+    assert output == Path("/library/ABC.chs.srt")
 
     adapter.uninstall()
     restored = TransHandler._TransHandler__rename_subtitles(
-        SimpleNamespace(name="source.chs.srt"), Path("/library/show/Title.srt")
+        SimpleNamespace(name="source.chs.srt"), Path("/library/AB/C.srt")
     )
-    assert restored == Path("/library/show/Title.chi.zh-cn.srt")
+    assert restored == Path("/library/AB/C.chi.zh-cn.srt")
 
 
 def test_release_group_arranger_controls_alias_order_and_connector():

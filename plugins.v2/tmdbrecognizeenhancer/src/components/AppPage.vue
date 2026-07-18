@@ -22,7 +22,7 @@ const tab = ref('status')
 const status = ref({ config: cloneConfig(), summary: {}, history: [] })
 const previewInput = ref({
   title: 'Mushoku Tensei: Isekai Ittara Honki Dasu',
-  year: '', media_type: '', season: '', episode: '',
+  year: '', media_type: '', season: '', episode: '', rendered_path: '',
 })
 const preview = ref(null)
 
@@ -239,7 +239,7 @@ onMounted(loadStatus)
               <VRow>
                 <VCol cols="12" md="5">
                   <VCard variant="outlined">
-                    <VCardItem><VCardTitle>输入完整样本</VCardTitle><VCardSubtitle>依次检查 MP 解析、TMDB 选择和集数偏移，不写入整理链</VCardSubtitle></VCardItem>
+                    <VCardItem><VCardTitle>输入完整样本</VCardTitle><VCardSubtitle>串联检查解析、TMDB、集数偏移、制作组编排与最终命名，不写入整理链</VCardSubtitle></VCardItem>
                     <VCardText>
                       <VAlert type="info" variant="tonal" density="compact" class="mb-4">可直接粘贴原始文件名；插件会先复用 MoviePilot 识别词与解析器，再生成 TMDB 搜索词。</VAlert>
                       <VTextarea v-model="previewInput.title" label="原标题或已提取标题" rows="4" auto-grow variant="outlined" hide-details class="preview-title-field" />
@@ -249,6 +249,15 @@ onMounted(loadStatus)
                         <VCol cols="6"><div class="field-label">季提示</div><VTextField v-model="previewInput.season" aria-label="季提示" type="number" placeholder="可选" variant="outlined" density="comfortable" hide-details /></VCol>
                         <VCol cols="6"><div class="field-label">集提示</div><VTextField v-model="previewInput.episode" aria-label="集提示" type="number" placeholder="可选" variant="outlined" density="comfortable" hide-details /></VCol>
                       </VRow>
+                      <VExpansionPanels variant="accordion" class="mb-4 preview-naming-panel">
+                        <VExpansionPanel>
+                          <VExpansionPanelTitle>最终命名精确试算（可选）</VExpansionPanelTitle>
+                          <VExpansionPanelText>
+                            <VTextarea v-model="previewInput.rendered_path" label="MP 首次生成的相对路径或文件名" placeholder="不填时以原标题作为试算基线" rows="2" auto-grow variant="outlined" hide-details />
+                            <div class="text-caption text-medium-emphasis mt-2">填写后可精确验证最终二次渲染；不填仍会完成其它模块，并用原标题演示命名规则是否命中。</div>
+                          </VExpansionPanelText>
+                        </VExpansionPanel>
+                      </VExpansionPanels>
                       <VBtn block color="primary" size="large" prepend-icon="mdi-play" :loading="previewing" @click="runPreview">开始综合试跑</VBtn>
                     </VCardText>
                   </VCard>
@@ -270,6 +279,9 @@ onMounted(loadStatus)
                         页面请求模式与插件已保存模式不同：本次按页面选择执行；请重新保存配置，确保实际整理使用相同模式。
                       </VAlert>
                       <VAlert v-if="preview.original_title" type="info" variant="tonal" density="compact" class="mb-4">解析后标题：{{ preview.title }}</VAlert>
+                      <VAlert v-if="preview.recognition_rule_changes?.length" type="success" variant="tonal" density="compact" class="mb-4">
+                        识别字段覆盖：<span v-for="(item, index) in preview.recognition_rule_changes" :key="item.rule_id || index"><span v-if="index">；</span>{{ item.field }}：{{ item.before ?? '空' }} → {{ item.after ?? '空' }}</span>
+                      </VAlert>
                       <VAlert v-if="preview.type_constraint?.active" type="info" variant="tonal" density="compact" class="mb-4">
                         类型约束：{{ preview.type_constraint.label }}（{{ typeConstraintSourceText(preview.type_constraint.source) }}）<span v-if="preview.type_constraint.removed_count">；已排除 {{ preview.type_constraint.removed_count }} 个类型冲突候选</span>
                       </VAlert>
@@ -298,13 +310,22 @@ onMounted(loadStatus)
                         <strong>集数偏移：</strong>{{ preview.episode_adjustment.reason }}
                         <span v-if="preview.episode_adjustment.coordinates_authoritative !== false && preview.episode_adjustment.season != null && preview.episode_adjustment.episode != null"> · 最终 S{{ String(preview.episode_adjustment.season).padStart(2, '0') }}E{{ String(preview.episode_adjustment.episode).padStart(2, '0') }}</span>
                       </VAlert>
+                      <VCard v-if="preview.release_group_arrangement?.input" variant="tonal" color="secondary" class="mt-4">
+                        <VCardText><div class="text-caption text-medium-emphasis">制作组命名编排</div><div class="result-path"><code>{{ preview.release_group_arrangement.input }}</code><VIcon icon="mdi-arrow-right" size="18" /><code>{{ preview.release_group_arrangement.output }}</code></div></VCardText>
+                      </VCard>
+                      <VCard v-if="Object.keys(preview.custom_rename_fields?.values || {}).length" variant="outlined" class="mt-4">
+                        <VCardText><div class="text-caption text-medium-emphasis mb-2">自定义命名字段试算</div><div class="custom-preview-values"><div v-for="(value, key) in preview.custom_rename_fields.values" :key="key"><code>{{ key }}</code><span>{{ value || '（空）' }}</span></div></div><VAlert v-if="preview.custom_rename_fields.errors?.length" type="warning" variant="tonal" density="compact" class="mt-3">{{ preview.custom_rename_fields.errors.map(item => `${item.key}：${item.message}`).join('；') }}</VAlert></VCardText>
+                      </VCard>
+                      <VCard v-if="preview.final_naming" variant="tonal" color="primary" class="mt-4">
+                        <VCardText><div class="d-flex align-center flex-wrap ga-2"><div class="text-caption text-medium-emphasis">最终命名二次渲染</div><VChip size="x-small" variant="tonal">{{ preview.final_naming.exact_input ? '精确输入' : '原标题演示' }}</VChip></div><div class="result-path"><code>{{ preview.final_naming.input }}</code><VIcon icon="mdi-arrow-right" size="18" /><code>{{ preview.final_naming.output }}</code></div><div class="text-caption text-medium-emphasis mt-2">命中 {{ preview.final_naming.changes?.length || 0 }} 条规则；真实整理时输入来自 MP 完成首次命名及字幕后缀后的完整相对路径。</div></VCardText>
+                      </VCard>
                       <VTable v-if="preview.candidates?.length" density="compact" class="candidate-table mt-4">
                         <thead><tr><th>候选</th><th>命中名称</th><th>得分</th></tr></thead>
                         <tbody><tr v-for="candidate in preview.candidates" :key="`${candidate.media_type}-${candidate.tmdb_id}`" :class="{ 'candidate-suppressed': candidate.suppressed_as_duplicate || candidate.suppressed_as_shadow_season }"><td><strong>{{ candidate.name }}</strong><div class="text-caption text-medium-emphasis">{{ candidate.year || '—' }} · #{{ candidate.tmdb_id }}</div><VChip v-if="candidate.suppressed_as_duplicate" size="x-small" color="info" variant="tonal" class="mt-1">重复项，归入 #{{ candidate.duplicate_of }}</VChip><VChip v-else-if="candidate.suppressed_as_shadow_season" size="x-small" color="warning" variant="tonal" class="mt-1">平行单季项，归入 #{{ candidate.shadow_of }}</VChip></td><td class="text-caption">{{ candidate.matched_name || '—' }}<div class="text-medium-emphasis">查询来源 {{ candidate.query_confidence ?? 0 }}<span v-if="candidate.web_evidence"> · 外部证据 {{ candidate.web_evidence }}</span></div><div v-if="candidate.release_group_evidence?.component !== null" class="text-medium-emphasis">制作组 {{ candidate.release_group_evidence.label }}：{{ candidate.release_group_evidence.component }} 分</div><div v-if="candidate.seasonal_evidence?.active" class="context-evidence">当季 {{ candidate.seasonal_evidence.quarter }}：{{ candidate.seasonal_evidence.component }} 分</div><div v-if="candidate.memory_evidence?.active" class="context-evidence">近期命中 {{ candidate.memory_evidence.hits }} 次（{{ candidate.memory_evidence.age_days }} 天前）：{{ candidate.memory_evidence.component }} 分</div></td><td><VChip size="small" :color="scoreColor(candidate.score)">{{ preview.selection_mode === 'tmdb_first' ? '诊断 ' : '' }}{{ candidate.diagnostic_score ?? candidate.score }}</VChip></td></tr></tbody>
                       </VTable>
                     </VCardText>
                   </VCard>
-                  <div v-else class="empty-preview"><VIcon icon="mdi-chart-bubble" size="64" color="primary" /><div class="text-h6 mt-3">等待一次综合试跑</div><div class="text-body-2 text-medium-emphasis">结果会同时解释 TMDB 候选与最终季集坐标</div></div>
+                  <div v-else class="empty-preview"><VIcon icon="mdi-chart-bubble" size="64" color="primary" /><div class="text-h6 mt-3">等待一次综合试跑</div><div class="text-body-2 text-medium-emphasis">结果会解释从标题解析到最终命名的完整插件链路</div></div>
                 </VCol>
               </VRow>
             </div>
@@ -376,10 +397,14 @@ onMounted(loadStatus)
 .sticky-actions { position: sticky; bottom: 0; z-index: 3; display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin: 18px -26px -26px; padding: 14px 26px; border-top: 1px solid rgba(var(--v-theme-on-surface),.08); background: rgba(var(--v-theme-surface),.94); backdrop-filter: blur(10px); }
 .preview-title-field { margin-bottom: 24px; }
 .preview-hints { margin-bottom: 12px; row-gap: 10px; }
+.preview-naming-panel { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
 .field-label { margin: 0 0 7px 2px; color: rgba(var(--v-theme-on-surface),.7); font-size: .78rem; font-weight: 600; line-height: 1.2; }
 .result-card { min-height: 390px; }
 .best-result { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border-radius: 14px; background: rgba(var(--v-theme-primary),.055); }
 .pipeline-list { display: grid; gap: 8px; }
+.result-path { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; overflow-wrap: anywhere; }
+.custom-preview-values { display: grid; gap: 7px; }
+.custom-preview-values > div { display: flex; justify-content: space-between; gap: 14px; overflow-wrap: anywhere; }
 .pipeline-item { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 12px; border-radius: 10px; background: rgba(var(--v-theme-primary),.035); }
 .candidate-table { border-radius: 12px; border: 1px solid rgba(var(--v-theme-on-surface),.08); overflow: hidden; }
 .candidate-suppressed { opacity: .62; background: rgba(var(--v-theme-info),.035); }

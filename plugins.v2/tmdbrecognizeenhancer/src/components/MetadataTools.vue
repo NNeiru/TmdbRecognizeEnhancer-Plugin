@@ -31,8 +31,8 @@ const renameFieldSearch = ref('')
 const openRenameFieldGroups = ref(['媒体信息', '文件解析', '源文件上下文'])
 const copiedVariable = ref('')
 const mappingDialog = ref(false)
-const mappingForm = ref({ id: '', label: '', stage: 'rendered_path', mode: 'literal', pattern: '', replacement: '', enabled: true, priority: 100 })
-const mappingPreviewInput = ref({ stage: 'rendered_path', value: '命运／奇异赝品 (2024)/命运／奇异赝品 - S01E01.mkv' })
+const mappingForm = ref({ id: '', label: '', stage: 'final_result', mode: 'literal', pattern: '', replacement: '', enabled: true, priority: 100 })
+const mappingPreviewInput = ref({ value: 'AB/C.chi.zh-cn.ass' })
 const mappingPreview = ref(null)
 const renameRuleSection = ref('groups')
 const groupArrangementDialog = ref(false)
@@ -85,9 +85,8 @@ const kindLabel = value => ({ animation: '动漫', live_action: '真人电视剧
 const kindColor = value => ({ animation: 'primary', live_action: 'orange', unknown: 'default' })[value] || 'default'
 const mappingRules = computed(() => data.value.rename_mappings?.items || [])
 const mappingStages = computed(() => data.value.rename_mappings?.stages || [
-  { value: 'release_group', label: '制作组字段' },
-  { value: 'rendered_path', label: '命名结果' },
-  { value: 'subtitle_name', label: '字幕文件名' },
+  { value: 'final_result', label: '最终命名结果' },
+  { value: 'release_group', label: '旧版制作组映射' },
 ])
 const mappingStageLabel = value => mappingStages.value.find(item => item.value === value)?.label || value
 const groupArrangementRules = computed(() => data.value.release_group_arrangements?.items || [])
@@ -271,7 +270,7 @@ async function copyVariable(key) {
 }
 
 function openMappingRule(item = null) {
-  mappingForm.value = item ? { ...item } : { id: '', label: '', stage: 'rendered_path', mode: 'literal', pattern: '', replacement: '', enabled: true, priority: 100 }
+  mappingForm.value = item ? { ...item } : { id: '', label: '', stage: 'final_result', mode: 'literal', pattern: '', replacement: '', enabled: true, priority: 100 }
   mappingDialog.value = true
 }
 
@@ -296,8 +295,8 @@ async function deleteMappingRule(item) {
 
 async function addSubtitleMappingPreset() {
   const presets = [
-    { label: '简体字幕后缀', stage: 'subtitle_name', mode: 'literal', pattern: '.chi.zh-cn', replacement: '.chs', enabled: true, priority: 120 },
-    { label: '繁体字幕后缀', stage: 'subtitle_name', mode: 'literal', pattern: '.zh-tw', replacement: '.cht', enabled: true, priority: 110 },
+    { label: '简体字幕后缀', stage: 'final_result', mode: 'literal', pattern: '.chi.zh-cn', replacement: '.chs', enabled: true, priority: 120 },
+    { label: '繁体字幕后缀', stage: 'final_result', mode: 'literal', pattern: '.zh-tw', replacement: '.cht', enabled: true, priority: 110 },
   ]
   for (const preset of presets) {
     if (!(await saveMappingRule(preset, false))) return
@@ -463,7 +462,7 @@ onMounted(load)
 
     <section v-else-if="section === 'mapping'">
       <div class="d-flex align-center flex-wrap ga-3 mb-4">
-        <div class="flex-grow-1"><div class="text-h6">统一命名规则</div><div class="text-body-2 text-medium-emphasis">制作组使用结构化编排；标题、路径和字幕使用顺序文本映射。界面统一管理，底层仍在正确的命名阶段执行。</div></div>
+        <div class="flex-grow-1"><div class="text-h6">统一命名规则</div><div class="text-body-2 text-medium-emphasis">先编排制作组；MP 完成首次命名及字幕后缀后，再对完整相对路径统一二次渲染一次。</div></div>
       </div>
       <VTabs v-model="renameRuleSection" color="secondary" class="sub-tabs mb-4">
         <VTab value="groups" prepend-icon="mdi-account-multiple-check-outline">制作组编排</VTab>
@@ -497,23 +496,23 @@ onMounted(load)
 
       <div v-else>
         <div class="d-flex align-center flex-wrap ga-3 mb-4">
-          <VAlert type="info" variant="tonal" density="compact" class="flex-grow-1 mb-0">字段映射在 Jinja2 前执行；标题与路径映射在渲染后执行；字幕映射在 MP 追加语言后缀后执行。</VAlert>
+          <VAlert type="info" variant="tonal" density="compact" class="flex-grow-1 mb-0">无需判断标题、目录还是字幕。把 MP 的完整首次结果当作输入，例如 <code>AB/C.chi.zh-cn.ass</code>，规则连续执行后得到最终路径。</VAlert>
           <VBtn variant="tonal" color="secondary" prepend-icon="mdi-closed-caption-outline" @click="addSubtitleMappingPreset">添加简繁字幕预设</VBtn>
           <VBtn color="primary" prepend-icon="mdi-plus" @click="openMappingRule()">新增文本映射</VBtn>
         </div>
-        <VAlert v-if="!data.rename_mappings?.subtitle_compatible" type="warning" variant="tonal" density="compact" class="mb-4">{{ data.rename_mappings?.subtitle_message || '当前 MP 暂不支持字幕后缀映射；其它两个阶段仍可使用。' }}</VAlert>
+        <VAlert v-if="!data.rename_mappings?.subtitle_compatible" type="warning" variant="tonal" density="compact" class="mb-4">{{ data.rename_mappings?.subtitle_message || '当前 MP 暂不支持在字幕语言后缀生成后执行；视频最终命名仍可使用。' }}</VAlert>
         <div v-if="mappingRules.length" class="mapping-list">
           <VCard v-for="item in mappingRules" :key="item.id" variant="outlined" class="mapping-card">
             <VCardText class="d-flex align-start ga-3">
-              <VAvatar :color="item.stage === 'subtitle_name' ? 'secondary' : item.stage === 'release_group' ? 'primary' : 'orange'" variant="tonal" size="38"><VIcon :icon="item.stage === 'subtitle_name' ? 'mdi-closed-caption-outline' : item.stage === 'release_group' ? 'mdi-account-group-outline' : 'mdi-find-replace'" /></VAvatar>
+              <VAvatar :color="item.stage === 'release_group' ? 'primary' : 'orange'" variant="tonal" size="38"><VIcon :icon="item.stage === 'release_group' ? 'mdi-account-group-outline' : 'mdi-find-replace'" /></VAvatar>
               <div class="flex-grow-1 min-w-0"><div class="d-flex align-center flex-wrap ga-2"><span class="font-weight-bold">{{ item.label }}</span><VChip size="x-small" variant="tonal">{{ mappingStageLabel(item.stage) }}</VChip><VChip size="x-small" :color="item.mode === 'regex' ? 'warning' : 'default'" variant="tonal">{{ item.mode === 'regex' ? '正则' : '字面' }}</VChip><VChip v-if="!item.enabled" size="x-small" variant="tonal">已停用</VChip></div><div class="mapping-expression"><code>{{ item.pattern }}</code><VIcon icon="mdi-arrow-right" size="16" /><code>{{ item.replacement || '（删除）' }}</code></div><div class="text-caption text-medium-emphasis">优先级 {{ item.priority }}</div></div>
               <VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openMappingRule(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `mapping-delete:${item.id}`" @click="deleteMappingRule(item)" />
             </VCardText>
           </VCard>
         </div>
-        <div v-else class="empty-fields"><VIcon icon="mdi-find-replace" size="48" /><div class="mt-2">尚未设置文本映射</div><div class="text-caption mt-1">可先添加简繁字幕预设，或建立自己的标题、路径与高级制作组规则</div></div>
-        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>文本映射试算</VCardTitle><VCardSubtitle>仅运行已保存规则，不执行文件整理。</VCardSubtitle></VCardItem><VCardText>
-          <div class="mapping-preview-form"><VSelect v-model="mappingPreviewInput.stage" label="试算阶段" :items="mappingStages" item-title="label" item-value="value" hide-details /><VTextField v-model="mappingPreviewInput.value" label="输入内容" hide-details /><VBtn color="secondary" prepend-icon="mdi-play" :loading="saving === 'mapping-preview'" @click="previewMappingRules">开始试算</VBtn></div>
+        <div v-else class="empty-fields"><VIcon icon="mdi-find-replace" size="48" /><div class="mt-2">尚未设置最终命名规则</div><div class="text-caption mt-1">可先添加简繁字幕预设，或按 MP 首次命名结果建立任意文字替换</div></div>
+        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>最终结果试算</VCardTitle><VCardSubtitle>输入 MP 第一次生成的相对路径或文件名；这里只试算，不执行文件整理。</VCardSubtitle></VCardItem><VCardText>
+          <div class="mapping-preview-form final-mapping-preview"><VTextField v-model="mappingPreviewInput.value" label="MP 首次命名结果" placeholder="AB/C.chi.zh-cn.ass" hide-details /><VBtn color="secondary" prepend-icon="mdi-play" :loading="saving === 'mapping-preview'" @click="previewMappingRules">开始试算</VBtn></div>
           <VAlert v-if="mappingPreview" :type="mappingPreview.changes?.length ? 'success' : 'info'" variant="tonal" class="mt-4"><div>输出：<code>{{ mappingPreview.output }}</code></div><div class="text-caption mt-1">命中 {{ mappingPreview.changes?.length || 0 }} 条规则</div></VAlert>
         </VCardText></VCard>
       </div>
@@ -571,13 +570,13 @@ onMounted(load)
     </VDialog>
 
     <VDialog v-model="mappingDialog" max-width="820">
-      <VCard><VCardItem><VCardTitle>{{ mappingForm.id ? '编辑文本映射' : '新增文本映射' }}</VCardTitle><VCardSubtitle>选择准确的执行阶段；规则会按优先级从高到低连续执行。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
-        <VRow><VCol cols="12" sm="7"><VSelect v-model="mappingForm.stage" label="执行阶段" :items="mappingStages" item-title="label" item-value="value" /></VCol><VCol cols="12" sm="5"><VSelect v-model="mappingForm.mode" label="匹配模式" :items="[{title:'字面替换',value:'literal'},{title:'正则替换',value:'regex'}]" /></VCol></VRow>
+      <VCard><VCardItem><VCardTitle>{{ mappingForm.id ? '编辑最终命名规则' : '新增最终命名规则' }}</VCardTitle><VCardSubtitle>规则以 MP 的完整首次命名结果为输入，并按优先级从高到低连续执行。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
+        <VSelect v-model="mappingForm.mode" label="匹配模式" :items="[{title:'字面替换',value:'literal'},{title:'正则替换',value:'regex'}]" />
         <VTextField v-model="mappingForm.label" label="规则名称" placeholder="例如：统一合作字幕组顺序" />
         <VTextarea v-model="mappingForm.pattern" :label="mappingForm.mode === 'regex' ? '匹配正则' : '查找文字'" rows="3" auto-grow />
         <VTextField v-model="mappingForm.replacement" label="替换为" hint="留空表示删除；正则模式支持 Python re.sub 的 \1 与 \g<name> 引用" persistent-hint />
         <VRow align="center"><VCol cols="12" sm="7"><VTextField v-model="mappingForm.priority" type="number" label="优先级" hint="数值越大越先执行；后续规则继续处理本规则输出" persistent-hint /></VCol><VCol cols="12" sm="5"><div class="rule-enabled-box"><div><div class="font-weight-medium">启用规则</div><div class="text-caption text-medium-emphasis">停用后保留配置但不执行</div></div><VSwitch v-model="mappingForm.enabled" color="success" hide-details /></div></VCol></VRow>
-        <VAlert type="info" variant="tonal" density="compact"><template v-if="mappingForm.stage === 'release_group'">示例：用正则 <code>^(?:A[&amp;@]B|B[&amp;@]A)$</code> 替换为 <code>A@B</code>，即可固定顺序；只把 <code>&amp;</code> 替换为 <code>@</code> 则保留原标题顺序。</template><template v-else-if="mappingForm.stage === 'subtitle_name'">该阶段只允许改文件名，不允许改变目标目录。</template><template v-else>该阶段可处理渲染后的标题、文件名和相对目录；绝对路径及包含 .. 的结果会被拒绝。</template></VAlert>
+        <VAlert type="info" variant="tonal" density="compact">示例：依次添加 <code>AB/C → ABC</code> 与 <code>.chi.zh-cn → .chs</code>，输入 <code>AB/C.chi.zh-cn.ass</code> 会得到 <code>ABC.chs.ass</code>。绝对路径及包含 <code>..</code> 的危险结果会被拒绝。</VAlert>
       </VCardText><VDivider /><VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="mappingDialog = false">取消</VBtn><VBtn color="primary" :loading="saving === 'rename-mapping'" @click="saveMappingRule()">保存映射</VBtn></VCardActions></VCard>
     </VDialog>
   </div>
@@ -612,6 +611,7 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .mapping-card { background: rgba(var(--v-theme-surface), 1); }
 .mapping-expression { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 3px; overflow-wrap: anywhere; }
 .mapping-preview-form { display: grid; grid-template-columns: minmax(180px, 240px) minmax(280px, 1fr) auto; gap: 14px; align-items: center; }
+.final-mapping-preview { grid-template-columns: minmax(280px, 1fr) auto; }
 .sub-tabs { border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .group-layout-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
 .group-layout-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-height: 126px; }

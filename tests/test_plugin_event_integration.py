@@ -169,7 +169,7 @@ def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
     assert "文件操作前" in target["description"]
 
 
-def test_rename_mapping_runs_at_group_and_rendered_path_stages(monkeypatch):
+def test_rename_mapping_runs_at_group_and_final_result_stages(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = module.TmdbRecognizeEnhancer()
     plugin._config = plugin._normalize_config({
@@ -183,7 +183,7 @@ def test_rename_mapping_runs_at_group_and_rendered_path_stages(monkeypatch):
             "pattern": r"^(?:A[&@]B|B[&@]A)$", "replacement": "A@B",
         },
         {
-            "stage": "rendered_path", "mode": "literal",
+            "stage": "final_result", "mode": "literal",
             "pattern": "命运／奇异赝品", "replacement": "命运-奇异赝品",
         },
     ])
@@ -195,6 +195,7 @@ def test_rename_mapping_runs_at_group_and_rendered_path_stages(monkeypatch):
         "render_str": "命运／奇异赝品/S01E01.mkv",
         "updated": False,
         "updated_str": None,
+        "source_item": {"extension": "mkv"},
     })
     plugin.on_transfer_rename_mapping(rename)
     assert rename.event_data["updated_str"] == "命运-奇异赝品/S01E01.mkv"
@@ -643,6 +644,43 @@ def test_preview_without_rule_does_not_claim_final_coordinates(monkeypatch):
     assert preview["coordinates_authoritative"] is False
     assert preview["season"] is None
     assert "沿用 MP 后续识别结果" in preview["reason"]
+
+
+def test_comprehensive_preview_includes_group_arrangement_and_final_naming(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({"episode_normalizer_enabled": False})
+    plugin._prepare_recognition_input = Mock(return_value=(
+        "Example", {"release_group": "A@VCB", "season": 1, "episode": 2},
+    ))
+    plugin._recognize_title = Mock(return_value={
+        "accepted": True, "title": "Example", "reason": "accepted", "queries": ["Example"],
+        "selection_mode": "tmdb_first", "best": {
+            "tmdb_id": 1, "name": "Example", "media_type": module.MediaType.TV,
+            "year": "2026", "score": 100,
+        }, "candidates": [],
+    })
+    plugin._release_group_arrangements.refresh([{
+        "match_name": "VCB", "output_name": "VCB-Studio", "position": "last",
+        "connector": "&", "order": 100,
+    }])
+    plugin._rename_mappings.refresh([
+        {"stage": "final_result", "pattern": "AB/C", "replacement": "ABC", "priority": 120},
+        {"stage": "final_result", "pattern": ".chi.zh-cn", "replacement": ".chs", "priority": 110},
+    ])
+
+    response = plugin.preview_api({
+        "title": "[A@VCB] Example S01E02.ass",
+        "rendered_path": "AB/C.chi.zh-cn.ass",
+    })
+
+    assert response.success is True
+    assert response.data["release_group_arrangement"]["output"] == "A&VCB-Studio"
+    assert response.data["final_naming"]["output"] == "ABC.chs.ass"
+    assert response.data["final_naming"]["exact_input"] is True
+    assert [step["module"] for step in response.data["pipeline"]][-3:] == [
+        "制作组命名编排", "自定义命名字段", "最终命名二次渲染",
+    ]
 
 
 def test_duplicate_tmdb_entries_share_one_decision_slot(monkeypatch):
