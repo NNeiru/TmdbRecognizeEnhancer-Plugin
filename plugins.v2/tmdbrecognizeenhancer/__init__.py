@@ -31,6 +31,7 @@ from .episode_normalizer import EpisodeNormalizer
 from .metadata_tools import ReleaseGroupRegistry, RenameFieldRegistry
 from .performance_diagnostics import PerformanceDiagnostics
 from .recognition_rules import FIELD_SPECS, RecognitionRuleRegistry
+from .release_group_arranger import ReleaseGroupArrangementRegistry
 from .rename_mapping import RenameMappingRegistry
 from .runtime_adapter import MoviePilotRuntimeAdapter, SubtitleRenameAdapter
 
@@ -41,7 +42,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.0-beta.7"
+    plugin_version = "0.5.0-beta.8"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -56,6 +57,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     DATA_KEY_RECOGNITION_MEMORY = "recognition_memory"
     DATA_KEY_CUSTOM_RENAME_FIELDS = "custom_rename_fields"
     DATA_KEY_RENAME_MAPPINGS = "rename_mappings"
+    DATA_KEY_RELEASE_GROUP_ARRANGEMENTS = "release_group_arrangements"
     # 季度目录匹配使用独立策略，不继承整理识别的 max_queries、降级开关等参数。
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
@@ -139,6 +141,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._recognition_rules = RecognitionRuleRegistry()
         self._rename_fields = RenameFieldRegistry()
         self._custom_rename_fields: Tuple[Dict[str, Any], ...] = tuple()
+        self._release_group_arrangements = ReleaseGroupArrangementRegistry()
         self._rename_mappings = RenameMappingRegistry()
         self._subtitle_rename_adapter = SubtitleRenameAdapter()
         self._diagnostics = PerformanceDiagnostics()
@@ -388,6 +391,27 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "summary": "试算自定义重命名字段",
             },
             {
+                "path": "/metadata-tools/release-group-arrangement",
+                "endpoint": self.save_release_group_arrangement_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "保存制作组名称、顺序和连接符规则",
+            },
+            {
+                "path": "/metadata-tools/release-group-arrangement/delete",
+                "endpoint": self.delete_release_group_arrangement_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "删除制作组编排规则",
+            },
+            {
+                "path": "/metadata-tools/release-group-arrangement/preview",
+                "endpoint": self.preview_release_group_arrangement_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "试算制作组名称、顺序和连接符",
+            },
+            {
                 "path": "/metadata-tools/rename-mapping",
                 "endpoint": self.save_rename_mapping_api,
                 "methods": ["POST"],
@@ -486,7 +510,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
                             and self._subtitle_rename_adapter.compatible else "普通命名可用，字幕适配等待兼容"
                             if self.get_state() and self._config.get("rename_mapping_enabled") else "已停用"
                         ),
-                        "rule_count": self._rename_mappings.catalog().get("count", 0),
+                        "rule_count": (
+                            self._rename_mappings.catalog().get("count", 0)
+                            + self._release_group_arrangements.catalog().get("count", 0)
+                        ),
                     },
                 },
                 "history": history,
@@ -526,7 +553,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         catalog = self._release_group_registry.catalog()
         return schemas.Response(success=True, data={
             "backend_version": self.plugin_version,
-            "api_schema": 2,
+            "api_schema": 3,
             "release_groups": catalog,
             "release_group_profiles": self._read_release_group_profiles(),
             "recognition_rules": self._recognition_rules.catalog(),
@@ -541,6 +568,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "subtitle_compatible": self._subtitle_rename_adapter.compatible,
                 "subtitle_message": self._subtitle_rename_adapter.message,
             },
+            "release_group_arrangements": self._release_group_arrangements.catalog(),
             "capabilities": {
                 "runtime_override": self._runtime_adapter.compatible,
                 "runtime_message": self._runtime_adapter.message,
@@ -677,6 +705,40 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self.save_data(self.DATA_KEY_RENAME_MAPPINGS, normalized)
         self._rename_mappings.refresh(normalized)
         return self.get_metadata_tools_api()
+
+    def save_release_group_arrangement_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """新增或更新一条结构化制作组编排规则。"""
+        current = self._read_release_group_arrangements()
+        rule_id = str(payload.get("id") or "").strip()
+        candidate = [item for item in current if not rule_id or item.get("id") != rule_id]
+        try:
+            normalized = ReleaseGroupArrangementRegistry.validate_rule(payload, candidate)
+        except ValueError as err:
+            return schemas.Response(success=False, message=str(err))
+        self.save_data(self.DATA_KEY_RELEASE_GROUP_ARRANGEMENTS, normalized)
+        self._release_group_arrangements.refresh(normalized)
+        return self.get_metadata_tools_api()
+
+    def delete_release_group_arrangement_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """删除一条结构化制作组编排规则。"""
+        rule_id = str(payload.get("id") or "").strip()
+        rules = [
+            item for item in self._read_release_group_arrangements()
+            if item.get("id") != rule_id
+        ]
+        self.save_data(self.DATA_KEY_RELEASE_GROUP_ARRANGEMENTS, rules)
+        self._release_group_arrangements.refresh(rules)
+        return self.get_metadata_tools_api()
+
+    def preview_release_group_arrangement_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """按实际执行顺序试算结构化制作组编排。"""
+        value = str(payload.get("value") or "")
+        output, trace = self._release_group_arrangements.apply(value)
+        return schemas.Response(success=True, data={
+            "input": value,
+            "output": output,
+            "trace": trace,
+        })
 
     def delete_rename_mapping_api(self, payload: dict = Body(...)) -> schemas.Response:
         """删除一条命名映射。"""
@@ -1639,10 +1701,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not isinstance(rename_dict, dict):
             return
         if self._config.get("rename_mapping_enabled") and rename_dict.get("releaseGroup"):
+            arranged_group, arrangement = self._release_group_arrangements.apply(
+                rename_dict.get("releaseGroup")
+            )
             mapped_group, changes = self._rename_mappings.apply(
-                rename_dict.get("releaseGroup"), "release_group"
+                arranged_group, "release_group"
             )
             rename_dict["releaseGroup"] = mapped_group
+            if arrangement.get("applied") and self._config.get("debug"):
+                logger.info(f"[TMDB识别增强] 制作组结构化编排：{arrangement}")
             if changes and self._config.get("debug"):
                 logger.info(f"[TMDB识别增强] 制作组命名映射：{changes}")
         if not self._config.get("custom_rename_fields_enabled"):
@@ -1865,6 +1932,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._release_group_registry.refresh(profiles)
         self._recognition_rules.refresh(self._read_recognition_rule_overrides())
         self._custom_rename_fields = tuple(deepcopy(self._read_custom_rename_fields()))
+        self._release_group_arrangements.refresh(self._read_release_group_arrangements())
         self._rename_mappings.refresh(self._read_rename_mappings())
 
     def _read_custom_rename_fields(self) -> List[Dict[str, Any]]:
@@ -1880,6 +1948,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """读取制作组与最终命名映射。"""
         return RenameMappingRegistry.normalize_rules(
             self.get_data(self.DATA_KEY_RENAME_MAPPINGS) or []
+        )
+
+    def _read_release_group_arrangements(self) -> List[Dict[str, Any]]:
+        """读取结构化制作组名称、位置和连接符规则。"""
+        return ReleaseGroupArrangementRegistry.normalize_rules(
+            self.get_data(self.DATA_KEY_RELEASE_GROUP_ARRANGEMENTS) or []
         )
 
     @staticmethod

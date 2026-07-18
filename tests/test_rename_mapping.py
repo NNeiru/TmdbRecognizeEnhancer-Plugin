@@ -80,3 +80,58 @@ def test_subtitle_adapter_only_changes_filename(monkeypatch):
         SimpleNamespace(name="source.chs.srt"), Path("/library/show/Title.srt")
     )
     assert restored == Path("/library/show/Title.chi.zh-cn.srt")
+
+
+def test_release_group_arranger_controls_alias_order_and_connector():
+    module = _load_file("test_release_group_arranger", "release_group_arranger.py")
+    registry = module.ReleaseGroupArrangementRegistry()
+    registry.refresh([
+        {
+            "match_name": "VCB-Studio", "aliases": ["VCB", "VCB Studio"],
+            "output_name": "VCB-Studio", "position": "last",
+            "connector": "&", "order": 100,
+        },
+        {
+            "match_name": "ADWeb", "output_name": "ADWeb",
+            "position": "last", "connector": "@", "order": 200,
+        },
+    ])
+
+    output, trace = registry.apply("ADWeb&A&VCB")
+
+    assert output == "A&VCB-Studio@ADWeb"
+    assert trace["applied"] is True
+    assert [item["output"] for item in trace["members"]] == ["A", "VCB-Studio", "ADWeb"]
+
+
+def test_release_group_arranger_keeps_complete_ampersand_group_and_unknown_input():
+    module = _load_file("test_release_group_arranger_whole", "release_group_arranger.py")
+    registry = module.ReleaseGroupArrangementRegistry()
+    registry.refresh([
+        {
+            "match_name": "A&B", "output_name": "A&B",
+            "position": "keep", "connector": "@", "order": 100,
+        },
+        {
+            "match_name": "VCB-Studio", "output_name": "VCB-Studio",
+            "position": "last", "connector": "&", "order": 100,
+        },
+    ])
+
+    assert registry.apply("A&B")[0] == "A&B"
+    output, trace = registry.apply("Unknown&Other")
+    assert output == "Unknown&Other"
+    assert trace["applied"] is False
+
+
+def test_release_group_arranger_supports_space_connector_and_deduplication():
+    module = _load_file("test_release_group_arranger_space", "release_group_arranger.py")
+    registry = module.ReleaseGroupArrangementRegistry()
+    registry.refresh([
+        {
+            "match_name": "Group B", "aliases": ["B"], "output_name": "Group B",
+            "position": "last", "connector": " ", "order": 100,
+        },
+    ])
+
+    assert registry.apply("A@B@Group B")[0] == "A Group B"

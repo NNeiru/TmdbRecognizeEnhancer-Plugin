@@ -12,7 +12,7 @@ const emit = defineEmits(['update:modelValue', 'save-config'])
 const loading = ref(false)
 const saving = ref('')
 const error = ref('')
-const data = ref({ release_groups: { items: [] }, recognition_rules: { items: [], fields: [], overrides: [] }, rename_fields: { builtin: [], context: [], custom: [] }, rename_mappings: { items: [], stages: [] }, capabilities: {} })
+const data = ref({ release_groups: { items: [] }, recognition_rules: { items: [], fields: [], overrides: [] }, rename_fields: { builtin: [], context: [], custom: [] }, rename_mappings: { items: [], stages: [] }, release_group_arrangements: { items: [], positions: [], connectors: [] }, capabilities: {} })
 const section = ref('rules')
 const search = ref('')
 const field = ref('all')
@@ -34,6 +34,11 @@ const mappingDialog = ref(false)
 const mappingForm = ref({ id: '', label: '', stage: 'rendered_path', mode: 'literal', pattern: '', replacement: '', enabled: true, priority: 100 })
 const mappingPreviewInput = ref({ stage: 'rendered_path', value: '命运／奇异赝品 (2024)/命运／奇异赝品 - S01E01.mkv' })
 const mappingPreview = ref(null)
+const renameRuleSection = ref('groups')
+const groupArrangementDialog = ref(false)
+const groupArrangementForm = ref({ id: '', label: '', match_name: '', aliases: '', output_name: '', position: 'keep', connector: '@', order: 100, enabled: true })
+const groupArrangementPreviewInput = ref('ADWeb@A@VCB')
+const groupArrangementPreview = ref(null)
 const renamePreviewInput = ref({
   original_name: '[Group] Example.S01E01.1080p.WEB-DL.mkv',
   type: '电视剧', category: '动漫',
@@ -85,6 +90,14 @@ const mappingStages = computed(() => data.value.rename_mappings?.stages || [
   { value: 'subtitle_name', label: '字幕文件名' },
 ])
 const mappingStageLabel = value => mappingStages.value.find(item => item.value === value)?.label || value
+const groupArrangementRules = computed(() => data.value.release_group_arrangements?.items || [])
+const groupPositionItems = computed(() => data.value.release_group_arrangements?.positions || [
+  { value: 'first', label: '固定最前' },
+  { value: 'keep', label: '保持原标题顺序' },
+  { value: 'last', label: '固定最后' },
+])
+const groupPositionLabel = value => groupPositionItems.value.find(item => item.value === value)?.label || value
+const groupConnectorItems = computed(() => (data.value.release_group_arrangements?.connectors || ['@', '&', '+', '-', '_', '.', ' ']).map(value => ({ title: value === ' ' ? '空格' : value, value })))
 const customFields = computed(() => data.value.rename_fields?.custom || [])
 const availableRenameFields = computed(() => [
   ...(data.value.rename_fields?.builtin || []),
@@ -299,6 +312,47 @@ async function previewMappingRules() {
   finally { saving.value = '' }
 }
 
+function openGroupArrangement(item = null) {
+  groupArrangementForm.value = item ? {
+    ...item,
+    aliases: (item.aliases || []).join('\n'),
+  } : {
+    id: '', label: '', match_name: '', aliases: '', output_name: '',
+    position: 'keep', connector: '@', order: 100, enabled: true,
+  }
+  groupArrangementDialog.value = true
+}
+
+async function saveGroupArrangement() {
+  saving.value = 'group-arrangement'
+  error.value = ''
+  try {
+    data.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/release-group-arrangement`, groupArrangementForm.value)) || data.value
+    groupArrangementDialog.value = false
+  } catch (err) { error.value = explainError(err, '制作组编排规则保存失败') }
+  finally { saving.value = '' }
+}
+
+async function deleteGroupArrangement(item) {
+  if (!window.confirm(`确认删除制作组编排“${item.label || item.output_name}”？`)) return
+  saving.value = `group-arrangement-delete:${item.id}`
+  error.value = ''
+  try {
+    data.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/release-group-arrangement/delete`, { id: item.id })) || data.value
+  } catch (err) { error.value = explainError(err, '制作组编排规则删除失败') }
+  finally { saving.value = '' }
+}
+
+async function previewGroupArrangement() {
+  saving.value = 'group-arrangement-preview'
+  groupArrangementPreview.value = null
+  error.value = ''
+  try {
+    groupArrangementPreview.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/release-group-arrangement/preview`, { value: groupArrangementPreviewInput.value }))
+  } catch (err) { error.value = explainError(err, '制作组编排试算失败') }
+  finally { saving.value = '' }
+}
+
 onMounted(load)
 </script>
 
@@ -313,7 +367,7 @@ onMounted(load)
       <VSwitch v-model="config.recognition_rule_overrides_enabled" color="primary" label="启用识别字段覆盖" hide-details />
       <VSwitch v-model="config.release_group_assist_enabled" color="success" label="制作组辅助 TMDB 判断" hide-details />
       <VSwitch v-model="config.custom_rename_fields_enabled" color="secondary" label="启用自定义命名字段" hide-details />
-      <VSwitch v-model="config.rename_mapping_enabled" color="orange" label="启用命名映射" hide-details />
+      <VSwitch v-model="config.rename_mapping_enabled" color="orange" label="启用命名规则" hide-details />
       <VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存模块开关</VBtn>
     </VCardText></VCard>
     <VAlert type="info" variant="tonal" density="compact" class="mb-4">
@@ -327,7 +381,7 @@ onMounted(load)
       <VTab value="rules" prepend-icon="mdi-text-box-search-outline">内置识别字段</VTab>
       <VTab value="groups" prepend-icon="mdi-account-group-outline">制作组类型</VTab>
       <VTab value="rename" prepend-icon="mdi-code-braces">自定义命名字段</VTab>
-      <VTab value="mapping" prepend-icon="mdi-find-replace">命名映射</VTab>
+      <VTab value="mapping" prepend-icon="mdi-rename-box-outline">命名规则</VTab>
       <VTab value="test" prepend-icon="mdi-flask-outline">覆盖试算</VTab>
     </VTabs>
 
@@ -409,28 +463,60 @@ onMounted(load)
 
     <section v-else-if="section === 'mapping'">
       <div class="d-flex align-center flex-wrap ga-3 mb-4">
-        <div class="flex-grow-1"><div class="text-h6">命名阶段顺序映射</div><div class="text-body-2 text-medium-emphasis">规则按优先级依次执行，后一条规则会继续处理前一条的输出。</div></div>
-        <VBtn variant="tonal" color="secondary" prepend-icon="mdi-closed-caption-outline" @click="addSubtitleMappingPreset">添加简繁字幕预设</VBtn>
-        <VBtn color="primary" prepend-icon="mdi-plus" @click="openMappingRule()">新增映射</VBtn>
+        <div class="flex-grow-1"><div class="text-h6">统一命名规则</div><div class="text-body-2 text-medium-emphasis">制作组使用结构化编排；标题、路径和字幕使用顺序文本映射。界面统一管理，底层仍在正确的命名阶段执行。</div></div>
       </div>
-      <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-        制作组字段用于统一 A&amp;B / A@B、别名和顺序；命名结果用于替换标题或目录；字幕文件名在 MP 追加语言后缀后执行。所有修改都发生在实际文件操作前，不修改 MP 源码。
-      </VAlert>
-      <VAlert v-if="!data.rename_mappings?.subtitle_compatible" type="warning" variant="tonal" density="compact" class="mb-4">{{ data.rename_mappings?.subtitle_message || '当前 MP 暂不支持字幕后缀映射；其它两个阶段仍可使用。' }}</VAlert>
-      <div v-if="mappingRules.length" class="mapping-list">
-        <VCard v-for="item in mappingRules" :key="item.id" variant="outlined" class="mapping-card">
-          <VCardText class="d-flex align-start ga-3">
-            <VAvatar :color="item.stage === 'subtitle_name' ? 'secondary' : item.stage === 'release_group' ? 'primary' : 'orange'" variant="tonal" size="38"><VIcon :icon="item.stage === 'subtitle_name' ? 'mdi-closed-caption-outline' : item.stage === 'release_group' ? 'mdi-account-group-outline' : 'mdi-find-replace'" /></VAvatar>
-            <div class="flex-grow-1 min-w-0"><div class="d-flex align-center flex-wrap ga-2"><span class="font-weight-bold">{{ item.label }}</span><VChip size="x-small" variant="tonal">{{ mappingStageLabel(item.stage) }}</VChip><VChip size="x-small" :color="item.mode === 'regex' ? 'warning' : 'default'" variant="tonal">{{ item.mode === 'regex' ? '正则' : '字面' }}</VChip><VChip v-if="!item.enabled" size="x-small" variant="tonal">已停用</VChip></div><div class="mapping-expression"><code>{{ item.pattern }}</code><VIcon icon="mdi-arrow-right" size="16" /><code>{{ item.replacement || '（删除）' }}</code></div><div class="text-caption text-medium-emphasis">优先级 {{ item.priority }}</div></div>
-            <VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openMappingRule(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `mapping-delete:${item.id}`" @click="deleteMappingRule(item)" />
-          </VCardText>
-        </VCard>
+      <VTabs v-model="renameRuleSection" color="secondary" class="sub-tabs mb-4">
+        <VTab value="groups" prepend-icon="mdi-account-multiple-check-outline">制作组编排</VTab>
+        <VTab value="text" prepend-icon="mdi-find-replace">文本映射</VTab>
+      </VTabs>
+
+      <div v-if="renameRuleSection === 'groups'">
+        <div class="d-flex align-center flex-wrap ga-3 mb-4">
+          <VAlert type="info" variant="tonal" density="compact" class="flex-grow-1 mb-0">为每个制作组指定别名、最终名称、固定位置和它前面的连接符；未配置的组保持原名与相对顺序。</VAlert>
+          <VBtn color="primary" prepend-icon="mdi-plus" @click="openGroupArrangement()">新增制作组规则</VBtn>
+        </div>
+        <VAlert v-if="data.release_group_arrangements?.errors?.length" type="warning" variant="tonal" density="compact" class="mb-4">{{ data.release_group_arrangements.errors.join('；') }}</VAlert>
+        <div v-if="groupArrangementRules.length" class="group-layout-grid">
+          <VCard v-for="item in groupArrangementRules" :key="item.id" variant="outlined" class="mapping-card">
+            <VCardText class="group-layout-card">
+              <div class="group-layout-main">
+                <div class="d-flex align-center flex-wrap ga-2"><span class="font-weight-bold">{{ item.label || item.output_name }}</span><VChip size="x-small" color="primary" variant="tonal">{{ groupPositionLabel(item.position) }}</VChip><VChip v-if="!item.enabled" size="x-small" variant="tonal">已停用</VChip></div>
+                <div class="mapping-expression"><code>{{ item.match_name }}</code><VIcon icon="mdi-arrow-right" size="16" /><code>{{ item.output_name }}</code></div>
+                <div class="text-caption text-medium-emphasis">别名 {{ item.aliases?.length ? item.aliases.join('、') : '无' }} · 前置连接符 <code>{{ item.connector === ' ' ? '空格' : item.connector || '无' }}</code> · 排序值 {{ item.order }}</div>
+              </div>
+              <div class="d-flex"><VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openGroupArrangement(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `group-arrangement-delete:${item.id}`" @click="deleteGroupArrangement(item)" /></div>
+            </VCardText>
+          </VCard>
+        </div>
+        <div v-else class="empty-fields"><VIcon icon="mdi-account-switch-outline" size="48" /><div class="mt-2">尚未设置制作组编排</div><div class="text-caption mt-1">例如让 VCB-Studio 固定最后并使用 &amp;，让 ADWeb 固定最后并使用 @</div></div>
+        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>制作组编排试算</VCardTitle><VCardSubtitle>按 MP 的 releaseGroup 字段格式输入，支持 @、&amp;、+ 形式。</VCardSubtitle></VCardItem><VCardText>
+          <div class="group-preview-form"><VTextField v-model="groupArrangementPreviewInput" label="输入制作组" placeholder="ADWeb@A@VCB" hide-details /><VBtn color="secondary" prepend-icon="mdi-play" :loading="saving === 'group-arrangement-preview'" @click="previewGroupArrangement">开始试算</VBtn></div>
+          <VAlert v-if="groupArrangementPreview" :type="groupArrangementPreview.trace?.applied ? 'success' : 'info'" variant="tonal" class="mt-4"><div>输出：<code>{{ groupArrangementPreview.output }}</code></div><div class="text-caption mt-1">{{ groupArrangementPreview.trace?.reason }}</div><div v-if="groupArrangementPreview.trace?.members?.length" class="member-trace mt-3"><VChip v-for="(member, index) in groupArrangementPreview.trace.members" :key="`${member.output}-${index}`" size="small" variant="tonal"><span v-if="index">{{ member.connector === ' ' ? '空格' : member.connector }}</span>{{ member.output }} · {{ groupPositionLabel(member.position) }}</VChip></div></VAlert>
+        </VCardText></VCard>
       </div>
-      <div v-else class="empty-fields"><VIcon icon="mdi-find-replace" size="48" /><div class="mt-2">尚未设置命名映射</div><div class="text-caption mt-1">可先添加简繁字幕预设，或建立自己的标题与制作组规则</div></div>
-      <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>映射试算</VCardTitle><VCardSubtitle>仅运行已保存规则，不执行文件整理。</VCardSubtitle></VCardItem><VCardText>
-        <div class="mapping-preview-form"><VSelect v-model="mappingPreviewInput.stage" label="试算阶段" :items="mappingStages" item-title="label" item-value="value" hide-details /><VTextField v-model="mappingPreviewInput.value" label="输入内容" hide-details /><VBtn color="secondary" prepend-icon="mdi-play" :loading="saving === 'mapping-preview'" @click="previewMappingRules">开始试算</VBtn></div>
-        <VAlert v-if="mappingPreview" :type="mappingPreview.changes?.length ? 'success' : 'info'" variant="tonal" class="mt-4"><div>输出：<code>{{ mappingPreview.output }}</code></div><div class="text-caption mt-1">命中 {{ mappingPreview.changes?.length || 0 }} 条规则</div></VAlert>
-      </VCardText></VCard>
+
+      <div v-else>
+        <div class="d-flex align-center flex-wrap ga-3 mb-4">
+          <VAlert type="info" variant="tonal" density="compact" class="flex-grow-1 mb-0">字段映射在 Jinja2 前执行；标题与路径映射在渲染后执行；字幕映射在 MP 追加语言后缀后执行。</VAlert>
+          <VBtn variant="tonal" color="secondary" prepend-icon="mdi-closed-caption-outline" @click="addSubtitleMappingPreset">添加简繁字幕预设</VBtn>
+          <VBtn color="primary" prepend-icon="mdi-plus" @click="openMappingRule()">新增文本映射</VBtn>
+        </div>
+        <VAlert v-if="!data.rename_mappings?.subtitle_compatible" type="warning" variant="tonal" density="compact" class="mb-4">{{ data.rename_mappings?.subtitle_message || '当前 MP 暂不支持字幕后缀映射；其它两个阶段仍可使用。' }}</VAlert>
+        <div v-if="mappingRules.length" class="mapping-list">
+          <VCard v-for="item in mappingRules" :key="item.id" variant="outlined" class="mapping-card">
+            <VCardText class="d-flex align-start ga-3">
+              <VAvatar :color="item.stage === 'subtitle_name' ? 'secondary' : item.stage === 'release_group' ? 'primary' : 'orange'" variant="tonal" size="38"><VIcon :icon="item.stage === 'subtitle_name' ? 'mdi-closed-caption-outline' : item.stage === 'release_group' ? 'mdi-account-group-outline' : 'mdi-find-replace'" /></VAvatar>
+              <div class="flex-grow-1 min-w-0"><div class="d-flex align-center flex-wrap ga-2"><span class="font-weight-bold">{{ item.label }}</span><VChip size="x-small" variant="tonal">{{ mappingStageLabel(item.stage) }}</VChip><VChip size="x-small" :color="item.mode === 'regex' ? 'warning' : 'default'" variant="tonal">{{ item.mode === 'regex' ? '正则' : '字面' }}</VChip><VChip v-if="!item.enabled" size="x-small" variant="tonal">已停用</VChip></div><div class="mapping-expression"><code>{{ item.pattern }}</code><VIcon icon="mdi-arrow-right" size="16" /><code>{{ item.replacement || '（删除）' }}</code></div><div class="text-caption text-medium-emphasis">优先级 {{ item.priority }}</div></div>
+              <VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openMappingRule(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `mapping-delete:${item.id}`" @click="deleteMappingRule(item)" />
+            </VCardText>
+          </VCard>
+        </div>
+        <div v-else class="empty-fields"><VIcon icon="mdi-find-replace" size="48" /><div class="mt-2">尚未设置文本映射</div><div class="text-caption mt-1">可先添加简繁字幕预设，或建立自己的标题、路径与高级制作组规则</div></div>
+        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>文本映射试算</VCardTitle><VCardSubtitle>仅运行已保存规则，不执行文件整理。</VCardSubtitle></VCardItem><VCardText>
+          <div class="mapping-preview-form"><VSelect v-model="mappingPreviewInput.stage" label="试算阶段" :items="mappingStages" item-title="label" item-value="value" hide-details /><VTextField v-model="mappingPreviewInput.value" label="输入内容" hide-details /><VBtn color="secondary" prepend-icon="mdi-play" :loading="saving === 'mapping-preview'" @click="previewMappingRules">开始试算</VBtn></div>
+          <VAlert v-if="mappingPreview" :type="mappingPreview.changes?.length ? 'success' : 'info'" variant="tonal" class="mt-4"><div>输出：<code>{{ mappingPreview.output }}</code></div><div class="text-caption mt-1">命中 {{ mappingPreview.changes?.length || 0 }} 条规则</div></VAlert>
+        </VCardText></VCard>
+      </div>
     </section>
 
     <section v-else>
@@ -473,8 +559,19 @@ onMounted(load)
       </VCardText><VDivider /><VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="renameDialog = false">取消</VBtn><VBtn color="primary" :loading="saving === 'rename-field'" @click="saveRenameField">保存字段</VBtn></VCardActions></VCard>
     </VDialog>
 
+    <VDialog v-model="groupArrangementDialog" max-width="820">
+      <VCard><VCardItem><VCardTitle>{{ groupArrangementForm.id ? '编辑制作组编排' : '新增制作组编排' }}</VCardTitle><VCardSubtitle>规则针对单个制作组生效，不需要枚举 A+B、B+A 等所有组合。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
+        <VRow><VCol cols="12" sm="5"><VTextField v-model="groupArrangementForm.match_name" label="识别名称" placeholder="VCB-Studio" hint="MP releaseGroup 中出现的主要名称" persistent-hint /></VCol><VCol cols="12" sm="7"><VTextField v-model="groupArrangementForm.output_name" label="最终显示名称" placeholder="VCB-Studio" hint="留空时与识别名称相同" persistent-hint /></VCol></VRow>
+        <VTextField v-model="groupArrangementForm.label" label="规则名称" placeholder="例如：VCB 固定最后" />
+        <VTextarea v-model="groupArrangementForm.aliases" label="其它别名（每行一个）" rows="3" auto-grow placeholder="VCB&#10;VCB Studio" hint="别名只做单个制作组归一化，不会改 MP 的原始识别词" persistent-hint />
+        <VRow><VCol cols="12" sm="5"><VSelect v-model="groupArrangementForm.position" label="所在位置" :items="groupPositionItems" item-title="label" item-value="value" /></VCol><VCol cols="12" sm="3"><VCombobox v-model="groupArrangementForm.connector" label="前置连接符" :items="groupConnectorItems" item-title="title" item-value="value" :return-object="false" hint="仅在前面已有组时使用" persistent-hint /></VCol><VCol cols="12" sm="4"><VTextField v-model="groupArrangementForm.order" type="number" label="同位置排序值" hint="数值越小越靠前" persistent-hint /></VCol></VRow>
+        <div class="rule-enabled-box"><div><div class="font-weight-medium">启用规则</div><div class="text-caption text-medium-emphasis">停用后保留配置但不参与编排</div></div><VSwitch v-model="groupArrangementForm.enabled" color="success" hide-details /></div>
+        <VAlert type="info" variant="tonal" density="compact">示例：VCB-Studio 设置“固定最后 + &amp;”，ADWeb 设置“固定最后 + @”，输入 <code>ADWeb@A@VCB</code> 将得到 <code>A&amp;VCB-Studio@ADWeb</code>。只有一个制作组时不会在开头添加连接符。</VAlert>
+      </VCardText><VDivider /><VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="groupArrangementDialog = false">取消</VBtn><VBtn color="primary" :loading="saving === 'group-arrangement'" @click="saveGroupArrangement">保存编排</VBtn></VCardActions></VCard>
+    </VDialog>
+
     <VDialog v-model="mappingDialog" max-width="820">
-      <VCard><VCardItem><VCardTitle>{{ mappingForm.id ? '编辑命名映射' : '新增命名映射' }}</VCardTitle><VCardSubtitle>选择准确的执行阶段；规则会按优先级从高到低连续执行。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
+      <VCard><VCardItem><VCardTitle>{{ mappingForm.id ? '编辑文本映射' : '新增文本映射' }}</VCardTitle><VCardSubtitle>选择准确的执行阶段；规则会按优先级从高到低连续执行。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
         <VRow><VCol cols="12" sm="7"><VSelect v-model="mappingForm.stage" label="执行阶段" :items="mappingStages" item-title="label" item-value="value" /></VCol><VCol cols="12" sm="5"><VSelect v-model="mappingForm.mode" label="匹配模式" :items="[{title:'字面替换',value:'literal'},{title:'正则替换',value:'regex'}]" /></VCol></VRow>
         <VTextField v-model="mappingForm.label" label="规则名称" placeholder="例如：统一合作字幕组顺序" />
         <VTextarea v-model="mappingForm.pattern" :label="mappingForm.mode === 'regex' ? '匹配正则' : '查找文字'" rows="3" auto-grow />
@@ -515,11 +612,18 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .mapping-card { background: rgba(var(--v-theme-surface), 1); }
 .mapping-expression { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 3px; overflow-wrap: anywhere; }
 .mapping-preview-form { display: grid; grid-template-columns: minmax(180px, 240px) minmax(280px, 1fr) auto; gap: 14px; align-items: center; }
+.sub-tabs { border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.group-layout-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+.group-layout-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-height: 126px; }
+.group-layout-main { min-width: 0; flex: 1; }
+.group-preview-form { display: grid; grid-template-columns: minmax(280px, 1fr) auto; gap: 14px; align-items: center; }
+.member-trace { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 900px) { .filter-row { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 600px) {
   .filter-row, .rename-preview-form { grid-template-columns: 1fr; }
   .preview-original, .preview-wide { grid-column: auto; }
   .field-description-grid { grid-template-columns: 1fr; }
   .mapping-preview-form { grid-template-columns: 1fr; }
+  .group-layout-grid, .group-preview-form { grid-template-columns: 1fr; }
 }
 </style>

@@ -210,8 +210,8 @@ onMounted(loadStatus)
                   <VCardText><VSwitch v-model="config.custom_rename_fields_enabled" color="secondary" label="启用模块" hide-details /><div class="status-line"><span>独立字段</span><strong>{{ modules.rename_fields?.field_count || 0 }} 个</strong></div><div class="status-line"><span>作用阶段</span><strong>Jinja2 命名渲染</strong></div></VCardText>
                 </VCard>
                 <VCard variant="outlined" class="module-card">
-                  <VCardItem><template #prepend><VAvatar color="orange" variant="tonal"><VIcon icon="mdi-find-replace" /></VAvatar></template><VCardTitle>命名映射</VCardTitle><VCardSubtitle>{{ modules.rename_mapping?.status || '状态未知' }}</VCardSubtitle></VCardItem>
-                  <VCardText><VSwitch v-model="config.rename_mapping_enabled" color="orange" label="启用模块" hide-details /><div class="status-line"><span>顺序映射</span><strong>{{ modules.rename_mapping?.rule_count || 0 }} 条</strong></div><div class="status-line"><span>作用范围</span><strong>制作组 / 路径 / 字幕</strong></div></VCardText>
+                  <VCardItem><template #prepend><VAvatar color="orange" variant="tonal"><VIcon icon="mdi-rename-box-outline" /></VAvatar></template><VCardTitle>命名规则</VCardTitle><VCardSubtitle>{{ modules.rename_mapping?.status || '状态未知' }}</VCardSubtitle></VCardItem>
+                  <VCardText><VSwitch v-model="config.rename_mapping_enabled" color="orange" label="启用模块" hide-details /><div class="status-line"><span>结构化与文本规则</span><strong>{{ modules.rename_mapping?.rule_count || 0 }} 条</strong></div><div class="status-line"><span>作用范围</span><strong>制作组 / 标题 / 路径 / 字幕</strong></div></VCardText>
                 </VCard>
               </div>
             </div>

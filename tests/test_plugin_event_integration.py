@@ -200,6 +200,38 @@ def test_rename_mapping_runs_at_group_and_rendered_path_stages(monkeypatch):
     assert rename.event_data["updated_str"] == "命运-奇异赝品/S01E01.mkv"
 
 
+def test_structured_release_group_arrangement_runs_before_advanced_mapping(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "custom_rename_fields_enabled": False,
+        "rename_mapping_enabled": True,
+    })
+    plugin._release_group_arrangements.refresh([
+        {
+            "match_name": "VCB-Studio", "aliases": ["VCB"],
+            "output_name": "VCB-Studio", "position": "last",
+            "connector": "&", "order": 100,
+        },
+        {
+            "match_name": "ADWeb", "output_name": "ADWeb",
+            "position": "last", "connector": "@", "order": 200,
+        },
+    ])
+    plugin._rename_mappings.refresh([{
+        "stage": "release_group", "mode": "literal",
+        "pattern": "GroupA", "replacement": "A",
+    }])
+
+    build = SimpleNamespace(event_data={
+        "rename_dict": {"releaseGroup": "ADWeb@GroupA@VCB"},
+    })
+    plugin.on_transfer_rename_build(build)
+
+    assert build.event_data["rename_dict"]["releaseGroup"] == "A&VCB-Studio@ADWeb"
+
+
 def test_current_quarter_catalog_prioritizes_mapped_anime_candidate(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
