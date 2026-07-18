@@ -24,6 +24,7 @@ class ReleaseGroupArrangementRegistry:
         self._alias_map: Dict[str, Dict[str, Any]] = {}
         self._errors: List[str] = []
         self._default_connector = "@"
+        self._normalize_unknown = False
         self._apply_count = 0
         self._match_count = 0
 
@@ -151,7 +152,10 @@ class ReleaseGroupArrangementRegistry:
             raise ValueError("制作组编排规则无效")
         return normalized
 
-    def refresh(self, value: Any, default_connector: Any = "@") -> None:
+    def refresh(
+            self, value: Any, default_connector: Any = "@",
+            normalize_unknown: bool = False,
+    ) -> None:
         rules = self.normalize_rules(value)
         alias_map: Dict[str, Dict[str, Any]] = {}
         errors: List[str] = []
@@ -173,18 +177,20 @@ class ReleaseGroupArrangementRegistry:
             self._alias_map = alias_map
             self._errors = errors
             self._default_connector = self.normalize_default_connector(default_connector)
+            self._normalize_unknown = bool(normalize_unknown)
 
     def apply(self, value: Any) -> Tuple[str, Dict[str, Any]]:
         raw = str(value or "").strip()
         with self._lock:
             alias_map = dict(self._alias_map)
             default_connector = self._default_connector
+            normalize_unknown = self._normalize_unknown
             self._apply_count += 1
         empty_trace = {
             "applied": False, "input": raw, "output": raw,
             "members": [], "reason": "没有可处理的制作组",
         }
-        if not raw:
+        if not raw or (not alias_map and not normalize_unknown):
             return raw, empty_trace
 
         # A policy for the complete value wins over connector parsing. This keeps a
@@ -223,6 +229,11 @@ class ReleaseGroupArrangementRegistry:
                 "rule_label": rule["label"] if rule else "未配置",
                 "source_index": index,
             })
+        if not matched and not normalize_unknown:
+            empty_trace["members"] = members
+            empty_trace["reason"] = "没有命中已启用的制作组编排规则"
+            return raw, empty_trace
+
         first = sorted(
             (item for item in members if item["position"] == "first"),
             key=lambda item: (item["order"], item["source_index"]),
@@ -259,6 +270,7 @@ class ReleaseGroupArrangementRegistry:
             rules = deepcopy(self._rules)
             errors = list(self._errors)
             default_connector = self._default_connector
+            normalize_unknown = self._normalize_unknown
             stats = {
                 "apply_count": self._apply_count,
                 "match_count": self._match_count,
@@ -275,5 +287,6 @@ class ReleaseGroupArrangementRegistry:
             ],
             "connectors": ["@", "&", "+", "-", "_", ".", " "],
             "default_connector": default_connector,
+            "normalize_unknown": normalize_unknown,
             "default_connector_value": self.DEFAULT_CONNECTOR,
         }

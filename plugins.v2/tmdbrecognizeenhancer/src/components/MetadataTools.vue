@@ -483,6 +483,7 @@ onMounted(load)
           <VCombobox v-model="config.customization_separator" label="自定义占位符连接符" :items="separatorOptions" item-title="title" item-value="value" :return-object="false" hint="多个 customization 命中结果的连接符" persistent-hint />
           <VCombobox v-model="config.release_group_default_connector" label="制作组默认连接符" :items="separatorOptions" item-title="title" item-value="value" :return-object="false" hint="用于未配置组和选择“使用默认”的规则" persistent-hint />
           <VSelect v-model="config.rename_separator_fields" class="separator-scope" label="字段空白分隔符生效范围" :items="separatorFieldItems" multiple chips closable-chips clearable hint="只修改字段内部的空白；不会全局替换路径中的空格" persistent-hint />
+          <div class="separator-scope rule-enabled-box"><div><div class="font-weight-medium">统一未配置制作组的连接符</div><div class="text-caption text-medium-emphasis">开启后，即使没有单组规则，A&amp;B、A+B 也会统一成上面的默认连接符；关闭时只把默认值用于已触发的制作组编排。</div></div><VSwitch v-model="config.release_group_normalize_unknown_connectors" color="success" hide-details /></div>
         </div>
       </VCardText><VDivider /><VCardActions><VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存命名默认值</VBtn></VCardActions></VCard>
       <VTabs v-model="renameRuleSection" color="secondary" class="sub-tabs mb-4">
