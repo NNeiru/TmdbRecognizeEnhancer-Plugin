@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
-import { unwrapResponse } from '../utils'
+import { ensureUiVersion, unwrapResponse } from '../utils'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -15,7 +15,9 @@ const attrs = computed(() => props.config?.attrs || {})
 async function loadStatus() {
   loading.value = true
   try {
-    status.value = unwrapResponse(await props.api.get('plugin/TmdbRecognizeEnhancer/status')) || status.value
+    const nextStatus = unwrapResponse(await props.api.get('plugin/TmdbRecognizeEnhancer/status')) || status.value
+    ensureUiVersion(nextStatus.backend_version)
+    status.value = nextStatus
   } finally {
     loading.value = false
   }

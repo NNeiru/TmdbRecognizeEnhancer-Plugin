@@ -38,7 +38,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "TMDB 识别增强"
     plugin_desc = "增强 TMDB 候选搜索，并按默认编集或选定剧集组执行动漫集数偏移。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.5.0-beta.2"
+    plugin_version = "0.5.0-beta.3"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -150,10 +150,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """插件当前不注册远程命令。"""
         return []
 
-    @staticmethod
-    def get_render_mode() -> Tuple[str, str]:
-        """声明使用 Vue 模块联邦界面。"""
-        return "vue", "dist/assets"
+    @classmethod
+    def get_render_mode(cls) -> Tuple[str, str]:
+        """声明版本化 Vue 联邦目录，避免升级后继续命中旧 remoteEntry。"""
+        safe_version = re.sub(r"[^A-Za-z0-9._-]+", "_", cls.plugin_version)
+        return "vue", f"dist/ui/v{safe_version}/assets"
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """返回 Vue 配置组件使用的初始配置。"""

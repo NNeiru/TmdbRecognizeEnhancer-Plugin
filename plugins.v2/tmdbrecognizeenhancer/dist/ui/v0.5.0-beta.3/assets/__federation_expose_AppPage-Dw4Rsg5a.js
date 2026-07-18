@@ -1,6 +1,6 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { S as StrategySettings } from './StrategySettings-Dg2YuBwo.js';
-import { _ as _export_sfc, u as unwrapResponse, c as cloneConfig, m as mediaTypeText, s as scoreColor } from './utils-DVT_bmTz.js';
+import { S as StrategySettings } from './StrategySettings-B9ic9jbb.js';
+import { _ as _export_sfc, u as unwrapResponse, c as cloneConfig, U as UI_VERSION, m as mediaTypeText, s as scoreColor, e as ensureUiVersion } from './utils-BcSqMDXe.js';
 
 const {toDisplayString:_toDisplayString$3,createTextVNode:_createTextVNode$3,resolveComponent:_resolveComponent$3,withCtx:_withCtx$3,openBlock:_openBlock$3,createBlock:_createBlock$3,createCommentVNode:_createCommentVNode$3,createElementVNode:_createElementVNode$3,createElementBlock:_createElementBlock$3,createVNode:_createVNode$3,renderList:_renderList$3,Fragment:_Fragment$3,normalizeClass:_normalizeClass$1,unref:_unref$1,mergeProps:_mergeProps} = await importShared('vue');
 
@@ -2751,7 +2751,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const MetadataTools = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-12b48315"]]);
+const MetadataTools = /*#__PURE__*/_export_sfc(_sfc_main$2, [['__scopeId',"data-v-8b482d39"]]);
 
 const {toDisplayString:_toDisplayString$1,createTextVNode:_createTextVNode$1,resolveComponent:_resolveComponent$1,withCtx:_withCtx$1,openBlock:_openBlock$1,createBlock:_createBlock$1,createCommentVNode:_createCommentVNode$1,createElementVNode:_createElementVNode$1,createVNode:_createVNode$1,createElementBlock:_createElementBlock$1,renderList:_renderList$1,Fragment:_Fragment$1} = await importShared('vue');
 
@@ -3085,9 +3085,9 @@ return (_ctx, _cache) => {
 }
 
 };
-const PerformanceDiagnostics = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-53b31c4f"]]);
+const PerformanceDiagnostics = /*#__PURE__*/_export_sfc(_sfc_main$1, [['__scopeId',"data-v-fdb4630e"]]);
 
-const {createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createBlock:_createBlock,renderList:_renderList,Fragment:_Fragment,unref:_unref,normalizeClass:_normalizeClass,KeepAlive:_KeepAlive,vShow:_vShow,withDirectives:_withDirectives} = await importShared('vue');
+const {createElementVNode:_createElementVNode,resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createBlock:_createBlock,unref:_unref,renderList:_renderList,Fragment:_Fragment,normalizeClass:_normalizeClass,KeepAlive:_KeepAlive,vShow:_vShow,withDirectives:_withDirectives} = await importShared('vue');
 
 
 const _hoisted_1 = { class: "enhancer-page" };
@@ -3207,6 +3207,7 @@ const props = __props;
 
 const loading = ref(false);
 const statusLoaded = ref(false);
+const uiVersionMismatch = ref(false);
 const saving = ref(false);
 const previewing = ref(false);
 const error = ref('');
@@ -3233,7 +3234,9 @@ async function loadStatus() {
   error.value = '';
   try {
     const response = await props.api.get(`${pluginBase.value}/status`);
-    status.value = unwrapResponse(response) || status.value;
+    const nextStatus = unwrapResponse(response) || status.value;
+    uiVersionMismatch.value = ensureUiVersion(nextStatus.backend_version);
+    status.value = nextStatus;
     statusLoaded.value = true;
   } catch (err) {
     error.value = err?.message || '状态加载失败';
@@ -3382,6 +3385,20 @@ return (_ctx, _cache) => {
             default: _withCtx(() => [...(_cache[17] || (_cache[17] = [
               _createTextVNode(" 管理页已更新，但插件后端仍是旧实例。字段管理和性能诊断接口尚未注册，请重载插件；若 MP 没有重载入口，重启一次容器即可。 ", -1)
             ]))]),
+            _: 1
+          }))
+        : _createCommentVNode("", true),
+      (uiVersionMismatch.value)
+        ? (_openBlock(), _createBlock(_component_VAlert, {
+            key: 2,
+            type: "info",
+            variant: "tonal",
+            density: "compact",
+            class: "mb-4"
+          }, {
+            default: _withCtx(() => [
+              _createTextVNode(" 检测到页面版本 " + _toDisplayString(_unref(UI_VERSION)) + " 与插件后端 " + _toDisplayString(status.value.backend_version) + " 不一致，正在自动载入新版页面…… ", 1)
+            ]),
             _: 1
           }))
         : _createCommentVNode("", true),
@@ -4481,6 +4498,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ad2669fc"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ba9e6493"]]);
 
 export { AppPage as default };

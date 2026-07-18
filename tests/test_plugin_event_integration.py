@@ -139,6 +139,16 @@ def test_event_searches_post_word_meta_name(monkeypatch):
     assert plugin._recognize_title.call_args.kwargs["hints"]["year"] == "2026"
 
 
+def test_federation_path_is_versioned(monkeypatch):
+    module = _load_plugin(monkeypatch)
+
+    render_mode, dist_path = module.TmdbRecognizeEnhancer.get_render_mode()
+
+    assert render_mode == "vue"
+    assert module.TmdbRecognizeEnhancer.plugin_version in dist_path
+    assert dist_path.endswith("/assets")
+
+
 def test_runtime_original_name_is_forwarded_as_anchor_evidence(monkeypatch):
     module = _load_plugin(monkeypatch)
     runtime_meta = SimpleNamespace(

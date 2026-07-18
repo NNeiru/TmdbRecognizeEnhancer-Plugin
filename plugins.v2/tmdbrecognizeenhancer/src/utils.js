@@ -38,6 +38,25 @@ export const DEFAULT_CONFIG = {
   release_group_type_weight: 12,
 }
 
+export const UI_VERSION = __TMDB_ENHANCER_UI_VERSION__
+
+/**
+ * 检测“旧前端模块 + 新插件后端”。模块联邦会把 remote 缓存在当前页面内存中，
+ * 因此版本不一致时必须重建整个宿主页；新版后端会返回版本化 remote URL。
+ */
+export function ensureUiVersion(backendVersion) {
+  const backend = String(backendVersion || '').trim()
+  if (!backend || backend === UI_VERSION || typeof window === 'undefined') return false
+  const guardKey = `tmdb-recognize-enhancer-ui-reload:${backend}`
+  if (window.sessionStorage?.getItem(guardKey) !== 'done') {
+    window.sessionStorage?.setItem(guardKey, 'done')
+    const nextUrl = new URL(window.location.href)
+    nextUrl.searchParams.set('_tmdb_ui', backend)
+    window.setTimeout(() => window.location.replace(nextUrl.toString()), 120)
+  }
+  return true
+}
+
 export function cloneConfig(config) {
   return JSON.parse(JSON.stringify({ ...DEFAULT_CONFIG, ...(config || {}) }))
 }

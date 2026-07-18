@@ -1,6 +1,6 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { S as StrategySettings } from './StrategySettings-Dg2YuBwo.js';
-import { c as cloneConfig } from './utils-DVT_bmTz.js';
+import { S as StrategySettings } from './StrategySettings-B9ic9jbb.js';
+import { c as cloneConfig, u as unwrapResponse, e as ensureUiVersion } from './utils-BcSqMDXe.js';
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,createElementVNode:_createElementVNode,unref:_unref,openBlock:_openBlock,createElementBlock:_createElementBlock} = await importShared('vue');
 
@@ -14,6 +14,7 @@ const _sfc_main = {
   __name: 'Config',
   props: {
   initialConfig: { type: Object, default: () => ({}) },
+  api: { type: Object, default: () => ({}) },
 },
   emits: ['save', 'close'],
   setup(__props, { emit: __emit }) {
@@ -22,8 +23,14 @@ const props = __props;
 const emit = __emit;
 const config = ref(cloneConfig());
 
-onMounted(() => {
+onMounted(async () => {
   config.value = cloneConfig(props.initialConfig);
+  try {
+    const status = unwrapResponse(await props.api.get('plugin/TmdbRecognizeEnhancer/status'));
+    ensureUiVersion(status?.backend_version);
+  } catch (_) {
+    // 配置本身仍可使用；版本检查失败不能阻止用户关闭弹窗。
+  }
 });
 
 return (_ctx, _cache) => {

@@ -1,16 +1,23 @@
 <script setup>
 import { onMounted, ref } from 'vue'
 import StrategySettings from './StrategySettings.vue'
-import { cloneConfig } from '../utils'
+import { cloneConfig, ensureUiVersion, unwrapResponse } from '../utils'
 
 const props = defineProps({
   initialConfig: { type: Object, default: () => ({}) },
+  api: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['save', 'close'])
 const config = ref(cloneConfig())
 
-onMounted(() => {
+onMounted(async () => {
   config.value = cloneConfig(props.initialConfig)
+  try {
+    const status = unwrapResponse(await props.api.get('plugin/TmdbRecognizeEnhancer/status'))
+    ensureUiVersion(status?.backend_version)
+  } catch (_) {
+    // 配置本身仍可使用；版本检查失败不能阻止用户关闭弹窗。
+  }
 })
 </script>
 

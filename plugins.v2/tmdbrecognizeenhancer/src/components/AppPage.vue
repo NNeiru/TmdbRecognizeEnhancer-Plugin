@@ -4,7 +4,7 @@ import StrategySettings from './StrategySettings.vue'
 import EpisodeNormalizer from './EpisodeNormalizer.vue'
 import MetadataTools from './MetadataTools.vue'
 import PerformanceDiagnostics from './PerformanceDiagnostics.vue'
-import { cloneConfig, mediaTypeText, scoreColor, unwrapResponse } from '../utils'
+import { cloneConfig, ensureUiVersion, mediaTypeText, scoreColor, UI_VERSION, unwrapResponse } from '../utils'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -14,6 +14,7 @@ const props = defineProps({
 
 const loading = ref(false)
 const statusLoaded = ref(false)
+const uiVersionMismatch = ref(false)
 const saving = ref(false)
 const previewing = ref(false)
 const error = ref('')
@@ -40,7 +41,9 @@ async function loadStatus() {
   error.value = ''
   try {
     const response = await props.api.get(`${pluginBase.value}/status`)
-    status.value = unwrapResponse(response) || status.value
+    const nextStatus = unwrapResponse(response) || status.value
+    uiVersionMismatch.value = ensureUiVersion(nextStatus.backend_version)
+    status.value = nextStatus
     statusLoaded.value = true
   } catch (err) {
     error.value = err?.message || '状态加载失败'
@@ -124,6 +127,9 @@ onMounted(loadStatus)
       <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
       <VAlert v-if="statusLoaded && !status.backend_version" type="warning" variant="tonal" density="compact" class="mb-4">
         管理页已更新，但插件后端仍是旧实例。字段管理和性能诊断接口尚未注册，请重载插件；若 MP 没有重载入口，重启一次容器即可。
+      </VAlert>
+      <VAlert v-if="uiVersionMismatch" type="info" variant="tonal" density="compact" class="mb-4">
+        检测到页面版本 {{ UI_VERSION }} 与插件后端 {{ status.backend_version }} 不一致，正在自动载入新版页面……
       </VAlert>
 
       <VRow class="mb-2">

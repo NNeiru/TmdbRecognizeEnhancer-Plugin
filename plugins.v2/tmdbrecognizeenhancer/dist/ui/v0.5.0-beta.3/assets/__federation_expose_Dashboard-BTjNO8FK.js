@@ -1,5 +1,5 @@
 import { importShared } from './__federation_fn_import-JrT3xvdd.js';
-import { _ as _export_sfc, u as unwrapResponse } from './utils-DVT_bmTz.js';
+import { _ as _export_sfc, u as unwrapResponse, e as ensureUiVersion } from './utils-BcSqMDXe.js';
 
 const {resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,toDisplayString:_toDisplayString,createTextVNode:_createTextVNode,createElementVNode:_createElementVNode,openBlock:_openBlock,createBlock:_createBlock,createCommentVNode:_createCommentVNode} = await importShared('vue');
 
@@ -28,7 +28,9 @@ const attrs = computed(() => props.config?.attrs || {});
 async function loadStatus() {
   loading.value = true;
   try {
-    status.value = unwrapResponse(await props.api.get('plugin/TmdbRecognizeEnhancer/status')) || status.value;
+    const nextStatus = unwrapResponse(await props.api.get('plugin/TmdbRecognizeEnhancer/status')) || status.value;
+    ensureUiVersion(nextStatus.backend_version);
+    status.value = nextStatus;
   } finally {
     loading.value = false;
   }
@@ -126,6 +128,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Dashboard = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-1d3aeecd"]]);
+const Dashboard = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-65db1c93"]]);
 
 export { Dashboard as default };
