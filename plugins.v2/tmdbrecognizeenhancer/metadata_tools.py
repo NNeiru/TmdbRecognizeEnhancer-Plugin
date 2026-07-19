@@ -399,6 +399,9 @@ class RenameFieldRegistry:
                 "phase": "mp_naming",
                 "source": "moviepilot",
                 "source_label": "MoviePilot 字段",
+                "template_usage": "direct",
+                "template_usage_label": "可直接用于 MP 命名模板",
+                "template_usage_detail": "这是 MoviePilot 原生命名上下文字段，可直接写作 {{ %s }}；实际整理对象未提供时可能为空。" % key,
                 **cls.VALUE_GUIDES.get(key, {"type": "文本", "values": "取值由 MoviePilot 当前上下文决定。", "logic": "使用前建议判断是否为空。"}),
             }
             for key, label, category, description, availability in cls.BUILTIN_FIELDS
@@ -417,6 +420,15 @@ class RenameFieldRegistry:
                 "phase": "target_rerender" if key in cls.TARGET_CONTEXT_KEYS else "plugin_pre_render",
                 "source": "ffprobe" if key.startswith("probe_") else "plugin_context",
                 "source_label": "ffprobe 扫描字段" if key.startswith("probe_") else "插件上下文字段",
+                "template_usage": "custom_dependency" if key in cls.TARGET_CONTEXT_KEYS else "direct",
+                "template_usage_label": "作为自定义字段依赖使用" if key in cls.TARGET_CONTEXT_KEYS else "可直接用于 MP 命名模板",
+                "template_usage_detail": (
+                    "该值在 MoviePilot 首次渲染目标路径后才产生，不能可靠地直接写进首次命名模板；请先用它计算插件自定义字段，再在模板中引用该自定义字段。"
+                    if key in cls.TARGET_CONTEXT_KEYS else
+                    ("由整理前 ffprobe 扫描注入，可直接写作 {{ %s }}；需要启用媒体信息识别且容器能读取真实文件。" % key
+                     if key.startswith("probe_") else
+                     "由插件在 MoviePilot 首次命名渲染前注入，可直接写作 {{ %s }}；缺少对应整理上下文时可能为空。" % key)
+                ),
                 **cls.VALUE_GUIDES.get(key, {"type": "文本", "values": "取值由当前整理上下文决定。", "logic": "使用前建议判断是否为空。"}),
             }
             for key, label, category, description, availability in cls.CONTEXT_FIELDS

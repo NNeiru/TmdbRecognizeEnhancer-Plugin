@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { unwrapResponse } from '../utils'
+import MediaFilePicker from './MediaFilePicker.vue'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -14,7 +15,7 @@ const loading = ref(false)
 const saving = ref('')
 const error = ref('')
 const data = ref({ release_groups: { items: [] }, recognition_rules: { items: [], fields: [], overrides: [] }, rename_fields: { builtin: [], context: [], custom: [] }, rename_mappings: { items: [], stages: [] }, release_group_arrangements: { items: [], positions: [], connectors: [] }, media_probe: { field_options: [] }, capabilities: {} })
-const section = ref(props.mode === 'naming' ? 'mapping' : 'rules')
+const section = ref(props.mode === 'naming' ? 'mapping' : props.mode === 'probe' ? 'probe' : 'rules')
 const search = ref('')
 const field = ref('all')
 const source = ref('all')
@@ -37,6 +38,7 @@ const openRenameFieldGroups = ref(['媒体信息', '文件解析', '源文件上
 const copiedVariable = ref('')
 const fieldDetailDialog = ref(false)
 const fieldDetail = ref(null)
+const fieldPresetLimit = ref(80)
 const mappingDialog = ref(false)
 const mappingForm = ref({ id: '', label: '', stage: 'final_result', mode: 'literal', pattern: '', replacement: '', enabled: true, priority: 100 })
 const mappingPreviewInput = ref({ value: 'AB/C.chi.zh-cn.ass' })
@@ -170,6 +172,11 @@ const availableRenameFields = computed(() => [
     type: 'Jinja2 计算结果',
     values: item.fallback ? `表达式输出；计算为空或失败时回退为 ${item.fallback}` : '由用户表达式和当前输入字段共同决定；可能为空。',
     logic: item.expression || '尚未设置表达式。',
+    template_usage: 'direct',
+    template_usage_label: '可直接用于 MP 命名模板',
+    template_usage_detail: (item.dependencies || []).some(key => ['target_dir', 'rendered_relative_path', 'target_path_before_custom'].includes(key))
+      ? '模板可以直接引用该自定义字段；它依赖首次渲染后的目标上下文，因此插件会在目标路径计算后执行一次安全重渲染。'
+      : '保存并启用后可直接写进 MoviePilot 命名模板；插件会在首次模板渲染前计算该字段。',
   })),
 ])
 const renameFieldGroups = computed(() => {
@@ -357,7 +364,32 @@ async function previewRenameFields() {
 
 function variableSyntax(key) { return `{{ ${key} }}` }
 function fieldSourceColor(source) { return ({ moviepilot: 'primary', plugin_context: 'secondary', ffprobe: 'purple', user_custom: 'success' })[source] || 'default' }
-function openFieldDetail(item) { fieldDetail.value = item; fieldDetailDialog.value = true }
+function openFieldDetail(item) { fieldDetail.value = item; fieldPresetLimit.value = 80; fieldDetailDialog.value = true }
+function fieldPresetRules(item) {
+  if (!item?.key) return []
+  if (item.key === 'releaseGroup') {
+    return (data.value.release_groups?.items || []).map(rule => ({
+      id: rule.id, label: rule.display_name, pattern: rule.pattern,
+      value: rule.display_name, source_label: `${rule.source_label || 'MoviePilot'} · ${rule.category || '制作组'}`,
+      overridden: false,
+    }))
+  }
+  return (data.value.recognition_rules?.items || [])
+    .filter(rule => rule.field === item.key)
+    .map(rule => {
+      const effective = rule.effective || rule
+      return {
+        id: rule.id,
+        label: effective.label || rule.label,
+        pattern: effective.pattern || rule.pattern,
+        value: effective.action === 'clear' ? '（命中后清空）' : (effective.value ?? rule.value ?? '—'),
+        source_label: rule.source_label || rule.source,
+        overridden: Boolean(rule.overridden),
+      }
+    })
+}
+const fieldDetailPresetRules = computed(() => fieldPresetRules(fieldDetail.value))
+const visibleFieldPresetRules = computed(() => fieldDetailPresetRules.value.slice(0, fieldPresetLimit.value))
 
 async function copyVariable(key) {
   const text = variableSyntax(key)
@@ -478,6 +510,7 @@ onMounted(load)
     <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
     <div class="d-flex align-center flex-wrap ga-3 mb-4">
       <div v-if="props.mode === 'naming'"><div class="text-h6">命名规则</div><div class="text-body-2 text-medium-emphasis">统一管理连接符、制作组、自定义字段和最终文本映射，并按实际执行顺序排列。</div></div>
+      <div v-else-if="props.mode === 'probe'"><div class="text-h6">媒体信息识别</div><div class="text-body-2 text-medium-emphasis">整理前读取真实媒体流，补充 MP 技术字段并提供可用于命名的 ffprobe 变量。</div></div>
       <div v-else><div class="text-h6">字段与制作组</div><div class="text-body-2 text-medium-emphasis">查看 MP 当前版本实际加载的识别规则，并为制作组提供候选类型证据。</div></div>
       <VSpacer /><VBtn variant="text" prepend-icon="mdi-refresh" :loading="loading" @click="load">重新读取 MP 规则</VBtn>
     </div>
@@ -486,25 +519,26 @@ onMounted(load)
         <VSwitch v-model="config.custom_rename_fields_enabled" color="secondary" label="启用自定义命名字段" hide-details />
         <VSwitch v-model="config.rename_mapping_enabled" color="orange" label="启用最终文本映射" hide-details />
       </template>
+      <template v-else-if="props.mode === 'probe'">
+        <VSwitch v-model="config.media_probe_enabled" color="orange" label="整理前扫描媒体流" hide-details />
+      </template>
       <template v-else>
         <VSwitch v-model="config.recognition_rule_overrides_enabled" color="primary" label="启用识别字段覆盖" hide-details />
         <VSwitch v-model="config.release_group_assist_enabled" color="success" label="制作组辅助 TMDB 判断" hide-details />
         <VSwitch v-model="config.release_group_field_supplements_enabled" color="secondary" label="制作组补充命名字段" hide-details />
-        <VSwitch v-model="config.media_probe_enabled" color="orange" label="整理前扫描媒体流" hide-details />
       </template>
       <VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存模块开关</VBtn>
     </VCardText></VCard>
     <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-      {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : '字段补充与媒体扫描都发生在命名渲染前，不修改源文件；默认只填补 MP 尚未识别出的空字段。' }}
+      {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : props.mode === 'probe' ? '扫描发生在命名渲染前，不修改源文件。MP 标准字段可按补空、覆盖或追加写入；probe_* 变量也可直接用于命名模板。' : '这里展示当前 MP 实际加载的识别预设；插件覆盖不会修改 MP 或 Rust 文件。' }}
     </VAlert>
     <VAlert v-if="data.recognition_rules?.errors?.length" type="warning" variant="tonal" density="compact" class="mb-4">
       部分规则读取失败：{{ data.recognition_rules.errors.join('；') }}
     </VAlert>
 
-    <VTabs v-if="props.mode !== 'naming'" v-model="section" color="primary" class="mb-4">
+    <VTabs v-if="props.mode === 'metadata'" v-model="section" color="primary" class="mb-4">
       <VTab value="rules" prepend-icon="mdi-text-box-search-outline">内置识别字段</VTab>
       <VTab value="groups" prepend-icon="mdi-account-group-outline">制作组类型与字段</VTab>
-      <VTab value="probe" prepend-icon="mdi-waveform">媒体流扫描</VTab>
       <VTab value="test" prepend-icon="mdi-flask-outline">覆盖试算</VTab>
     </VTabs>
 
@@ -536,7 +570,7 @@ onMounted(load)
       <VPagination v-if="groupPageCount > 1" v-model="page" :length="groupPageCount" :total-visible="7" class="mt-3" />
     </section>
 
-    <section v-else-if="props.mode !== 'naming' && section === 'probe'">
+    <section v-else-if="props.mode === 'probe' && section === 'probe'">
       <div class="probe-settings-grid mb-4">
         <VCard variant="outlined"><VCardItem><VCardTitle>自动扫描策略</VCardTitle><VCardSubtitle>只在实际整理且容器能直接读取源文件时运行；同一文件会按大小和修改时间缓存。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
           <VAlert v-if="!mediaProbeBackendSupported" type="error" variant="tonal" density="compact">新版页面已加载，但插件后端仍是旧实例，因此字段目录显示为空且能力会被误报为 unavailable。请在 MP 插件页重载插件；没有重载入口时重启一次 MP 容器。</VAlert>
@@ -571,13 +605,13 @@ onMounted(load)
           <div class="d-flex justify-end"><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存扫描设置</VBtn></div>
         </VCardText></VCard>
         <VCard variant="outlined"><VCardItem><VCardTitle>文件试扫</VCardTitle><VCardSubtitle>请输入 MP 容器内部看到的真实媒体文件路径，不是宿主机映射前路径。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
-          <VTextField v-model="probePath" label="容器内文件路径" placeholder="/downloads/anime/Example.mkv" prepend-inner-icon="mdi-file-video-outline" hide-details />
+          <div class="probe-path-row"><VTextField v-model="probePath" label="容器内文件路径" placeholder="/downloads/anime/Example.mkv" prepend-inner-icon="mdi-file-video-outline" hide-details /><MediaFilePicker v-model="probePath" :api="props.api" /></div>
           <VBtn color="secondary" prepend-icon="mdi-waveform" :loading="saving === 'media-probe'" :disabled="!probePath" @click="previewMediaProbe">开始扫描</VBtn>
           <template v-if="probeResult">
             <div class="d-flex flex-wrap ga-2"><VChip size="small" color="primary" variant="tonal">视频 {{ probeResult.streams?.video || 0 }} 条</VChip><VChip size="small" color="secondary" variant="tonal">音频 {{ probeResult.streams?.audio || 0 }} 条</VChip><VChip size="small" :color="probeResult.streams?.subtitle ? 'success' : 'default'" variant="tonal">字幕 {{ probeResult.streams?.subtitle || 0 }} 条</VChip><VChip v-if="probeResult.cached" size="small" variant="tonal">缓存结果</VChip></div>
             <VAlert v-for="item in probeResult.diagnostics || []" :key="item.code" :type="item.level === 'warning' ? 'warning' : 'info'" variant="tonal" density="compact">{{ item.message }}</VAlert>
-            <div class="probe-result-grid"><div v-for="item in probeStandardPreviewItems" :key="item.key" class="probe-result-item"><div><div class="text-caption text-medium-emphasis">{{ item.label }}</div><code>{{ item.key }}</code></div><span>{{ item.value ?? '—' }}</span></div></div>
-            <VExpansionPanels variant="accordion"><VExpansionPanel><VExpansionPanelTitle><div><div class="font-weight-medium">查看全部 Jinja2 扫描变量</div><div class="text-caption text-medium-emphasis">{{ probeContextPreviewItems.length }} 个 <code>probe_*</code> 字段；0 是有效结果，— 表示文件未提供相应信息</div></div></VExpansionPanelTitle><VExpansionPanelText><div class="probe-result-grid"><div v-for="item in probeContextPreviewItems" :key="item.key" class="probe-result-item probe-context-result"><div><div class="text-caption text-medium-emphasis">{{ item.label }}</div><code>{{ item.key }}</code></div><span>{{ item.value === '' || item.value == null ? '—' : item.value }}</span></div></div></VExpansionPanelText></VExpansionPanel></VExpansionPanels>
+            <div><div class="text-subtitle-2 mb-2">本次扫描摘要</div><div class="probe-result-table"><div v-for="item in probeStandardPreviewItems" :key="item.key" class="probe-result-row"><div class="probe-summary-icon"><VIcon :icon="item.key === 'audioCodec' ? 'mdi-volume-high' : item.key === 'fps' ? 'mdi-speedometer' : item.key === 'effect' ? 'mdi-creation-outline' : 'mdi-video-outline'" size="18" /></div><div><span>{{ item.label }}</span><strong>{{ item.value ?? '—' }}</strong></div></div></div></div>
+            <VExpansionPanels variant="accordion"><VExpansionPanel><VExpansionPanelTitle><div><div class="font-weight-medium">全部 Jinja2 扫描变量</div><div class="text-caption text-medium-emphasis">{{ probeContextPreviewItems.length }} 个字段；0 是有效结果，— 表示文件没有提供对应信息</div></div></VExpansionPanelTitle><VExpansionPanelText><div class="probe-variable-table"><div class="probe-variable-head"><span>变量与含义</span><span>本次取值</span></div><div v-for="item in probeContextPreviewItems" :key="item.key" class="probe-variable-row"><div><strong>{{ item.label }}</strong><code>{{ item.key }}</code></div><span>{{ item.value === '' || item.value == null ? '—' : item.value }}</span></div></div></VExpansionPanelText></VExpansionPanel></VExpansionPanels>
           </template>
         </VCardText></VCard>
       </div>
@@ -717,13 +751,20 @@ onMounted(load)
       </VCardText><VDivider /><VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="groupProfileDialog = false">取消</VBtn><VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving === 'group-profile'" @click="saveGroupProfile">保存设置</VBtn></VCardActions></VCard>
     </VDialog>
 
-    <VDialog v-model="fieldDetailDialog" max-width="720">
+    <VDialog v-model="fieldDetailDialog" max-width="920" scrollable>
       <VCard v-if="fieldDetail"><VCardItem><template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-code-braces" /></VAvatar></template><VCardTitle>{{ fieldDetail.label }}</VCardTitle><VCardSubtitle><code>{{ fieldDetail.key }}</code> · {{ fieldDetail.source_label || '命名字段' }}</VCardSubtitle></VCardItem><VDivider /><VCardText class="field-detail-body">
         <div class="field-detail-meta"><VChip size="small" :color="fieldSourceColor(fieldDetail.source)" variant="tonal">{{ fieldDetail.source_label }}</VChip><VChip size="small" variant="tonal">{{ fieldDetail.type || '文本' }}</VChip><VChip size="small" variant="tonal">{{ fieldDetail.availability || '按上下文可用' }}</VChip></div>
+        <VAlert :type="fieldDetail.template_usage === 'custom_dependency' ? 'warning' : 'success'" variant="tonal" density="compact"><strong>{{ fieldDetail.template_usage_label || '可直接用于 MP 命名模板' }}</strong><div class="text-caption mt-1">{{ fieldDetail.template_usage_detail || '可直接复制下方变量写入 MoviePilot 命名模板。' }}</div></VAlert>
         <div class="field-detail-section"><div class="field-detail-title">用途</div><div>{{ fieldDetail.description }}</div></div>
         <div class="field-detail-section"><div class="field-detail-title">可能值与格式</div><div>{{ fieldDetail.values || '具体值由当前命名上下文决定。' }}</div></div>
         <div class="field-detail-section"><div class="field-detail-title">生成逻辑 / 使用注意</div><div>{{ fieldDetail.logic || '使用前建议判断字段是否为空。' }}</div></div>
         <div class="field-detail-section"><div class="field-detail-title">Jinja2 写法</div><code class="field-syntax-block">{{ variableSyntax(fieldDetail.key) }}</code></div>
+        <VExpansionPanels v-if="fieldDetailPresetRules.length" variant="accordion">
+          <VExpansionPanel><VExpansionPanelTitle><div><div class="font-weight-medium">当前 MP 已加载的识别预设</div><div class="text-caption text-medium-emphasis">{{ fieldDetailPresetRules.length }} 条；展示当前实例实际生效的内置词、正则和插件覆盖</div></div></VExpansionPanelTitle><VExpansionPanelText>
+            <div class="preset-table-wrap"><VTable density="compact" class="preset-table"><thead><tr><th>名称</th><th>匹配词 / 正则</th><th>输出值</th><th>来源</th></tr></thead><tbody><tr v-for="rule in visibleFieldPresetRules" :key="rule.id"><td>{{ rule.label }}</td><td><code>{{ rule.pattern }}</code></td><td><code>{{ rule.value }}</code></td><td><VChip size="x-small" :color="rule.overridden ? 'warning' : 'default'" variant="tonal">{{ rule.source_label }}<span v-if="rule.overridden"> · 已覆盖</span></VChip></td></tr></tbody></VTable></div>
+            <div v-if="visibleFieldPresetRules.length < fieldDetailPresetRules.length" class="d-flex justify-center mt-3"><VBtn variant="tonal" size="small" @click="fieldPresetLimit += 80">再显示 {{ Math.min(80, fieldDetailPresetRules.length - visibleFieldPresetRules.length) }} 条</VBtn></div>
+          </VExpansionPanelText></VExpansionPanel>
+        </VExpansionPanels>
       </VCardText><VDivider /><VCardActions><VBtn color="primary" variant="tonal" prepend-icon="mdi-content-copy" @click="copyVariable(fieldDetail.key)">复制变量</VBtn><VSpacer /><VBtn variant="text" @click="fieldDetailDialog = false">关闭</VBtn></VCardActions></VCard>
     </VDialog>
 
@@ -843,9 +884,23 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .subtitle-mapping-box { display: grid; gap: 12px; padding: 14px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .05); }
 .probe-advanced-grid { display: grid; grid-template-columns: minmax(120px, .45fr) minmax(0, 1fr); gap: 12px; }
 .ffprobe-help { display: grid; gap: 6px; padding-left: 22px; }
-.probe-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 12px; border-radius: 10px; background: rgba(var(--v-theme-secondary), .055); }
-.probe-result-item { min-width: 0; display: flex; justify-content: space-between; gap: 12px; padding: 6px 8px; }
-.probe-result-item span { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.probe-path-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.probe-result-table { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
+.probe-result-row { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; background: rgb(var(--v-theme-surface)); }
+.probe-summary-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; color: rgb(var(--v-theme-secondary)); background: rgba(var(--v-theme-secondary), .09); }
+.probe-result-row > div:last-child { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.probe-result-row span { min-width: 0; color: rgba(var(--v-theme-on-surface), .58); font-size: .78rem; }
+.probe-result-row strong { flex: 0 0 auto; font-size: .95rem; white-space: nowrap; }
+.probe-variable-row > div { min-width: 0; display: grid; gap: 2px; }
+.probe-variable-row code { color: rgb(var(--v-theme-secondary)); font-size: .76rem; overflow-wrap: anywhere; }
+.probe-variable-table { overflow: hidden; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; background: rgb(var(--v-theme-surface)); }
+.probe-variable-head, .probe-variable-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(140px, .42fr); gap: 16px; align-items: center; padding: 10px 14px; }
+.probe-variable-head { color: rgba(var(--v-theme-on-surface), .58); background: rgba(var(--v-theme-on-surface), .035); font-size: .75rem; font-weight: 600; }
+.probe-variable-row { border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.probe-variable-row > span { min-width: 0; text-align: right; font-weight: 500; overflow-wrap: break-word; word-break: normal; }
+.preset-table-wrap { max-height: 420px; overflow: auto; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
+.preset-table thead { position: sticky; top: 0; z-index: 1; background: rgb(var(--v-theme-surface)); }
+.preset-table code { white-space: normal; overflow-wrap: anywhere; }
 .supplement-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 900px) { .filter-row { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 600px) {
@@ -856,7 +911,9 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .naming-default-grid { grid-template-columns: 1fr; }
   .separator-scope { grid-column: auto; }
   .group-layout-grid, .group-preview-form { grid-template-columns: 1fr; }
-  .probe-settings-grid, .probe-result-grid, .supplement-field-grid { grid-template-columns: 1fr; }
+  .probe-settings-grid, .probe-result-table, .supplement-field-grid { grid-template-columns: 1fr; }
+  .probe-path-row { grid-template-columns: 1fr; }
+  .probe-variable-head, .probe-variable-row { grid-template-columns: minmax(0, 1fr) minmax(100px, .42fr); gap: 8px; padding: 9px 10px; }
   .probe-field-row { grid-template-columns: auto minmax(0, 1fr); }
   .probe-policy-select { grid-column: 2; width: 100%; }
   .probe-advanced-grid { grid-template-columns: 1fr; }

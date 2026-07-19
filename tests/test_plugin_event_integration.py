@@ -287,6 +287,8 @@ def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
     assert all(
         item.get("type") and item.get("values") and item.get("logic")
         and item.get("source") and item.get("source_label")
+        and item.get("template_usage") and item.get("template_usage_label")
+        and item.get("template_usage_detail")
         for item in builtin + context
     )
     probe_subtitle_count = next(item for item in context if item["key"] == "probe_subtitle_count")
@@ -297,7 +299,9 @@ def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
     assert "if type" in media_type["logic"]
     target = next(item for item in context if item["key"] == "target_dir")
     assert target["phase"] == "target_rerender"
+    assert target["template_usage"] == "custom_dependency"
     assert "文件操作前" in target["description"]
+    assert next(item for item in context if item["key"] == "probe_video_codec")["template_usage"] == "direct"
 
 
 def test_operation_history_is_visible_without_polluting_recognition_rate(monkeypatch):

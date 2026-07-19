@@ -220,6 +220,7 @@ onMounted(loadStatus)
           <VTab value="settings" prepend-icon="mdi-database-search-outline">TMDB 搜索增强</VTab>
           <VTab value="episodes" prepend-icon="mdi-animation-outline">集数偏移</VTab>
           <VTab value="metadata" prepend-icon="mdi-code-braces-box">字段与制作组</VTab>
+          <VTab value="media" prepend-icon="mdi-waveform">媒体信息识别</VTab>
           <VTab value="naming" prepend-icon="mdi-rename-box-outline">命名规则</VTab>
           <VTab value="preview" prepend-icon="mdi-flask-outline">综合试跑</VTab>
           <VTab value="history" prepend-icon="mdi-text-box-search-outline">日志</VTab>
@@ -260,6 +261,10 @@ onMounted(loadStatus)
                   <VCardText><VSwitch v-model="config.recognition_rule_overrides_enabled" color="success" label="启用模块" hide-details /><div class="status-line"><span>内置规则目录</span><strong>{{ modules.recognition_rules?.catalog_rules || 0 }} 条</strong></div><div class="status-line"><span>已启用覆盖</span><strong>{{ modules.recognition_rules?.compiled_rules || 0 }} 条</strong></div></VCardText>
                 </VCard>
                 <VCard variant="outlined" class="module-card">
+                  <VCardItem><template #prepend><VAvatar color="purple" variant="tonal"><VIcon icon="mdi-waveform" /></VAvatar></template><VCardTitle>媒体信息识别</VCardTitle><VCardSubtitle>{{ modules.media_probe?.status || (config.media_probe_enabled ? '已启用' : '已停用') }}</VCardSubtitle></VCardItem>
+                  <VCardText><VSwitch v-model="config.media_probe_enabled" color="purple" label="启用模块" hide-details /><div class="status-line"><span>扫描字段</span><strong>{{ config.media_probe_fields?.length || 0 }} 项</strong></div><div class="status-line"><span>作用阶段</span><strong>整理前 / 命名渲染前</strong></div></VCardText>
+                </VCard>
+                <VCard variant="outlined" class="module-card">
                   <VCardItem><template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-code-braces" /></VAvatar></template><VCardTitle>自定义命名字段</VCardTitle><VCardSubtitle>{{ modules.rename_fields?.status || '状态未知' }}</VCardSubtitle></VCardItem>
                   <VCardText><VSwitch v-model="config.custom_rename_fields_enabled" color="secondary" label="启用模块" hide-details /><div class="status-line"><span>独立字段</span><strong>{{ modules.rename_fields?.field_count || 0 }} 个</strong></div><div class="status-line"><span>作用阶段</span><strong>Jinja2 命名渲染</strong></div></VCardText>
                 </VCard>
@@ -285,6 +290,12 @@ onMounted(loadStatus)
           <section v-if="tab === 'metadata'" class="workspace-panel">
             <div class="tab-content">
               <MetadataTools v-model="config" mode="metadata" :api="api" :plugin-id="pluginId" :saving-config="saving" @save-config="saveConfig" />
+            </div>
+          </section>
+
+          <section v-if="tab === 'media'" class="workspace-panel">
+            <div class="tab-content">
+              <MetadataTools v-model="config" mode="probe" :api="api" :plugin-id="pluginId" :saving-config="saving" @save-config="saveConfig" />
             </div>
           </section>
 
