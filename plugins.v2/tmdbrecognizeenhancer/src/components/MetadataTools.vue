@@ -88,6 +88,16 @@ const groupPageCount = computed(() => Math.max(1, Math.ceil(groups.value.length 
 const pagedGroups = computed(() => groups.value.slice((page.value - 1) * pageSize, page.value * pageSize))
 const kindLabel = value => ({ animation: '动漫', live_action: '真人电视剧', unknown: '未分类' })[value] || '未分类'
 const kindColor = value => ({ animation: 'primary', live_action: 'orange', unknown: 'default' })[value] || 'default'
+const mediaProbeFieldItems = [
+  { key: 'videoFormat', label: '分辨率', target: 'videoFormat', detail: '根据实际宽高生成 720P、1080P、2160P 等' },
+  { key: 'videoCodec', label: '视频编码', target: 'videoCodec', detail: 'H264、H265、AV1、VP9 等' },
+  { key: 'videoBit', label: '视频位深', target: 'videoBit', detail: '8bit、10bit、12bit 等' },
+  { key: 'effect', label: '画面特效', target: 'effect', detail: 'DOVI、HDR10+、HDR10、HLG；普通 SDR 不写入 effect' },
+  { key: 'fps', label: '帧率', target: 'fps', detail: '读取主视频流的实际平均帧率' },
+  { key: 'audioCodec', label: '音频信息', target: 'audioCodec', detail: '主音频编码，并提供全部音轨编码和语言上下文' },
+  { key: 'subtitle', label: '内封字幕', target: 'customization', detail: '扫描容器内字幕流语言，按下方规则映射到 customization' },
+]
+const mediaProbeBackendSupported = computed(() => Object.prototype.hasOwnProperty.call(data.value || {}, 'media_probe') && Array.isArray(data.value.media_probe?.field_options))
 const supplementFieldItems = [
   { key: 'resourceType', label: '资源类型', placeholder: 'WEB-DL' },
   { key: 'webSource', label: '流媒体平台', placeholder: 'Netflix / Bilibili' },
@@ -204,6 +214,32 @@ async function previewMediaProbe() {
     probeResult.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/media-probe/preview`, { source_path: probePath.value, timeout: config.value.media_probe_timeout }))
   } catch (err) { error.value = explainError(err, '媒体流扫描失败') }
   finally { saving.value = '' }
+}
+
+function probeFieldSelected(key) {
+  return (config.value.media_probe_fields || []).includes(key)
+}
+
+function toggleProbeField(key, enabled) {
+  const fields = new Set(config.value.media_probe_fields || [])
+  enabled ? fields.add(key) : fields.delete(key)
+  config.value.media_probe_fields = [...fields]
+  if (!enabled) config.value.media_probe_overwrite_fields = (config.value.media_probe_overwrite_fields || []).filter(item => item !== key)
+}
+
+function probeFieldOverwrite(key) {
+  return config.value.media_probe_policy === 'overwrite' || (config.value.media_probe_overwrite_fields || []).includes(key)
+}
+
+function toggleProbeOverwrite(key, enabled) {
+  const fields = new Set(
+    config.value.media_probe_policy === 'overwrite'
+      ? (config.value.media_probe_fields || [])
+      : (config.value.media_probe_overwrite_fields || []),
+  )
+  enabled ? fields.add(key) : fields.delete(key)
+  config.value.media_probe_overwrite_fields = [...fields]
+  config.value.media_probe_policy = 'fill_empty'
 }
 
 function openRule(item = null) {
@@ -477,11 +513,29 @@ onMounted(load)
     <section v-else-if="props.mode !== 'naming' && section === 'probe'">
       <div class="probe-settings-grid mb-4">
         <VCard variant="outlined"><VCardItem><VCardTitle>自动扫描策略</VCardTitle><VCardSubtitle>只在实际整理且容器能直接读取源文件时运行；同一文件会按大小和修改时间缓存。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
-          <VAlert :type="data.media_probe?.available ? 'success' : 'warning'" variant="tonal" density="compact">{{ data.media_probe?.message || (data.media_probe?.available ? 'ffprobe 可用' : '未找到 ffprobe；请在 MP 容器中安装 ffmpeg') }}</VAlert>
+          <VAlert v-if="!mediaProbeBackendSupported" type="error" variant="tonal" density="compact">新版页面已加载，但插件后端仍是旧实例，因此字段目录显示为空且能力会被误报为 unavailable。请在 MP 插件页重载插件；没有重载入口时重启一次 MP 容器。</VAlert>
+          <VAlert v-else :type="data.media_probe?.available ? 'success' : 'warning'" variant="tonal" density="compact">{{ data.media_probe?.message }}</VAlert>
           <VSwitch v-model="config.media_probe_enabled" color="success" label="整理前扫描实际媒体流" hide-details />
-          <VSelect v-model="config.media_probe_policy" label="写入策略" :items="[{title:'仅补 MP 空字段（推荐）',value:'fill_empty'},{title:'以实际媒体流覆盖同名字段',value:'overwrite'}]" hide-details />
-          <VSelect v-model="config.media_probe_fields" label="允许补充的 MP 标准字段" :items="(data.media_probe?.field_options || []).map(item => ({ title: `${item.label}（${item.key}）`, value: item.key }))" multiple chips closable-chips hide-details />
+          <div class="probe-field-list">
+            <div v-for="item in mediaProbeFieldItems" :key="item.key" class="probe-field-row">
+              <VCheckboxBtn :model-value="probeFieldSelected(item.key)" color="primary" @update:model-value="value => toggleProbeField(item.key, value)" />
+              <div class="probe-field-main"><div class="font-weight-medium">{{ item.label }} <code>{{ item.target }}</code></div><div class="text-caption text-medium-emphasis">{{ item.detail }}</div></div>
+              <div class="probe-priority"><span class="text-caption">扫描值优先</span><VSwitch :model-value="probeFieldOverwrite(item.key)" color="orange" density="compact" hide-details :disabled="!probeFieldSelected(item.key)" @update:model-value="value => toggleProbeOverwrite(item.key, value)" /></div>
+            </div>
+          </div>
+          <VAlert type="info" variant="tonal" density="compact">“扫描值优先”关闭时只补 MP/文件名没有识别出的空字段；开启时该项以真实媒体流为准。每项独立控制，不需要全部采用同一优先级。</VAlert>
+          <VExpandTransition><div v-if="probeFieldSelected('subtitle')" class="subtitle-mapping-box">
+            <VSwitch v-model="config.media_probe_subtitle_to_customization" color="secondary" label="将字幕映射结果写入 customization" hide-details />
+            <VTextarea v-model="config.media_probe_subtitle_rules" label="字幕组合映射（每行一条）" rows="6" auto-grow placeholder="简体+繁体 => 简繁内封" hint="精确匹配容器内字幕语言集合；支持简体、繁体、日语、英语、韩语。右侧“扫描值优先”决定是否覆盖文件名已有 customization。" persistent-hint />
+            <div class="text-caption text-medium-emphasis">可扫描的是 MKV/MP4 内独立存在的内封字幕流；烧录进画面像素的硬字幕（常被称为内嵌字幕）没有字幕轨，ffprobe 无法判断语言。</div>
+          </div></VExpandTransition>
           <VTextField v-model.number="config.media_probe_timeout" type="number" min="3" max="30" label="单文件超时（秒）" hide-details />
+          <VTextField v-model="config.media_probe_executable" label="自定义 ffprobe 路径（通常留空）" placeholder="/usr/local/bin/ffprobe" clearable hint="只在自定义镜像或手动挂载二进制时填写；留空会自动搜索常见路径" persistent-hint />
+          <VExpansionPanels v-if="mediaProbeBackendSupported && !data.media_probe?.available" variant="accordion"><VExpansionPanel><VExpansionPanelTitle>ffprobe 为什么不可用，怎么处理？</VExpansionPanelTitle><VExpansionPanelText>
+            <div class="text-body-2 mb-2">MoviePilot 当前官方 Dockerfile 已把 <code>ffmpeg</code> 和 <code>ffprobe</code> 放入 <code>/usr/local/bin</code>。这里不可用通常表示容器仍是旧镜像、自定义镜像遗漏了该文件，或只更新了插件而没有更新 MP 镜像。</div>
+            <ol class="ffprobe-help"><li>优先拉取当前 MoviePilot 镜像并重新创建容器，配置与挂载目录不会因此改变。</li><li>自定义镜像可从官方镜像继承，或把 ffprobe 持久挂载到 <code>/usr/local/bin/ffprobe:ro</code>。</li><li>容器内执行 <code>ffprobe -version</code> 验证，随后回到这里点击“重新读取 MP 规则”。</li></ol>
+            <VAlert type="warning" variant="tonal" density="compact" class="mt-3">插件不会自动执行 apt 或下载可执行文件：插件通常没有 root 权限，而且直接修改运行中容器会在重新创建后丢失，也会带来架构和供应链风险。</VAlert>
+          </VExpansionPanelText></VExpansionPanel></VExpansionPanels>
           <div class="d-flex justify-end"><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存扫描设置</VBtn></div>
         </VCardText></VCard>
         <VCard variant="outlined"><VCardItem><VCardTitle>文件试扫</VCardTitle><VCardSubtitle>请输入 MP 容器内部看到的真实媒体文件路径，不是宿主机映射前路径。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
@@ -489,7 +543,7 @@ onMounted(load)
           <VBtn color="secondary" prepend-icon="mdi-waveform" :loading="saving === 'media-probe'" :disabled="!probePath" @click="previewMediaProbe">开始扫描</VBtn>
           <div v-if="probeResult" class="probe-result-grid">
             <div v-for="(value, key) in probeResult.fields" :key="key" class="probe-result-item"><code>{{ key }}</code><span>{{ value || '—' }}</span></div>
-            <div v-for="key in ['probe_audio_languages','probe_subtitle_languages','probe_subtitle_profile']" :key="key" class="probe-result-item"><code>{{ key }}</code><span>{{ probeResult.context?.[key] || '—' }}</span></div>
+            <div v-for="key in ['probe_audio_languages','probe_subtitle_languages','probe_subtitle_profile','probe_subtitle_mapped']" :key="key" class="probe-result-item"><code>{{ key }}</code><span>{{ probeResult.context?.[key] || '—' }}</span></div>
           </div>
         </VCardText></VCard>
       </div>
@@ -725,6 +779,13 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .overlay-preview-actions { display: flex; align-items: center; min-height: 38px; }
 .probe-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .probe-config-body { display: grid; gap: 14px; }
+.probe-field-list { display: grid; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
+.probe-field-row { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.probe-field-row:last-child { border-bottom: 0; }
+.probe-field-main { min-width: 0; }
+.probe-priority { min-width: 124px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.subtitle-mapping-box { display: grid; gap: 12px; padding: 14px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .05); }
+.ffprobe-help { display: grid; gap: 6px; padding-left: 22px; }
 .probe-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 12px; border-radius: 10px; background: rgba(var(--v-theme-secondary), .055); }
 .probe-result-item { min-width: 0; display: flex; justify-content: space-between; gap: 12px; padding: 6px 8px; }
 .probe-result-item span { min-width: 0; text-align: right; overflow-wrap: anywhere; }
@@ -739,5 +800,7 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .separator-scope { grid-column: auto; }
   .group-layout-grid, .group-preview-form { grid-template-columns: 1fr; }
   .probe-settings-grid, .probe-result-grid, .supplement-field-grid { grid-template-columns: 1fr; }
+  .probe-field-row { grid-template-columns: auto minmax(0, 1fr); }
+  .probe-priority { grid-column: 2; justify-content: flex-start; }
 }
 </style>

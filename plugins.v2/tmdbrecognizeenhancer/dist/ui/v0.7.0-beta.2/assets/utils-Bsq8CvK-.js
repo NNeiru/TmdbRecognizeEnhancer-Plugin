@@ -66,7 +66,7 @@ const DEFAULT_CONFIG = {
   release_group_default_connector: "@",
   release_group_normalize_unknown_connectors: false
 };
-const UI_VERSION = "0.7.0-beta.1";
+const UI_VERSION = "0.7.0-beta.2";
 function ensureUiVersion(backendVersion) {
   const backend = String(backendVersion || "").trim();
   if (!backend || backend === UI_VERSION || typeof window === "undefined") return false;

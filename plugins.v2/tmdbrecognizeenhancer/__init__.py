@@ -66,7 +66,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.7.0-beta.1"
+    plugin_version = "0.7.0-beta.2"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -144,9 +144,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "media_probe_enabled": False,
         "media_probe_policy": "fill_empty",
         "media_probe_timeout": 12,
+        "media_probe_executable": "",
         "media_probe_fields": [
-            "videoFormat", "videoCodec", "videoBit", "audioCodec", "effect", "fps",
+            "videoFormat", "videoCodec", "videoBit", "audioCodec", "effect", "fps", "subtitle",
         ],
+        "media_probe_overwrite_fields": [],
+        "media_probe_subtitle_to_customization": True,
+        "media_probe_subtitle_rules": (
+            "简体 => 简体内封\n"
+            "繁体 => 繁体内封\n"
+            "简体+繁体 => 简繁内封\n"
+            "简体+日语 => 简日内封\n"
+            "繁体+日语 => 繁日内封\n"
+            "简体+繁体+日语 => 简繁日内封"
+        ),
         "rename_mapping_enabled": True,
         "rename_default_separator": "",
         "rename_separator_fields": [],
@@ -706,7 +717,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "release_groups": catalog,
             "release_group_profiles": self._read_release_group_profiles(),
             "media_probe": {
-                **self._media_probe.capability(),
+                **self._media_probe.capability(self._config.get("media_probe_executable")),
                 "field_options": [
                     {"key": "videoFormat", "label": "分辨率"},
                     {"key": "videoCodec", "label": "视频编码"},
@@ -714,6 +725,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     {"key": "audioCodec", "label": "主音频编码"},
                     {"key": "effect", "label": "HDR / 杜比视界"},
                     {"key": "fps", "label": "帧率"},
+                    {"key": "subtitle", "label": "内封字幕语言与组合", "target": "customization"},
                 ],
             },
             "recognition_rules": self._recognition_rules.catalog(),
@@ -738,7 +750,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "custom_independent_field": hasattr(ChainEventType, "TransferRenameBuild"),
                 "target_directory_context": hasattr(ChainEventType, "TransferRename"),
                 "subtitle_post_mapping": self._subtitle_rename_adapter.compatible,
-                "media_probe": self._media_probe.capability().get("available", False),
+                "media_probe": self._media_probe.capability(
+                    self._config.get("media_probe_executable")
+                ).get("available", False),
             },
         })
 
@@ -772,9 +786,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             timeout=self._safe_int(
                 payload.get("timeout"), self._safe_int(self._config.get("media_probe_timeout"), 12),
             ),
+            executable_path=self._config.get("media_probe_executable"),
         )
         if not result.get("success"):
             return schemas.Response(success=False, message=str(result.get("reason") or "媒体流扫描失败"), data=result)
+        mapped = self._media_probe.map_subtitles(
+            result, self._config.get("media_probe_subtitle_rules"),
+        )
+        result.setdefault("context", {})["probe_subtitle_mapped"] = mapped
         return schemas.Response(success=True, data=result)
 
     def save_recognition_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
@@ -2593,6 +2612,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             probe_result = self._media_probe.probe(
                 source_context.get("source_path"),
                 timeout=self._safe_int(self._config.get("media_probe_timeout"), 12),
+                executable_path=self._config.get("media_probe_executable"),
             )
             if probe_result.get("success"):
                 probe_changes = self._media_probe.apply_fields(
@@ -2600,6 +2620,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     probe_result,
                     self._config.get("media_probe_fields") or [],
                     self._config.get("media_probe_policy") or "fill_empty",
+                    overwrite_fields=self._config.get("media_probe_overwrite_fields") or [],
+                    subtitle_rules=self._config.get("media_probe_subtitle_rules"),
+                    subtitle_to_customization=self._config.get("media_probe_subtitle_to_customization", True),
                 )
                 log_stages.append("媒体流扫描")
                 log_details.append(
@@ -4556,6 +4579,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "recognition_rule_overrides_enabled",
             "seasonal_evidence_enabled", "recognition_memory_enabled",
             "custom_rename_fields_enabled", "rename_mapping_enabled", "media_probe_enabled",
+            "media_probe_subtitle_to_customization",
             "release_group_normalize_unknown_connectors",
         )
         for key in bool_keys:
@@ -4644,8 +4668,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
             probe_fields = []
         merged["media_probe_fields"] = [
             field for field in dict.fromkeys(str(item) for item in probe_fields)
-            if field in MediaFileProbe.MP_FIELDS
+            if field in MediaFileProbe.SCAN_TARGETS
         ]
+        overwrite_fields = merged.get("media_probe_overwrite_fields") or []
+        if not isinstance(overwrite_fields, (list, tuple, set)):
+            overwrite_fields = []
+        merged["media_probe_overwrite_fields"] = [
+            field for field in dict.fromkeys(str(item) for item in overwrite_fields)
+            if field in MediaFileProbe.SCAN_TARGETS and field in merged["media_probe_fields"]
+        ]
+        executable = str(merged.get("media_probe_executable") or "").strip()
+        merged["media_probe_executable"] = executable[:500]
+        subtitle_rules = str(merged.get("media_probe_subtitle_rules") or "")
+        merged["media_probe_subtitle_rules"] = subtitle_rules[:10000]
         mappings = []
         for item in merged.get("emby_episode_group_sync_path_mappings") or []:
             if not isinstance(item, dict):

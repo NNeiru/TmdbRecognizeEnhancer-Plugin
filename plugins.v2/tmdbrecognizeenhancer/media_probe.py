@@ -19,6 +19,19 @@ class MediaFileProbe:
     MP_FIELDS = {
         "videoFormat", "videoCodec", "videoBit", "audioCodec", "effect", "fps",
     }
+    SCAN_TARGETS = MP_FIELDS | {"subtitle"}
+    CONTEXT_BY_TARGET = {
+        "videoFormat": {"probe_video_format", "probe_video_width", "probe_video_height"},
+        "videoCodec": {"probe_video_codec"},
+        "videoBit": {"probe_video_bit"},
+        "effect": {"probe_effect"},
+        "fps": {"probe_fps"},
+        "audioCodec": {"probe_audio_codec", "probe_audio_codecs", "probe_audio_languages"},
+        "subtitle": {
+            "probe_subtitle_languages", "probe_subtitle_profile", "probe_subtitle_mapped",
+            "probe_subtitle_count",
+        },
+    }
     CONTEXT_FIELDS = (
         ("probe_video_codec", "扫描视频编码", "ffprobe 检测到的主视频流编码。"),
         ("probe_video_bit", "扫描视频位深", "ffprobe 检测到的主视频流位深，例如 10bit。"),
@@ -30,6 +43,7 @@ class MediaFileProbe:
         ("probe_audio_languages", "音轨语言", "容器内音轨语言，使用顿号连接并去重。"),
         ("probe_subtitle_languages", "内封字幕语言", "从字幕流 language 与 title 标签推断的语言。"),
         ("probe_subtitle_profile", "内封字幕组合", "便于命名的组合，例如“简日内封”“简繁日内封”。"),
+        ("probe_subtitle_mapped", "字幕自定义映射", "按用户字幕组合规则生成、可写入 customization 的结果。"),
         ("probe_subtitle_count", "内封字幕数量", "容器中的字幕流数量。"),
         ("probe_video_width", "视频宽度", "主视频流像素宽度。"),
         ("probe_video_height", "视频高度", "主视频流像素高度。"),
@@ -241,13 +255,32 @@ class MediaFileProbe:
             "reason": "已读取媒体流" if streams else "文件没有可识别的媒体流",
         }
 
-    def capability(self) -> Dict[str, Any]:
-        executable = shutil.which("ffprobe")
+    @staticmethod
+    def _resolve_executable(configured_path: Any = "") -> str:
+        configured = str(configured_path or "").strip()
+        if configured:
+            path = Path(configured)
+            if path.is_file():
+                return str(path)
+            found = shutil.which(configured)
+            if found:
+                return found
+        for candidate in ("ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe"):
+            found = shutil.which(candidate)
+            if found:
+                return found
+        return ""
+
+    def capability(self, configured_path: Any = "") -> Dict[str, Any]:
+        executable = self._resolve_executable(configured_path)
         with self._lock:
             return {
                 "available": bool(executable),
                 "executable": executable or "",
-                "message": "ffprobe 可用" if executable else "容器中未找到 ffprobe；安装 ffmpeg 后可用",
+                "message": (
+                    f"ffprobe 可用：{executable}" if executable else
+                    "当前 MoviePilot 进程未找到 ffprobe；官方新版 Docker 镜像已内置"
+                ),
                 "cache_entries": len(self._cache),
                 "scans": self._scans,
                 "cache_hits": self._cache_hits,
@@ -255,8 +288,8 @@ class MediaFileProbe:
                 "last_error": self._last_error,
             }
 
-    def probe(self, source_path: Any, timeout: int = 12) -> Dict[str, Any]:
-        executable = shutil.which("ffprobe")
+    def probe(self, source_path: Any, timeout: int = 12, executable_path: Any = "") -> Dict[str, Any]:
+        executable = self._resolve_executable(executable_path)
         if not executable:
             return {"success": False, "reason": "容器中未找到 ffprobe", "fields": {}, "context": {}}
         path = Path(str(source_path or ""))
@@ -305,6 +338,45 @@ class MediaFileProbe:
             self._last_error = reason
         return {"success": False, "reason": reason, "fields": {}, "context": {}, "source_path": str(path)}
 
+    @staticmethod
+    def parse_subtitle_rules(value: Any) -> List[Dict[str, Any]]:
+        """解析用户友好的“简体+繁体 => 简繁内封”精确组合规则。"""
+        lines = value.splitlines() if isinstance(value, str) else value if isinstance(value, list) else []
+        aliases = {
+            "简": "简体", "简中": "简体", "简体中文": "简体", "chs": "简体",
+            "繁": "繁体", "繁中": "繁体", "繁體": "繁体", "cht": "繁体",
+            "日": "日语", "日文": "日语", "jpn": "日语",
+            "英": "英语", "英文": "英语", "eng": "英语",
+            "韩": "韩语", "韩文": "韩语", "kor": "韩语",
+            "中": "中文",
+        }
+        rules: List[Dict[str, Any]] = []
+        for raw in lines:
+            if isinstance(raw, dict):
+                languages = raw.get("languages") or []
+                output = str(raw.get("value") or "").strip()
+            else:
+                text = str(raw or "").strip()
+                if not text or text.startswith("#") or "=>" not in text:
+                    continue
+                left, output = text.split("=>", 1)
+                languages = re.split(r"\s*[+,&，、]\s*", left.strip())
+                output = output.strip()
+            canonical = [aliases.get(str(item).strip().lower(), str(item).strip()) for item in languages]
+            canonical = sorted(set(item for item in canonical if item), key=lambda item: (MediaFileProbe._LANGUAGE_ORDER.get(item, 99), item))
+            if canonical and output:
+                rules.append({"languages": canonical, "value": output[:120]})
+        return rules
+
+    @classmethod
+    def map_subtitles(cls, result: Dict[str, Any], rules: Any) -> str:
+        detected = [item for item in str((result.get("context") or {}).get("probe_subtitle_languages") or "").split("、") if item]
+        detected_set = set(detected)
+        for rule in cls.parse_subtitle_rules(rules):
+            if set(rule["languages"]) == detected_set:
+                return rule["value"]
+        return ""
+
     @classmethod
     def apply_fields(
             cls,
@@ -312,21 +384,42 @@ class MediaFileProbe:
             result: Dict[str, Any],
             enabled_fields: Iterable[str],
             policy: str = "fill_empty",
+            overwrite_fields: Optional[Iterable[str]] = None,
+            subtitle_rules: Any = None,
+            subtitle_to_customization: bool = True,
     ) -> List[Dict[str, Any]]:
         """把扫描结果注入命名上下文，并按策略补齐 MP 标准字段。"""
-        rename_dict.update(result.get("context") or {})
-        selected = cls.MP_FIELDS.intersection(str(item) for item in enabled_fields or [])
-        overwrite = str(policy or "fill_empty") == "overwrite"
+        selected_targets = cls.SCAN_TARGETS.intersection(str(item) for item in enabled_fields or [])
+        selected = cls.MP_FIELDS.intersection(selected_targets)
+        context_keys = set().union(*(cls.CONTEXT_BY_TARGET.get(item, set()) for item in selected_targets))
+        source_context = result.get("context") or {}
+        rename_dict.update({key: source_context.get(key) for key in context_keys if key in source_context})
+        overwrite_all = str(policy or "fill_empty") == "overwrite"
+        overwrite_set = {str(item) for item in overwrite_fields or []}
         changes: List[Dict[str, Any]] = []
         for field in selected:
             value = (result.get("fields") or {}).get(field)
             before = rename_dict.get(field)
+            overwrite = overwrite_all or field in overwrite_set
             if value in (None, "") or (not overwrite and before not in (None, "", 0)):
                 continue
             if before == value:
                 continue
             rename_dict[field] = value
             changes.append({"field": field, "before": before, "after": value, "source": "ffprobe"})
+        if "subtitle" in selected_targets:
+            mapped = cls.map_subtitles(result, subtitle_rules)
+            rename_dict["probe_subtitle_mapped"] = mapped
+            if mapped and subtitle_to_customization:
+                before = rename_dict.get("customization")
+                overwrite = overwrite_all or "subtitle" in overwrite_set
+                if overwrite or before in (None, "", 0):
+                    if before != mapped:
+                        rename_dict["customization"] = mapped
+                        changes.append({
+                            "field": "customization", "before": before, "after": mapped,
+                            "source": "ffprobe_subtitle",
+                        })
         if any(item["field"] in {"resourceType", "effect"} for item in changes):
             rename_dict["edition"] = " ".join(
                 str(rename_dict.get(key) or "").strip() for key in ("resourceType", "effect")

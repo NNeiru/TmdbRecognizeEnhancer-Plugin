@@ -57,7 +57,7 @@ def test_fill_empty_preserves_mp_values_but_exposes_probe_context():
     rename_dict = {"videoCodec": "AV1", "videoFormat": ""}
 
     changes = probe.apply_fields(
-        rename_dict, result, ["videoCodec", "videoFormat", "audioCodec"], "fill_empty",
+        rename_dict, result, ["videoCodec", "videoFormat", "audioCodec", "subtitle"], "fill_empty",
     )
 
     assert rename_dict["videoCodec"] == "AV1"
@@ -65,6 +65,40 @@ def test_fill_empty_preserves_mp_values_but_exposes_probe_context():
     assert rename_dict["audioCodec"] == "AAC"
     assert rename_dict["probe_subtitle_profile"] == "简繁日内封"
     assert {item["field"] for item in changes} == {"videoFormat", "audioCodec"}
+
+
+def test_per_field_priority_and_subtitle_customization_mapping():
+    probe = _probe_class()
+    result = probe.parse_payload(_sample_payload())
+    rename_dict = {"videoCodec": "AV1", "videoBit": "8bit", "customization": "标题已有"}
+
+    changes = probe.apply_fields(
+        rename_dict,
+        result,
+        ["videoCodec", "videoBit", "subtitle"],
+        "fill_empty",
+        overwrite_fields=["videoBit", "subtitle"],
+        subtitle_rules="简体+繁体+日语 => 简繁日内封",
+        subtitle_to_customization=True,
+    )
+
+    assert rename_dict["videoCodec"] == "AV1"
+    assert rename_dict["videoBit"] == "10bit"
+    assert rename_dict["customization"] == "简繁日内封"
+    assert rename_dict["probe_subtitle_mapped"] == "简繁日内封"
+    assert {item["field"] for item in changes} == {"videoBit", "customization"}
+
+
+def test_unselected_stream_categories_are_not_exposed_to_jinja_context():
+    probe = _probe_class()
+    result = probe.parse_payload(_sample_payload())
+    rename_dict = {}
+
+    probe.apply_fields(rename_dict, result, ["videoCodec"], "fill_empty")
+
+    assert rename_dict["probe_video_codec"] == "H265"
+    assert "probe_audio_languages" not in rename_dict
+    assert "probe_subtitle_languages" not in rename_dict
 
 
 def test_sdr_is_context_only_and_does_not_fill_effect():

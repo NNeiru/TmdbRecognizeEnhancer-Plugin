@@ -459,7 +459,7 @@ def test_media_probe_runs_even_when_other_naming_modules_are_disabled(monkeypatc
         "rename_mapping_enabled": False,
         "release_group_field_supplements_enabled": False,
         "media_probe_enabled": True,
-        "media_probe_fields": ["videoCodec", "videoBit"],
+        "media_probe_fields": ["videoCodec", "videoBit", "subtitle"],
     })
     plugin._media_probe = SimpleNamespace(
         probe=Mock(return_value={
