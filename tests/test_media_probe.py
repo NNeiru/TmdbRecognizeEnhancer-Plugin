@@ -156,7 +156,7 @@ def _subtitle_payload(*tags_list):
     }
 
 
-def test_dual_language_tracks_split_into_atomic_languages():
+def test_dual_language_track_titles_resolve_to_composite_labels():
     probe = _probe_class()
 
     result = probe.parse_payload(_subtitle_payload(
@@ -164,9 +164,7 @@ def test_dual_language_tracks_split_into_atomic_languages():
         {"language": "chi", "title": "繁日雙語"},
     ))
 
-    # 语言只保留单语言，双语轨的组合标签放在处理后标题，原始标题单独保留
-    assert result["context"]["probe_subtitle_languages"] == "简体、繁体、日语"
-    assert result["context"]["probe_subtitle_track_labels"] == "简日、繁日"
+    assert result["context"]["probe_subtitle_languages"] == "简日、繁日"
     assert result["context"]["probe_subtitle_titles"] == "简日双语、繁日雙語"
     assert result["context"]["probe_subtitle_profile"] == "简繁日内封"
 
@@ -182,8 +180,7 @@ def test_language_tag_variants_are_classified():
         {"language": "chi", "title": "简繁双语"},
     ))
 
-    assert result["context"]["probe_subtitle_languages"] == "简体、繁体"
-    assert result["context"]["probe_subtitle_track_labels"] == "简体、简繁、繁体"
+    assert result["context"]["probe_subtitle_languages"] == "简体、简繁、繁体"
     assert result["context"]["probe_subtitle_profile"] == "简繁内封"
 
 
