@@ -143,6 +143,17 @@ const separatorFieldItems = computed(() => (data.value.rename_fields?.builtin ||
   .filter(item => separatorFieldKeys.has(item.key))
   .map(item => ({ title: `${item.label}（${item.key}）`, value: item.key })))
 const customFields = computed(() => data.value.rename_fields?.custom || [])
+const probeContextFieldItems = computed(() => (data.value.rename_fields?.context || [])
+  .filter(item => String(item.key || '').startsWith('probe_')))
+const probeStandardPreviewItems = computed(() => Object.entries(probeResult.value?.fields || {}).map(([key, value]) => ({
+  key,
+  value,
+  label: mediaProbeFieldItems.find(item => item.target === key)?.label || key,
+})))
+const probeContextPreviewItems = computed(() => probeContextFieldItems.value.map(item => ({
+  ...item,
+  value: probeResult.value?.context?.[item.key],
+})))
 const availableRenameFields = computed(() => [
   ...(data.value.rename_fields?.builtin || []),
   ...(data.value.rename_fields?.context || []),
@@ -553,13 +564,18 @@ onMounted(load)
         <VCard variant="outlined"><VCardItem><VCardTitle>文件试扫</VCardTitle><VCardSubtitle>请输入 MP 容器内部看到的真实媒体文件路径，不是宿主机映射前路径。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
           <VTextField v-model="probePath" label="容器内文件路径" placeholder="/downloads/anime/Example.mkv" prepend-inner-icon="mdi-file-video-outline" hide-details />
           <VBtn color="secondary" prepend-icon="mdi-waveform" :loading="saving === 'media-probe'" :disabled="!probePath" @click="previewMediaProbe">开始扫描</VBtn>
-          <div v-if="probeResult" class="probe-result-grid">
-            <div v-for="(value, key) in probeResult.fields" :key="key" class="probe-result-item"><code>{{ key }}</code><span>{{ value || '—' }}</span></div>
-            <div v-for="key in ['probe_audio_languages','probe_subtitle_languages','probe_subtitle_profile','probe_subtitle_mapped']" :key="key" class="probe-result-item"><code>{{ key }}</code><span>{{ probeResult.context?.[key] || '—' }}</span></div>
-          </div>
+          <template v-if="probeResult">
+            <div class="d-flex flex-wrap ga-2"><VChip size="small" color="primary" variant="tonal">视频 {{ probeResult.streams?.video || 0 }} 条</VChip><VChip size="small" color="secondary" variant="tonal">音频 {{ probeResult.streams?.audio || 0 }} 条</VChip><VChip size="small" :color="probeResult.streams?.subtitle ? 'success' : 'default'" variant="tonal">字幕 {{ probeResult.streams?.subtitle || 0 }} 条</VChip><VChip v-if="probeResult.cached" size="small" variant="tonal">缓存结果</VChip></div>
+            <VAlert v-for="item in probeResult.diagnostics || []" :key="item.code" :type="item.level === 'warning' ? 'warning' : 'info'" variant="tonal" density="compact">{{ item.message }}</VAlert>
+            <div class="probe-result-grid"><div v-for="item in probeStandardPreviewItems" :key="item.key" class="probe-result-item"><div><div class="text-caption text-medium-emphasis">{{ item.label }}</div><code>{{ item.key }}</code></div><span>{{ item.value ?? '—' }}</span></div></div>
+            <VExpansionPanels variant="accordion"><VExpansionPanel><VExpansionPanelTitle><div><div class="font-weight-medium">查看全部 Jinja2 扫描变量</div><div class="text-caption text-medium-emphasis">{{ probeContextPreviewItems.length }} 个 <code>probe_*</code> 字段；0 是有效结果，— 表示文件未提供相应信息</div></div></VExpansionPanelTitle><VExpansionPanelText><div class="probe-result-grid"><div v-for="item in probeContextPreviewItems" :key="item.key" class="probe-result-item probe-context-result"><div><div class="text-caption text-medium-emphasis">{{ item.label }}</div><code>{{ item.key }}</code></div><span>{{ item.value === '' || item.value == null ? '—' : item.value }}</span></div></div></VExpansionPanelText></VExpansionPanel></VExpansionPanels>
+          </template>
         </VCardText></VCard>
       </div>
-      <VAlert type="info" variant="tonal" density="compact">扫描结果既可按策略写入 MP 标准字段，也会作为 <code>probe_*</code> 变量提供给“命名规则 → 自定义字段”。例如可用 <code v-pre>{{ probe_video_codec }}</code>、<code v-pre>{{ probe_effect }}</code>、<code v-pre>{{ probe_subtitle_mapped }}</code> 和 <code v-pre>{{ probe_duration }}</code> 自由组合。</VAlert>
+      <VExpansionPanels variant="accordion" class="mt-4"><VExpansionPanel><VExpansionPanelTitle><div><div class="font-weight-medium">插件新增的 Jinja2 扫描字段</div><div class="text-caption text-medium-emphasis">共 {{ probeContextFieldItems.length }} 个；点击字段可复制可直接写入 MP 命名模板的语法</div></div></VExpansionPanelTitle><VExpansionPanelText>
+        <VAlert type="info" variant="tonal" density="compact" class="mb-3">这些不是 MP 原生字段，而是插件在整理前通过 ffprobe 新增到命名上下文的变量。只有启用了对应扫描项且源文件可读时才有值；可直接用于自定义 Jinja 字段，也可直接写进 MP 命名模板。</VAlert>
+        <div class="field-description-grid"><button v-for="item in probeContextFieldItems" :key="item.key" type="button" class="field-description-card" @click="copyVariable(item.key)"><div class="field-description-head"><code>{{ item.key }}</code><VChip size="x-small" color="secondary" variant="tonal">插件新增</VChip></div><div class="field-description-label">{{ item.label }}</div><div class="field-description-text">{{ item.description }}</div><div class="field-copy-hint"><VIcon :icon="copiedVariable === item.key ? 'mdi-check' : 'mdi-content-copy'" size="14" /> {{ copiedVariable === item.key ? '已复制' : '点击复制' }} <code>{{ variableSyntax(item.key) }}</code></div></button></div>
+      </VExpansionPanelText></VExpansionPanel></VExpansionPanels>
     </section>
 
     <section v-else-if="props.mode === 'naming'">
