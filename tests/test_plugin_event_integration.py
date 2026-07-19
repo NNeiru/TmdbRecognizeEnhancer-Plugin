@@ -405,6 +405,86 @@ def test_structured_release_group_arrangement_runs_before_advanced_mapping(monke
     assert build.event_data["rename_dict"]["releaseGroup"] == "A&VCB-Studio@ADWeb"
 
 
+def test_release_group_supplements_fill_empty_fields_before_naming(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "custom_rename_fields_enabled": False,
+        "rename_mapping_enabled": False,
+        "release_group_field_supplements_enabled": True,
+    })
+    plugin._release_group_registry._compiled = [({
+        "id": "adweb", "pattern": "ADWeb", "display_name": "ADWeb", "kind": "unknown",
+        "field_policy": "fill_empty",
+        "field_values": {"resourceType": "WEB-DL", "audioCodec": "AAC"},
+    }, __import__("re").compile("ADWeb", __import__("re").IGNORECASE))]
+    build = SimpleNamespace(event_data={
+        "rename_dict": {
+            "releaseGroup": "ADWeb", "resourceType": "", "audioCodec": "FLAC",
+        },
+        "source_path": "",
+    })
+
+    plugin.on_transfer_rename_build(build)
+
+    naming = build.event_data["rename_dict"]
+    assert naming["resourceType"] == "WEB-DL"
+    assert naming["audioCodec"] == "FLAC"
+    assert naming["edition"] == "WEB-DL"
+    assert naming["resource_term"] == "WEB-DL"
+
+
+def test_conflicting_release_group_supplements_are_skipped(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    registry = module.ReleaseGroupRegistry()
+    import re
+    registry._compiled = [
+        ({"id": "a", "display_name": "A", "kind": "unknown", "field_policy": "fill_empty", "field_values": {"resourceType": "WEB-DL"}}, re.compile(r"^A$")),
+        ({"id": "b", "display_name": "B", "kind": "unknown", "field_policy": "fill_empty", "field_values": {"resourceType": "BluRay"}}, re.compile(r"^B$")),
+    ]
+
+    result = registry.supplements("A&B")
+
+    assert result["fields"] == {}
+    assert result["conflicts"][0]["field"] == "resourceType"
+
+
+def test_media_probe_runs_even_when_other_naming_modules_are_disabled(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "custom_rename_fields_enabled": False,
+        "rename_mapping_enabled": False,
+        "release_group_field_supplements_enabled": False,
+        "media_probe_enabled": True,
+        "media_probe_fields": ["videoCodec", "videoBit"],
+    })
+    plugin._media_probe = SimpleNamespace(
+        probe=Mock(return_value={
+            "success": True,
+            "fields": {"videoCodec": "H265", "videoBit": "10bit"},
+            "context": {"probe_subtitle_profile": "简日内封"},
+            "streams": {"video": 1, "audio": 1, "subtitle": 2},
+        }),
+        apply_fields=module.MediaFileProbe.apply_fields,
+    )
+    build = SimpleNamespace(event_data={
+        "rename_dict": {"videoCodec": ""},
+        "source_path": "/downloads/Example.mkv",
+        "source_item": {"name": "Example.mkv", "extension": "mkv"},
+    })
+
+    plugin.on_transfer_rename_build(build)
+
+    naming = build.event_data["rename_dict"]
+    assert naming["videoCodec"] == "H265"
+    assert naming["videoBit"] == "10bit"
+    assert naming["probe_subtitle_profile"] == "简日内封"
+    plugin._media_probe.probe.assert_called_once()
+
+
 def test_current_quarter_catalog_prioritizes_mapped_anime_candidate(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

@@ -13,13 +13,17 @@ const emit = defineEmits(['update:modelValue', 'save-config'])
 const loading = ref(false)
 const saving = ref('')
 const error = ref('')
-const data = ref({ release_groups: { items: [] }, recognition_rules: { items: [], fields: [], overrides: [] }, rename_fields: { builtin: [], context: [], custom: [] }, rename_mappings: { items: [], stages: [] }, release_group_arrangements: { items: [], positions: [], connectors: [] }, capabilities: {} })
+const data = ref({ release_groups: { items: [] }, recognition_rules: { items: [], fields: [], overrides: [] }, rename_fields: { builtin: [], context: [], custom: [] }, rename_mappings: { items: [], stages: [] }, release_group_arrangements: { items: [], positions: [], connectors: [] }, media_probe: { field_options: [] }, capabilities: {} })
 const section = ref(props.mode === 'naming' ? 'mapping' : 'rules')
 const search = ref('')
 const field = ref('all')
 const source = ref('all')
 const page = ref(1)
 const groupKind = ref('all')
+const groupProfileDialog = ref(false)
+const groupProfileForm = ref({ id: '', display_name: '', kind: 'unknown', field_policy: 'fill_empty', field_values: {} })
+const probePath = ref('')
+const probeResult = ref(null)
 const dialog = ref(false)
 const form = ref({ id: '', source_rule_id: '', field: 'videoBit', pattern: '', value: '{match}', action: 'override', enabled: true, priority: 100, label: '' })
 const previewTitle = ref('[Group] Example.S01E01.1080p.WEB-DL.H265.10bit.AAC.mkv')
@@ -84,6 +88,17 @@ const groupPageCount = computed(() => Math.max(1, Math.ceil(groups.value.length 
 const pagedGroups = computed(() => groups.value.slice((page.value - 1) * pageSize, page.value * pageSize))
 const kindLabel = value => ({ animation: '动漫', live_action: '真人电视剧', unknown: '未分类' })[value] || '未分类'
 const kindColor = value => ({ animation: 'primary', live_action: 'orange', unknown: 'default' })[value] || 'default'
+const supplementFieldItems = [
+  { key: 'resourceType', label: '资源类型', placeholder: 'WEB-DL' },
+  { key: 'webSource', label: '流媒体平台', placeholder: 'Netflix / Bilibili' },
+  { key: 'effect', label: '画面特效', placeholder: 'HDR10 / DOVI' },
+  { key: 'videoFormat', label: '分辨率', placeholder: '1080P' },
+  { key: 'videoCodec', label: '视频编码', placeholder: 'H265' },
+  { key: 'videoBit', label: '视频位深', placeholder: '10bit' },
+  { key: 'audioCodec', label: '音频编码', placeholder: 'AAC' },
+  { key: 'fps', label: '帧率', placeholder: '23.976' },
+  { key: 'customization', label: '自定义占位符', placeholder: '简日内封' },
+]
 const mappingRules = computed(() => data.value.rename_mappings?.items || [])
 const mappingStages = computed(() => data.value.rename_mappings?.stages || [
   { value: 'final_result', label: '最终命名结果' },
@@ -158,8 +173,36 @@ async function load() {
 async function saveGroup(item, kind) {
   saving.value = item.id
   try {
-    data.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/release-group`, { id: item.id, kind, display_name: item.display_name })) || data.value
+    data.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/release-group`, { id: item.id, kind, display_name: item.display_name, field_policy: item.field_policy, field_values: item.field_values })) || data.value
   } catch (err) { error.value = explainError(err, '制作组类型保存失败') }
+  finally { saving.value = '' }
+}
+
+function openGroupProfile(item) {
+  groupProfileForm.value = {
+    id: item.id, display_name: item.display_name, kind: item.kind || 'unknown',
+    field_policy: item.field_policy || 'fill_empty', field_values: { ...(item.field_values || {}) },
+  }
+  groupProfileDialog.value = true
+}
+
+async function saveGroupProfile() {
+  saving.value = 'group-profile'
+  error.value = ''
+  try {
+    data.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/release-group`, groupProfileForm.value)) || data.value
+    groupProfileDialog.value = false
+  } catch (err) { error.value = explainError(err, '制作组字段保存失败') }
+  finally { saving.value = '' }
+}
+
+async function previewMediaProbe() {
+  saving.value = 'media-probe'
+  probeResult.value = null
+  error.value = ''
+  try {
+    probeResult.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/media-probe/preview`, { source_path: probePath.value, timeout: config.value.media_probe_timeout }))
+  } catch (err) { error.value = explainError(err, '媒体流扫描失败') }
   finally { saving.value = '' }
 }
 
@@ -384,11 +427,13 @@ onMounted(load)
       <template v-else>
         <VSwitch v-model="config.recognition_rule_overrides_enabled" color="primary" label="启用识别字段覆盖" hide-details />
         <VSwitch v-model="config.release_group_assist_enabled" color="success" label="制作组辅助 TMDB 判断" hide-details />
+        <VSwitch v-model="config.release_group_field_supplements_enabled" color="secondary" label="制作组补充命名字段" hide-details />
+        <VSwitch v-model="config.media_probe_enabled" color="orange" label="整理前扫描媒体流" hide-details />
       </template>
       <VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存模块开关</VBtn>
     </VCardText></VCard>
     <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-      {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : '内置字段覆盖作用于 MP 解析结果；制作组类型只为 TMDB 候选提供辅助证据，不修改 MP/Rust 文件。' }}
+      {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : '字段补充与媒体扫描都发生在命名渲染前，不修改源文件；默认只填补 MP 尚未识别出的空字段。' }}
     </VAlert>
     <VAlert v-if="data.recognition_rules?.errors?.length" type="warning" variant="tonal" density="compact" class="mb-4">
       部分规则读取失败：{{ data.recognition_rules.errors.join('；') }}
@@ -396,7 +441,8 @@ onMounted(load)
 
     <VTabs v-if="props.mode !== 'naming'" v-model="section" color="primary" class="mb-4">
       <VTab value="rules" prepend-icon="mdi-text-box-search-outline">内置识别字段</VTab>
-      <VTab value="groups" prepend-icon="mdi-account-group-outline">制作组类型</VTab>
+      <VTab value="groups" prepend-icon="mdi-account-group-outline">制作组类型与字段</VTab>
+      <VTab value="probe" prepend-icon="mdi-waveform">媒体流扫描</VTab>
       <VTab value="test" prepend-icon="mdi-flask-outline">覆盖试算</VTab>
     </VTabs>
 
@@ -422,10 +468,32 @@ onMounted(load)
 
     <section v-else-if="section === 'groups'">
       <div class="filter-row mb-3"><VTextField v-model="search" label="搜索制作组或正则" prepend-inner-icon="mdi-magnify" clearable hide-details /><VSelect v-model="groupKind" label="参与判断的类型" :items="[{title:'全部类型',value:'all'}, ...kindItems]" hide-details /></div>
-      <VTable density="comfortable" class="tools-table"><thead><tr><th>制作组规则</th><th>来源</th><th style="width:230px">类型</th></tr></thead><tbody>
-        <tr v-for="item in pagedGroups" :key="item.id"><td><div class="font-weight-medium">{{ item.display_name }}</div><div class="rule-pattern">{{ item.pattern }}</div></td><td><VChip size="small" variant="tonal">{{ item.source_label }} · {{ item.category }}</VChip></td><td><VSelect :model-value="item.kind" :items="kindItems" density="compact" hide-details :loading="saving === item.id" @update:model-value="value => saveGroup(item, value)"><template #selection><VChip size="small" :color="kindColor(item.kind)" variant="tonal">{{ kindLabel(item.kind) }}</VChip></template></VSelect></td></tr>
+      <VTable density="comfortable" class="tools-table"><thead><tr><th>制作组规则</th><th>来源</th><th style="width:230px">类型</th><th style="width:150px">补充字段</th></tr></thead><tbody>
+        <tr v-for="item in pagedGroups" :key="item.id"><td><div class="font-weight-medium">{{ item.display_name }}</div><div class="rule-pattern">{{ item.pattern }}</div></td><td><VChip size="small" variant="tonal">{{ item.source_label }} · {{ item.category }}</VChip></td><td><VSelect :model-value="item.kind" :items="kindItems" density="compact" hide-details :loading="saving === item.id" @update:model-value="value => saveGroup(item, value)"><template #selection><VChip size="small" :color="kindColor(item.kind)" variant="tonal">{{ kindLabel(item.kind) }}</VChip></template></VSelect></td><td><VBtn size="small" variant="tonal" prepend-icon="mdi-tune-variant" @click="openGroupProfile(item)">{{ Object.keys(item.field_values || {}).length ? `${Object.keys(item.field_values).length} 项` : '设置' }}</VBtn></td></tr>
       </tbody></VTable>
       <VPagination v-if="groupPageCount > 1" v-model="page" :length="groupPageCount" :total-visible="7" class="mt-3" />
+    </section>
+
+    <section v-else-if="props.mode !== 'naming' && section === 'probe'">
+      <div class="probe-settings-grid mb-4">
+        <VCard variant="outlined"><VCardItem><VCardTitle>自动扫描策略</VCardTitle><VCardSubtitle>只在实际整理且容器能直接读取源文件时运行；同一文件会按大小和修改时间缓存。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
+          <VAlert :type="data.media_probe?.available ? 'success' : 'warning'" variant="tonal" density="compact">{{ data.media_probe?.message || (data.media_probe?.available ? 'ffprobe 可用' : '未找到 ffprobe；请在 MP 容器中安装 ffmpeg') }}</VAlert>
+          <VSwitch v-model="config.media_probe_enabled" color="success" label="整理前扫描实际媒体流" hide-details />
+          <VSelect v-model="config.media_probe_policy" label="写入策略" :items="[{title:'仅补 MP 空字段（推荐）',value:'fill_empty'},{title:'以实际媒体流覆盖同名字段',value:'overwrite'}]" hide-details />
+          <VSelect v-model="config.media_probe_fields" label="允许补充的 MP 标准字段" :items="(data.media_probe?.field_options || []).map(item => ({ title: `${item.label}（${item.key}）`, value: item.key }))" multiple chips closable-chips hide-details />
+          <VTextField v-model.number="config.media_probe_timeout" type="number" min="3" max="30" label="单文件超时（秒）" hide-details />
+          <div class="d-flex justify-end"><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存扫描设置</VBtn></div>
+        </VCardText></VCard>
+        <VCard variant="outlined"><VCardItem><VCardTitle>文件试扫</VCardTitle><VCardSubtitle>请输入 MP 容器内部看到的真实媒体文件路径，不是宿主机映射前路径。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
+          <VTextField v-model="probePath" label="容器内文件路径" placeholder="/downloads/anime/Example.mkv" prepend-inner-icon="mdi-file-video-outline" hide-details />
+          <VBtn color="secondary" prepend-icon="mdi-waveform" :loading="saving === 'media-probe'" :disabled="!probePath" @click="previewMediaProbe">开始扫描</VBtn>
+          <div v-if="probeResult" class="probe-result-grid">
+            <div v-for="(value, key) in probeResult.fields" :key="key" class="probe-result-item"><code>{{ key }}</code><span>{{ value || '—' }}</span></div>
+            <div v-for="key in ['probe_audio_languages','probe_subtitle_languages','probe_subtitle_profile']" :key="key" class="probe-result-item"><code>{{ key }}</code><span>{{ probeResult.context?.[key] || '—' }}</span></div>
+          </div>
+        </VCardText></VCard>
+      </div>
+      <VAlert type="info" variant="tonal" density="compact">扫描可补齐 videoFormat、videoCodec、videoBit、audioCodec、effect、fps；字幕组合等更细信息以 <code>probe_subtitle_profile</code> 等上下文字段提供，可在“命名规则 → 自定义字段”中组合使用。</VAlert>
     </section>
 
     <section v-else-if="props.mode === 'naming'">
@@ -550,6 +618,14 @@ onMounted(load)
       </VCardText></VCard>
     </section>
 
+    <VDialog v-model="groupProfileDialog" max-width="900">
+      <VCard><VCardItem><VCardTitle>制作组类型与命名字段</VCardTitle><VCardSubtitle>{{ groupProfileForm.display_name }} · 类型可辅助 TMDB 判断，字段只在 MP 没识别出来时补齐。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
+        <VRow><VCol cols="12" sm="6"><VSelect v-model="groupProfileForm.kind" label="内容类型" :items="kindItems" hide-details /></VCol><VCol cols="12" sm="6"><VSelect v-model="groupProfileForm.field_policy" label="字段写入策略" :items="[{title:'仅补空值（推荐）',value:'fill_empty'},{title:'覆盖 MP 已识别值',value:'overwrite'}]" hide-details /></VCol></VRow>
+        <VAlert type="info" variant="tonal" density="compact">例如 ADWeb 固定补充 <code>resourceType = WEB-DL</code>。留空的字段完全不参与；多个合作组对同一字段给出不同值时会安全跳过，避免误命名。</VAlert>
+        <div class="supplement-field-grid"><VTextField v-for="item in supplementFieldItems" :key="item.key" v-model="groupProfileForm.field_values[item.key]" :label="`${item.label}（${item.key}）`" :placeholder="item.placeholder" clearable hide-details /></div>
+      </VCardText><VDivider /><VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="groupProfileDialog = false">取消</VBtn><VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving === 'group-profile'" @click="saveGroupProfile">保存设置</VBtn></VCardActions></VCard>
+    </VDialog>
+
     <VDialog v-model="dialog" max-width="780">
       <VCard class="rule-dialog-card">
         <VCardItem class="rule-dialog-header"><VCardTitle>{{ form.source_rule_id ? '编辑 MP 内置规则的插件覆盖' : '新增识别字段覆盖' }}</VCardTitle><VCardSubtitle>保存后立即作用于新进入 MP 识别链的标题；不会修改容器文件。</VCardSubtitle></VCardItem>
@@ -647,6 +723,12 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .member-trace { display: flex; flex-wrap: wrap; gap: 8px; }
 .overlay-preview-form { display: grid; gap: 14px; }
 .overlay-preview-actions { display: flex; align-items: center; min-height: 38px; }
+.probe-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.probe-config-body { display: grid; gap: 14px; }
+.probe-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 12px; border-radius: 10px; background: rgba(var(--v-theme-secondary), .055); }
+.probe-result-item { min-width: 0; display: flex; justify-content: space-between; gap: 12px; padding: 6px 8px; }
+.probe-result-item span { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+.supplement-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 900px) { .filter-row { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 600px) {
   .filter-row, .rename-preview-form { grid-template-columns: 1fr; }
@@ -656,5 +738,6 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .naming-default-grid { grid-template-columns: 1fr; }
   .separator-scope { grid-column: auto; }
   .group-layout-grid, .group-preview-form { grid-template-columns: 1fr; }
+  .probe-settings-grid, .probe-result-grid, .supplement-field-grid { grid-template-columns: 1fr; }
 }
 </style>

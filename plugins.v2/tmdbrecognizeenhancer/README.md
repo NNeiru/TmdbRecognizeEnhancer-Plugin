@@ -5,7 +5,7 @@
 ## 运行要求
 
 - MoviePilot V2 `>= 2.13.0`
-- 插件版本：`0.6.0`
+- 插件版本：`0.7.0-beta.1`
 - 集数偏移需要 MoviePilot 开启“识别插件优先”
 - Emby 剧集组联动需要 MP 已配置 Emby，并在 Emby 安装支持 `TmdbEg` 的 StrmAssistant
 
@@ -81,6 +81,8 @@
 - 浏览 MP 当前进程加载的 `releaseGroup`、`resourceType`、`effect`、`videoFormat`、`videoCodec`、`videoBit`、`audioCodec`、`fps`、`webSource`、`customization` 和季集等规则。
 - 对内置字段的修改保存在插件覆盖层，不写入 MP/Rust 文件，可恢复原值。
 - 制作组可简单标记为动漫、真人电视剧或不参与判断，用作 TMDB 候选的软证据。
+- 制作组还可按组补充 `resourceType`、`webSource`、编码、位深、特效和 `customization` 等命名字段；默认只补 MP 空值，合作组给出冲突值时自动跳过。
+- 可选的整理前媒体流扫描通过容器内 `ffprobe` 读取实际分辨率、编码、位深、帧率、HDR/杜比视界及音轨、内封字幕语言；扫描结果在 MP 命名模板渲染前注入并按文件修改时间缓存。
 - 自定义 Jinja2 字段可读取 MP 命名阶段真实存在的媒体、文件、源路径和分类目标目录上下文，并支持字段依赖、回退值和试算。
 
 制作组分类不是硬过滤。综合发布组或证据不足的组应保持“不参与判断”，避免根据个人下载偏好形成错误类型结论。

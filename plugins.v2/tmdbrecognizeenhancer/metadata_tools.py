@@ -8,7 +8,13 @@ import threading
 from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from .media_probe import MediaFileProbe
+
 RELEASE_GROUP_KINDS = {"animation", "live_action", "unknown"}
+RELEASE_GROUP_FIELD_KEYS = {
+    "resourceType", "effect", "videoFormat", "videoCodec", "videoBit",
+    "audioCodec", "fps", "webSource", "customization",
+}
 
 
 class ReleaseGroupRegistry:
@@ -16,7 +22,7 @@ class ReleaseGroupRegistry:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._profiles: Dict[str, Dict[str, str]] = {}
+        self._profiles: Dict[str, Dict[str, Any]] = {}
         self._catalog: List[Dict[str, Any]] = []
         self._compiled: List[Tuple[Dict[str, Any], Any]] = []
         self._message = "尚未加载"
@@ -29,20 +35,32 @@ class ReleaseGroupRegistry:
         return f"{source}:{digest}"
 
     @staticmethod
-    def normalize_profiles(value: Any) -> Dict[str, Dict[str, str]]:
-        """规范化持久化档案，只保留支持的分类。"""
+    def normalize_profiles(value: Any) -> Dict[str, Dict[str, Any]]:
+        """规范化持久化档案，并保留允许注入命名上下文的补充字段。"""
         if not isinstance(value, dict):
             return {}
-        normalized: Dict[str, Dict[str, str]] = {}
+        normalized: Dict[str, Dict[str, Any]] = {}
         for rule_id, raw in value.items():
             if not isinstance(raw, dict):
                 continue
             kind = str(raw.get("kind") or "unknown").strip().lower()
             if kind not in RELEASE_GROUP_KINDS:
                 kind = "unknown"
+            field_values = raw.get("field_values") or {}
+            if not isinstance(field_values, dict):
+                field_values = {}
             normalized[str(rule_id)] = {
                 "kind": kind,
                 "display_name": str(raw.get("display_name") or "").strip()[:80],
+                "field_policy": (
+                    "overwrite" if str(raw.get("field_policy") or "fill_empty").lower() == "overwrite"
+                    else "fill_empty"
+                ),
+                "field_values": {
+                    str(key): str(field_values.get(key) or "").strip()[:120]
+                    for key in RELEASE_GROUP_FIELD_KEYS
+                    if str(field_values.get(key) or "").strip()
+                },
             }
         return normalized
 
@@ -73,6 +91,8 @@ class ReleaseGroupRegistry:
                             "kind": override.get("kind") or default_kind,
                             "default_kind": default_kind,
                             "overridden": rule_id in normalized_profiles,
+                            "field_policy": override.get("field_policy") or "fill_empty",
+                            "field_values": deepcopy(override.get("field_values") or {}),
                         })
         except Exception as err:
             message = f"无法读取 MP 内置制作组规则：{err}"
@@ -97,6 +117,8 @@ class ReleaseGroupRegistry:
                     "kind": override.get("kind") or "unknown",
                     "default_kind": "unknown",
                     "overridden": rule_id in normalized_profiles,
+                    "field_policy": override.get("field_policy") or "fill_empty",
+                    "field_values": deepcopy(override.get("field_values") or {}),
                 })
         except Exception as err:
             if not catalog:
@@ -104,7 +126,7 @@ class ReleaseGroupRegistry:
 
         compiled: List[Tuple[Dict[str, Any], Any]] = []
         for item in catalog:
-            if item["kind"] == "unknown":
+            if item["kind"] == "unknown" and not item.get("field_values"):
                 continue
             try:
                 compiled.append((item, re.compile(item["pattern"], re.IGNORECASE)))
@@ -131,12 +153,12 @@ class ReleaseGroupRegistry:
 
     def classify(self, release_group: Any) -> Dict[str, Any]:
         """根据 MP 已识别的制作组名称返回动漫、真人或冲突结论。"""
-        names = [part.strip() for part in str(release_group or "").split("@") if part.strip()]
+        names = [part.strip() for part in re.split(r"\s*[@&+]\s*", str(release_group or "")) if part.strip()]
         if not names:
             return {"kind": "unknown", "release_group": "", "matches": []}
         with self._lock:
             compiled = list(self._compiled)
-        matches: List[Dict[str, str]] = []
+        matches: List[Dict[str, Any]] = []
         for name in names:
             for item, pattern in compiled:
                 try:
@@ -146,6 +168,8 @@ class ReleaseGroupRegistry:
                             "name": name,
                             "label": item.get("display_name") or item["pattern"],
                             "kind": item["kind"],
+                            "field_policy": item.get("field_policy") or "fill_empty",
+                            "field_values": deepcopy(item.get("field_values") or {}),
                         })
                 except Exception:
                     continue
@@ -156,6 +180,37 @@ class ReleaseGroupRegistry:
             "release_group": "@".join(names),
             "matches": matches,
             "conflict": len(kinds) > 1,
+        }
+
+    def supplements(self, release_group: Any) -> Dict[str, Any]:
+        """汇总命中制作组的字段补充；冲突字段不自动写入。"""
+        result = self.classify(release_group)
+        candidates: Dict[str, List[Dict[str, Any]]] = {}
+        for match in result.get("matches") or []:
+            for field, value in (match.get("field_values") or {}).items():
+                candidates.setdefault(field, []).append({
+                    "value": value,
+                    "policy": match.get("field_policy") or "fill_empty",
+                    "rule_id": match.get("id"),
+                    "label": match.get("label"),
+                })
+        fields: Dict[str, Dict[str, Any]] = {}
+        conflicts: List[Dict[str, Any]] = []
+        for field, values in candidates.items():
+            distinct = {str(item.get("value") or "") for item in values}
+            if len(distinct) != 1:
+                conflicts.append({"field": field, "values": sorted(distinct), "matches": values})
+                continue
+            fields[field] = {
+                "value": values[0]["value"],
+                "policy": "overwrite" if any(item["policy"] == "overwrite" for item in values) else "fill_empty",
+                "matches": values,
+            }
+        return {
+            "release_group": result.get("release_group") or "",
+            "fields": fields,
+            "conflicts": conflicts,
+            "matches": result.get("matches") or [],
         }
 
 
@@ -221,6 +276,10 @@ class RenameFieldRegistry:
         ("target_dir", "分类后目标根目录", "目标路径上下文（整理前）", "MP 已完成媒体库及二级分类选择后的目标根目录。它在文件操作前已确定，但插件只能在首次模板渲染后取得。", "第二阶段重渲染可用"),
         ("rendered_relative_path", "首次命名结果", "目标路径上下文（整理前）", "MP 使用原命名上下文首次渲染出的相对路径；此时尚未复制、移动或链接文件。", "第二阶段重渲染可用"),
         ("target_path_before_custom", "自定义处理前目标路径", "目标路径上下文（整理前）", "目标根目录与首次命名结果组合后的路径，用于根据原定目标做条件判断；并非整理完成后的实际结果。", "第二阶段重渲染可用"),
+        *tuple(
+            (key, label, "实际媒体流", description, "启用整理前媒体扫描且文件可读取时可用")
+            for key, label, description in MediaFileProbe.CONTEXT_FIELDS
+        ),
     )
     TARGET_CONTEXT_KEYS = {"target_dir", "rendered_relative_path", "target_path_before_custom"}
     _builtin_keys = {item[0] for item in BUILTIN_FIELDS}
