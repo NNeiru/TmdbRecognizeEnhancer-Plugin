@@ -49,7 +49,12 @@ async function fetchChildren(item) {
   try {
     const children = normalizeList(await props.api.post('/storage/list?sort=name', item))
       .filter(child => child?.type === 'dir' || isMediaFile(child))
-      .map(child => child.type === 'dir' ? { ...child, children: [], __loaded: false } : { ...child })
+      .map(child => {
+        if (child.type === 'dir') return { ...child, children: [], __loaded: false }
+        // 接口返回的 FileItem 自带 children: []，会让树把文件当成可展开分组而无法选中，必须剥掉
+        const { children: _ignored, ...file } = child
+        return file
+      })
     item.children.splice(0, item.children.length, ...children)
   } catch (err) {
     item.__loaded = false
