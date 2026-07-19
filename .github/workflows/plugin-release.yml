@@ -57,7 +57,13 @@ jobs:
           raise SystemExit('plugin_version not found')
           PY
           )"
+          frontend_version="$(jq -r '.version' plugins.v2/tmdbrecognizeenhancer/package.json)"
           test "$package_version" = "$source_version"
+          test "$package_version" = "$frontend_version"
+          test -f "plugins.v2/tmdbrecognizeenhancer/dist/ui/v${package_version}/assets/remoteEntry.js"
+          jq -e --arg version "v${package_version}" \
+            '.TmdbRecognizeEnhancer.history[$version] | type == "string" and length > 0' \
+            package.v2.json >/dev/null
 
       - name: Create installable releases
         env:

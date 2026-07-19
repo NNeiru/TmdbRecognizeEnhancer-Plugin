@@ -63,9 +63,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
     """增强 MoviePilot 的媒体识别、季集归一化与最终命名链。"""
 
     plugin_name = "媒体整理增强"
-    plugin_desc = "增强媒体识别、集数归一化、命名字段、制作组编排、二次重命名与运行诊断。"
+    plugin_desc = "增强媒体识别、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.6.0-beta.2"
+    plugin_version = "0.6.0"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
