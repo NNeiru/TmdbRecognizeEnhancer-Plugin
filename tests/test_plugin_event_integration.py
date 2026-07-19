@@ -276,6 +276,7 @@ def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
     builtin = module.RenameFieldRegistry.builtin_catalog()
     context = module.RenameFieldRegistry.context_catalog()
     builtin_keys = {item["key"] for item in builtin}
+    assert {item["key"] for item in builtin + context} <= set(module.RenameFieldRegistry.VALUE_GUIDES)
 
     assert {"title", "type", "category", "original_name", "fileExt"} <= builtin_keys
     assert not {
@@ -283,6 +284,17 @@ def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
         "transfer_type", "file_count", "total_size", "err_msg",
     } & builtin_keys
     assert all(item.get("description") and item.get("availability") for item in builtin + context)
+    assert all(
+        item.get("type") and item.get("values") and item.get("logic")
+        and item.get("source") and item.get("source_label")
+        for item in builtin + context
+    )
+    probe_subtitle_count = next(item for item in context if item["key"] == "probe_subtitle_count")
+    assert probe_subtitle_count["source"] == "ffprobe"
+    assert "ASSx2" in probe_subtitle_count["logic"]
+    media_type = next(item for item in builtin if item["key"] == "type")
+    assert "电影、电视剧" in media_type["values"]
+    assert "if type" in media_type["logic"]
     target = next(item for item in context if item["key"] == "target_dir")
     assert target["phase"] == "target_rerender"
     assert "文件操作前" in target["description"]

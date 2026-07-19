@@ -35,6 +35,8 @@ const renamePreview = ref(null)
 const renameFieldSearch = ref('')
 const openRenameFieldGroups = ref(['媒体信息', '文件解析', '源文件上下文'])
 const copiedVariable = ref('')
+const fieldDetailDialog = ref(false)
+const fieldDetail = ref(null)
 const mappingDialog = ref(false)
 const mappingForm = ref({ id: '', label: '', stage: 'final_result', mode: 'literal', pattern: '', replacement: '', enabled: true, priority: 100 })
 const mappingPreviewInput = ref({ value: 'AB/C.chi.zh-cn.ass' })
@@ -163,6 +165,11 @@ const availableRenameFields = computed(() => [
     description: `由表达式计算：${item.expression}`,
     availability: item.enabled ? '按表达式依赖阶段可用' : '当前已停用',
     phase: 'custom',
+    source: 'user_custom',
+    source_label: '用户自定义字段',
+    type: 'Jinja2 计算结果',
+    values: item.fallback ? `表达式输出；计算为空或失败时回退为 ${item.fallback}` : '由用户表达式和当前输入字段共同决定；可能为空。',
+    logic: item.expression || '尚未设置表达式。',
   })),
 ])
 const renameFieldGroups = computed(() => {
@@ -349,6 +356,8 @@ async function previewRenameFields() {
 }
 
 function variableSyntax(key) { return `{{ ${key} }}` }
+function fieldSourceColor(source) { return ({ moviepilot: 'primary', plugin_context: 'secondary', ffprobe: 'purple', user_custom: 'success' })[source] || 'default' }
+function openFieldDetail(item) { fieldDetail.value = item; fieldDetailDialog.value = true }
 
 async function copyVariable(key) {
   const text = variableSyntax(key)
@@ -572,10 +581,6 @@ onMounted(load)
           </template>
         </VCardText></VCard>
       </div>
-      <VExpansionPanels variant="accordion" class="mt-4"><VExpansionPanel><VExpansionPanelTitle><div><div class="font-weight-medium">插件新增的 Jinja2 扫描字段</div><div class="text-caption text-medium-emphasis">共 {{ probeContextFieldItems.length }} 个；点击字段可复制可直接写入 MP 命名模板的语法</div></div></VExpansionPanelTitle><VExpansionPanelText>
-        <VAlert type="info" variant="tonal" density="compact" class="mb-3">这些不是 MP 原生字段，而是插件在整理前通过 ffprobe 新增到命名上下文的变量。只有启用了对应扫描项且源文件可读时才有值；可直接用于自定义 Jinja 字段，也可直接写进 MP 命名模板。</VAlert>
-        <div class="field-description-grid"><button v-for="item in probeContextFieldItems" :key="item.key" type="button" class="field-description-card" @click="copyVariable(item.key)"><div class="field-description-head"><code>{{ item.key }}</code><VChip size="x-small" color="secondary" variant="tonal">插件新增</VChip></div><div class="field-description-label">{{ item.label }}</div><div class="field-description-text">{{ item.description }}</div><div class="field-copy-hint"><VIcon :icon="copiedVariable === item.key ? 'mdi-check' : 'mdi-content-copy'" size="14" /> {{ copiedVariable === item.key ? '已复制' : '点击复制' }} <code>{{ variableSyntax(item.key) }}</code></div></button></div>
-      </VExpansionPanelText></VExpansionPanel></VExpansionPanels>
     </section>
 
     <section v-else-if="props.mode === 'naming'">
@@ -613,19 +618,20 @@ onMounted(load)
           <div v-if="renamePreview" class="preview-output mt-4"><div v-for="(value, key) in renamePreview.values" :key="key" class="d-flex justify-space-between ga-3"><code>{{ key }}</code><span class="text-right text-break">{{ value || '（空）' }}</span></div><VAlert v-if="renamePreview.errors?.length" type="warning" variant="tonal" density="compact" class="mt-3">{{ renamePreview.errors.map(item => `${item.key}: ${item.message}`).join('；') }}</VAlert></div>
         </VCardText></VCard>
 
-        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>可用于文件命名的输入字段</VCardTitle><VCardSubtitle>这里只列出命名渲染时真实存在的字段；种子信息和整理完成结果不会进入文件命名上下文。</VCardSubtitle></VCardItem><VCardText>
+        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>可用于文件命名的 Jinja2 输入字段</VCardTitle><VCardSubtitle>统一展示 MoviePilot 原生字段、插件上下文字段与 ffprobe 扫描字段；可复制变量或查看取值详情。</VCardSubtitle></VCardItem><VCardText>
           <VAlert type="info" variant="tonal" density="compact" class="mb-4">目标目录相关字段是在 MP 首次渲染之后、实际复制/移动/链接之前取得的。插件会据此重渲染一次，所以它们仍能影响最终命名，并不是整理完成后的结果。</VAlert>
           <VTextField v-model="renameFieldSearch" label="搜索字段名称、变量或用途" prepend-inner-icon="mdi-magnify" clearable hide-details class="mb-4" />
           <VExpansionPanels v-model="openRenameFieldGroups" multiple variant="accordion" class="field-panels">
             <VExpansionPanel v-for="group in renameFieldGroups" :key="group.category" :value="group.category">
               <VExpansionPanelTitle><div class="d-flex align-center ga-3"><span class="font-weight-medium">{{ group.category }}</span><VChip size="x-small" variant="tonal">{{ group.items.length }} 项</VChip></div></VExpansionPanelTitle>
               <VExpansionPanelText><div class="field-description-grid">
-                <button v-for="item in group.items" :key="item.key" type="button" class="field-description-card" @click="copyVariable(item.key)">
-                  <div class="field-description-head"><code>{{ item.key }}</code><VChip size="x-small" variant="tonal" color="secondary">{{ item.availability || '按上下文可用' }}</VChip></div>
+                <div v-for="item in group.items" :key="item.key" class="field-description-card">
+                  <div class="field-description-head"><code>{{ item.key }}</code><VChip size="x-small" variant="tonal" :color="fieldSourceColor(item.source)">{{ item.source_label || '命名字段' }}</VChip></div>
                   <div class="field-description-label">{{ item.label }}</div>
                   <div class="field-description-text">{{ item.description }}</div>
-                  <div class="field-copy-hint"><VIcon :icon="copiedVariable === item.key ? 'mdi-check' : 'mdi-content-copy'" size="14" /> {{ copiedVariable === item.key ? '已复制' : '点击复制' }} <code>{{ variableSyntax(item.key) }}</code></div>
-                </button>
+                  <div class="field-value-summary"><span>{{ item.type || '文本' }}</span><span class="text-truncate">{{ item.values || '按上下文决定' }}</span></div>
+                  <div class="field-card-actions"><VBtn size="small" variant="text" :prepend-icon="copiedVariable === item.key ? 'mdi-check' : 'mdi-content-copy'" @click="copyVariable(item.key)">{{ copiedVariable === item.key ? '已复制' : '复制变量' }}</VBtn><VBtn size="small" variant="tonal" prepend-icon="mdi-information-outline" @click="openFieldDetail(item)">取值详情</VBtn></div>
+                </div>
               </div></VExpansionPanelText>
             </VExpansionPanel>
           </VExpansionPanels>
@@ -711,6 +717,16 @@ onMounted(load)
       </VCardText><VDivider /><VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="groupProfileDialog = false">取消</VBtn><VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving === 'group-profile'" @click="saveGroupProfile">保存设置</VBtn></VCardActions></VCard>
     </VDialog>
 
+    <VDialog v-model="fieldDetailDialog" max-width="720">
+      <VCard v-if="fieldDetail"><VCardItem><template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-code-braces" /></VAvatar></template><VCardTitle>{{ fieldDetail.label }}</VCardTitle><VCardSubtitle><code>{{ fieldDetail.key }}</code> · {{ fieldDetail.source_label || '命名字段' }}</VCardSubtitle></VCardItem><VDivider /><VCardText class="field-detail-body">
+        <div class="field-detail-meta"><VChip size="small" :color="fieldSourceColor(fieldDetail.source)" variant="tonal">{{ fieldDetail.source_label }}</VChip><VChip size="small" variant="tonal">{{ fieldDetail.type || '文本' }}</VChip><VChip size="small" variant="tonal">{{ fieldDetail.availability || '按上下文可用' }}</VChip></div>
+        <div class="field-detail-section"><div class="field-detail-title">用途</div><div>{{ fieldDetail.description }}</div></div>
+        <div class="field-detail-section"><div class="field-detail-title">可能值与格式</div><div>{{ fieldDetail.values || '具体值由当前命名上下文决定。' }}</div></div>
+        <div class="field-detail-section"><div class="field-detail-title">生成逻辑 / 使用注意</div><div>{{ fieldDetail.logic || '使用前建议判断字段是否为空。' }}</div></div>
+        <div class="field-detail-section"><div class="field-detail-title">Jinja2 写法</div><code class="field-syntax-block">{{ variableSyntax(fieldDetail.key) }}</code></div>
+      </VCardText><VDivider /><VCardActions><VBtn color="primary" variant="tonal" prepend-icon="mdi-content-copy" @click="copyVariable(fieldDetail.key)">复制变量</VBtn><VSpacer /><VBtn variant="text" @click="fieldDetailDialog = false">关闭</VBtn></VCardActions></VCard>
+    </VDialog>
+
     <VDialog v-model="dialog" max-width="780">
       <VCard class="rule-dialog-card">
         <VCardItem class="rule-dialog-header"><VCardTitle>{{ form.source_rule_id ? '编辑 MP 内置规则的插件覆盖' : '新增识别字段覆盖' }}</VCardTitle><VCardSubtitle>保存后立即作用于新进入 MP 识别链的标题；不会修改容器文件。</VCardSubtitle></VCardItem>
@@ -787,12 +803,19 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .preview-original, .preview-wide { grid-column: 1 / -1; }
 .field-panels { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
 .field-description-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 4px 0 10px; }
-.field-description-card { min-width: 0; padding: 14px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; background: rgba(var(--v-theme-surface), 1); color: inherit; text-align: left; cursor: pointer; transition: border-color .16s ease, background-color .16s ease; }
+.field-description-card { min-width: 0; padding: 14px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; background: rgba(var(--v-theme-surface), 1); color: inherit; text-align: left; transition: border-color .16s ease, background-color .16s ease; }
 .field-description-card:hover { border-color: rgba(var(--v-theme-primary), .55); background: rgba(var(--v-theme-primary), .035); }
 .field-description-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .field-description-label { margin-top: 9px; font-weight: 600; }
 .field-description-text { min-height: 40px; margin-top: 4px; color: rgba(var(--v-theme-on-surface), .65); font-size: .82rem; line-height: 1.5; }
-.field-copy-hint { display: flex; align-items: center; gap: 5px; margin-top: 9px; color: rgba(var(--v-theme-on-surface), .48); font-size: .72rem; }
+.field-value-summary { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; margin-top: 9px; color: rgba(var(--v-theme-on-surface), .58); font-size: .75rem; }
+.field-value-summary > span:first-child { padding: 1px 7px; border-radius: 8px; background: rgba(var(--v-theme-secondary), .08); color: rgb(var(--v-theme-secondary)); }
+.field-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 9px -6px -6px; }
+.field-detail-body { display: grid; gap: 16px; padding: 22px 24px !important; }
+.field-detail-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.field-detail-section { display: grid; gap: 6px; padding: 12px 14px; border-radius: 10px; background: rgba(var(--v-theme-secondary), .045); line-height: 1.6; overflow-wrap: anywhere; }
+.field-detail-title { color: rgba(var(--v-theme-on-surface), .58); font-size: .78rem; font-weight: 600; }
+.field-syntax-block { display: block; padding: 10px 12px; border-radius: 8px; background: rgba(var(--v-theme-primary), .07); color: rgb(var(--v-theme-primary)); }
 .mapping-list { display: grid; gap: 10px; }
 .mapping-card { background: rgba(var(--v-theme-surface), 1); }
 .mapping-expression { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0 3px; overflow-wrap: anywhere; }
