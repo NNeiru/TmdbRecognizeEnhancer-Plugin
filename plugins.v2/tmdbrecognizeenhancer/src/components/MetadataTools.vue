@@ -265,6 +265,19 @@ async function clearProbeCache() {
   finally { saving.value = '' }
 }
 
+async function reloadPlugin() {
+  saving.value = 'plugin-reload'
+  error.value = ''
+  probeCacheNotice.value = ''
+  try {
+    // MP 核心接口：热重载插件后端（清 sys.modules 并重新实例化），等效于插件页的“重载”
+    await props.api.get(`plugin/reload/${props.pluginId || 'TmdbRecognizeEnhancer'}`)
+    probeCacheNotice.value = '插件后端已重载，新代码与接口已生效'
+    await load()
+  } catch (err) { error.value = explainError(err, '插件重载失败，请在 MP 插件页手动重载或重启容器') }
+  finally { saving.value = '' }
+}
+
 function probeFieldSelected(key) {
   return (config.value.media_probe_fields || []).includes(key)
 }
@@ -589,7 +602,10 @@ onMounted(load)
     <section v-else-if="props.mode === 'probe' && section === 'probe'">
       <div class="probe-settings-grid mb-4">
         <VCard variant="outlined"><VCardItem><VCardTitle>自动扫描策略</VCardTitle><VCardSubtitle>只在实际整理且容器能直接读取源文件时运行；同一文件会按大小和修改时间缓存。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
-          <VAlert v-if="!mediaProbeBackendSupported" type="error" variant="tonal" density="compact">新版页面已加载，但插件后端仍是旧实例，因此字段目录显示为空且能力会被误报为 unavailable。请在 MP 插件页重载插件；没有重载入口时重启一次 MP 容器。</VAlert>
+          <VAlert v-if="!mediaProbeBackendSupported" type="error" variant="tonal" density="compact">
+            新版页面已加载，但插件后端仍是旧实例，因此字段目录显示为空且能力会被误报为 unavailable。
+            <template #append><VBtn size="small" color="error" variant="flat" prepend-icon="mdi-restart" :loading="saving === 'plugin-reload'" @click="reloadPlugin">重载插件后端</VBtn></template>
+          </VAlert>
           <VAlert v-else :type="data.media_probe?.available ? 'success' : 'warning'" variant="tonal" density="compact">{{ data.media_probe?.message }}</VAlert>
           <div class="probe-enable-row"><VSwitch v-model="config.media_probe_enabled" color="success" label="整理前扫描实际媒体流" hide-details /><div class="d-flex flex-wrap ga-1"><VChip v-for="item in selectedProbeFieldItems" :key="item.key" size="x-small" color="secondary" variant="tonal">{{ item.label }} · {{ fieldPolicyItems.find(policy => policy.value === probeFieldPolicy(item.key))?.title }}</VChip><span v-if="!selectedProbeFieldItems.length" class="text-caption text-medium-emphasis">尚未选择扫描项</span></div></div>
           <VExpansionPanels variant="accordion" multiple class="probe-panels">
@@ -627,13 +643,14 @@ onMounted(load)
             <VCheckbox v-model="probeForce" label="忽略缓存重新扫描" density="compact" color="secondary" hide-details />
             <VSpacer />
             <VBtn variant="tonal" size="small" prepend-icon="mdi-broom" :loading="saving === 'probe-cache'" @click="clearProbeCache">清除扫描缓存{{ typeof data.media_probe?.cache_entries === 'number' ? `（${data.media_probe.cache_entries} 条）` : '' }}</VBtn>
+            <VTooltip text="更新插件版本后新代码不会自动生效；此按钮调用 MP 的插件热重载，等效于插件页的“重载”" location="top"><template #activator="{ props: tip }"><VBtn v-bind="tip" variant="tonal" size="small" prepend-icon="mdi-restart" :loading="saving === 'plugin-reload'" @click="reloadPlugin">重载插件后端</VBtn></template></VTooltip>
           </div>
-          <VAlert v-if="probeCacheNotice" type="success" variant="tonal" density="compact" closable @click:close="probeCacheNotice = ''">{{ probeCacheNotice }}。缓存只影响扫描结果复用；若刚更新过插件版本，需在 MP 插件页重载插件（或重启容器）后新逻辑才会生效。</VAlert>
+          <VAlert v-if="probeCacheNotice" type="success" variant="tonal" density="compact" closable @click:close="probeCacheNotice = ''">{{ probeCacheNotice }}</VAlert>
           <template v-if="probeResult">
             <div class="d-flex flex-wrap ga-2"><VChip size="small" color="primary" variant="tonal">视频 {{ probeResult.streams?.video || 0 }} 条</VChip><VChip size="small" color="secondary" variant="tonal">音频 {{ probeResult.streams?.audio || 0 }} 条</VChip><VChip size="small" :color="probeResult.streams?.subtitle ? 'success' : 'default'" variant="tonal">字幕 {{ probeResult.streams?.subtitle || 0 }} 条</VChip><VChip v-if="probeResult.cached" size="small" variant="tonal">缓存结果</VChip></div>
             <VAlert v-for="item in probeResult.diagnostics || []" :key="item.code" :type="item.level === 'warning' ? 'warning' : 'info'" variant="tonal" density="compact">{{ item.message }}</VAlert>
             <div><div class="text-subtitle-2 mb-2">本次扫描摘要</div><div class="probe-result-table"><div v-for="item in probeStandardPreviewItems" :key="item.key" class="probe-result-row"><div class="probe-summary-icon"><VIcon :icon="item.key === 'audioCodec' ? 'mdi-volume-high' : item.key === 'fps' ? 'mdi-speedometer' : item.key === 'effect' ? 'mdi-creation-outline' : 'mdi-video-outline'" size="18" /></div><div><span>{{ item.label }}</span><strong>{{ item.value ?? '—' }}</strong></div></div></div></div>
-            <VExpansionPanels variant="accordion"><VExpansionPanel><VExpansionPanelTitle><div><div class="font-weight-medium">全部 Jinja2 扫描变量</div><div class="text-caption text-medium-emphasis">{{ probeContextPreviewItems.length }} 个字段；0 是有效结果，— 表示文件没有提供对应信息</div></div></VExpansionPanelTitle><VExpansionPanelText><div class="probe-variable-table"><div class="probe-variable-head"><span>变量与含义</span><span>本次取值</span></div><div v-for="item in probeContextPreviewItems" :key="item.key" class="probe-variable-row"><div><strong>{{ item.label }}</strong><code>{{ item.key }}</code></div><span>{{ item.value === '' || item.value == null ? '—' : item.value }}</span></div></div></VExpansionPanelText></VExpansionPanel></VExpansionPanels>
+            <VExpansionPanels variant="accordion"><VExpansionPanel><VExpansionPanelTitle><div><div class="font-weight-medium">全部 Jinja2 扫描变量</div><div class="text-caption text-medium-emphasis">{{ probeContextPreviewItems.length }} 个字段；0 是有效结果，— 表示文件没有提供对应信息</div></div></VExpansionPanelTitle><VExpansionPanelText><div class="probe-variable-grid"><div v-for="item in probeContextPreviewItems" :key="item.key" class="probe-variable-cell" :title="item.description || item.label"><div class="probe-variable-meta"><span class="probe-variable-label">{{ item.label }}</span><code>{{ item.key }}</code></div><span class="probe-variable-value" :class="{ 'is-empty': item.value === '' || item.value == null }">{{ item.value === '' || item.value == null ? '—' : item.value }}</span></div></div></VExpansionPanelText></VExpansionPanel></VExpansionPanels>
           </template>
         </VCardText></VCard>
       </div>
@@ -913,13 +930,13 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .probe-result-row > div:last-child { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .probe-result-row span { min-width: 0; color: rgba(var(--v-theme-on-surface), .58); font-size: .78rem; }
 .probe-result-row strong { flex: 0 0 auto; font-size: .95rem; white-space: nowrap; }
-.probe-variable-row > div { min-width: 0; display: grid; gap: 2px; }
-.probe-variable-row code { color: rgb(var(--v-theme-secondary)); font-size: .76rem; overflow-wrap: anywhere; }
-.probe-variable-table { overflow: hidden; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; background: rgb(var(--v-theme-surface)); }
-.probe-variable-head, .probe-variable-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(140px, .42fr); gap: 16px; align-items: center; padding: 10px 14px; }
-.probe-variable-head { color: rgba(var(--v-theme-on-surface), .58); background: rgba(var(--v-theme-on-surface), .035); font-size: .75rem; font-weight: 600; }
-.probe-variable-row { border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
-.probe-variable-row > span { min-width: 0; text-align: right; font-weight: 500; overflow-wrap: break-word; word-break: normal; }
+.probe-variable-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.probe-variable-cell { min-width: 0; display: grid; gap: 6px; padding: 10px 12px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; background: rgb(var(--v-theme-surface)); }
+.probe-variable-meta { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.probe-variable-label { flex: 0 0 auto; color: rgba(var(--v-theme-on-surface), .6); font-size: .76rem; }
+.probe-variable-meta code { min-width: 0; color: rgb(var(--v-theme-secondary)); font-size: .7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.probe-variable-value { min-width: 0; font-weight: 600; font-size: .92rem; line-height: 1.35; overflow-wrap: anywhere; }
+.probe-variable-value.is-empty { color: rgba(var(--v-theme-on-surface), .35); font-weight: 400; }
 .preset-table-wrap { max-height: 420px; overflow: auto; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
 .preset-table thead { position: sticky; top: 0; z-index: 1; background: rgb(var(--v-theme-surface)); }
 .preset-table code { white-space: normal; overflow-wrap: anywhere; }
