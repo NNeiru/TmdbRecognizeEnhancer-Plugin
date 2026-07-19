@@ -65,7 +65,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、集数归一化、命名字段、制作组编排、二次重命名与运行诊断。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.6.0-beta.1"
+    plugin_version = "0.6.0-beta.2"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"

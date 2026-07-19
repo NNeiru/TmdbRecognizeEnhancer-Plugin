@@ -76,15 +76,6 @@ jobs:
             local tag="${plugin_id}_v${version}"
             local asset="tmdbrecognizeenhancer_v${version}.zip"
 
-            if gh release view "$tag" >/dev/null 2>&1; then
-              echo "Release $tag already exists, updating its sanitized target"
-              gh release edit "$tag" \
-                --target "$commit" \
-                --title "$tag" \
-                --notes "$notes"
-              return
-            fi
-
             git cat-file -e "${commit}^{commit}"
             rm -f "$asset"
             git archive \
@@ -92,6 +83,16 @@ jobs:
               --prefix=tmdbrecognizeenhancer/ \
               --output="$asset" \
               "${commit}:${plugin_dir}"
+
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "Release $tag already exists, updating target and installable asset"
+              gh release edit "$tag" \
+                --target "$commit" \
+                --title "$tag" \
+                --notes "$notes"
+              gh release upload "$tag" "$asset" --clobber
+              return
+            fi
 
             gh release create "$tag" "$asset" \
               --target "$commit" \
