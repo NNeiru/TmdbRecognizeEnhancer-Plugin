@@ -11,21 +11,25 @@ const emit = defineEmits(['update:modelValue'])
 const dialog = ref(false)
 const loading = ref(false)
 const error = ref('')
+const emptyNotice = ref('')
 const storage = ref('local')
 const storages = ref([{ title: '本地存储', value: 'local' }])
 const treeItems = ref([])
 const openedItems = ref([])
 const activatedItems = ref([])
 const mediaExtensions = new Set(['mkv', 'mp4', 'avi', 'mov', 'ts', 'm2ts', 'webm', 'flv', 'wmv', 'mpg', 'mpeg'])
+let treeEpoch = 0
 
 const selectedItem = computed(() => activatedItems.value[0]?.raw || activatedItems.value[0] || null)
 const selectedPath = computed(() => selectedItem.value?.type === 'file' ? selectedItem.value.path : '')
 
 function rootItem() {
-  return { name: '/', basename: '/', path: '/', storage: storage.value, type: 'dir', children: [] }
+  // fileid 与官方文件管理器保持一致，部分网盘存储按 ID 定位根目录
+  return { name: '/', basename: '/', path: '/', storage: storage.value, type: 'dir', fileid: 'root', children: [] }
 }
 
 function normalizeList(response) {
+  if (response === undefined || response === null) throw new Error('存储接口无响应')
   const value = unwrapResponse(response)
   if (Array.isArray(value)) return value
   if (Array.isArray(value?.value)) return value.value
@@ -43,7 +47,7 @@ async function fetchChildren(item) {
   if (!item || item.type !== 'dir' || item.__loaded) return
   item.__loaded = true
   try {
-    const children = normalizeList(await props.api.post('/storage/list', item))
+    const children = normalizeList(await props.api.post('/storage/list?sort=name', item))
       .filter(child => child?.type === 'dir' || isMediaFile(child))
       .map(child => child.type === 'dir' ? { ...child, children: [], __loaded: false } : { ...child })
     item.children.splice(0, item.children.length, ...children)
@@ -65,7 +69,10 @@ async function loadStorages() {
 }
 
 async function resetTree() {
+  // 切换存储会并发触发 resetTree，晚返回的旧请求不能覆盖新树的展开状态
+  const epoch = ++treeEpoch
   error.value = ''
+  emptyNotice.value = ''
   activatedItems.value = []
   openedItems.value = []
   treeItems.value = [rootItem()]
@@ -74,8 +81,13 @@ async function resetTree() {
   const root = treeItems.value[0]
   loading.value = true
   await fetchChildren(root)
+  if (epoch !== treeEpoch) return
   openedItems.value = [root]
   loading.value = false
+  if (!error.value && !root.children.length) {
+    // MP 后端在存储浏览失败时也会返回空列表（HTTP 200），这里必须给出反馈
+    emptyNotice.value = '该存储根目录未返回任何内容：存储可能未就绪、无访问权限或后端浏览失败，请检查 MoviePilot 日志。'
+  }
 }
 
 async function openPicker() {
@@ -107,6 +119,7 @@ onMounted(loadStorages)
       <VCardText class="file-picker-body">
         <VSelect v-model="storage" :items="storages" label="MoviePilot 存储" hide-details />
         <VAlert v-if="error" type="error" variant="tonal" density="compact">{{ error }}</VAlert>
+        <VAlert v-else-if="emptyNotice" type="info" variant="tonal" density="compact">{{ emptyNotice }}</VAlert>
         <VProgressLinear v-if="loading" indeterminate color="secondary" />
         <div class="file-tree-box">
           <VTreeview
@@ -120,8 +133,6 @@ onMounted(loadStorages)
             activatable
             return-object
             open-on-click
-            expand-icon="mdi-folder"
-            collapse-icon="mdi-folder-open"
           >
             <template #prepend="{ item }"><VIcon :icon="(item.raw?.type || item.type) === 'dir' ? 'mdi-folder-outline' : 'mdi-file-video-outline'" size="18" /></template>
           </VTreeview>
