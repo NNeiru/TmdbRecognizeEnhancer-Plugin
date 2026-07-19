@@ -28,8 +28,8 @@ class MediaFileProbe:
         "fps": {"probe_fps"},
         "audioCodec": {"probe_audio_codec", "probe_audio_codecs", "probe_audio_languages"},
         "subtitle": {
-            "probe_subtitle_languages", "probe_subtitle_titles", "probe_subtitle_profile",
-            "probe_subtitle_mapped", "probe_subtitle_count",
+            "probe_subtitle_languages", "probe_subtitle_titles", "probe_subtitle_track_labels",
+            "probe_subtitle_profile", "probe_subtitle_mapped", "probe_subtitle_count",
         },
         "duration": {"probe_duration"},
     }
@@ -42,10 +42,11 @@ class MediaFileProbe:
         ("probe_audio_codec", "扫描主音频编码", "默认音轨或首条音轨的编码。"),
         ("probe_audio_codecs", "全部音频编码", "容器内所有音轨编码，使用顿号连接并去重。"),
         ("probe_audio_languages", "音轨语言", "容器内音轨语言，使用顿号连接并去重。"),
-        ("probe_subtitle_languages", "内封字幕语言", "从字幕流 language 与 title 标签推断的语言；双语轨显示为组合标签，例如“简日”“繁日”。"),
-        ("probe_subtitle_titles", "内封字幕标题", "字幕轨原始 title 标签（轨道名），用于核对语言识别依据。"),
-        ("probe_subtitle_profile", "内封字幕组合", "按检测语言并集压缩的命名组合，例如“简日+繁日”得到“简繁日内封”；超过 3 种语言时显示“多国内封”。"),
-        ("probe_subtitle_mapped", "字幕自定义映射", "按用户字幕组合规则生成、可写入 customization 的结果。"),
+        ("probe_subtitle_languages", "内封字幕语言", "容器内字幕流拆解出的单一语言并集，例如“简体、繁体、日语”。"),
+        ("probe_subtitle_titles", "内封字幕标题", "字幕轨原始 title 标签（轨道名），例如“简日双语、繁日雙語”，用于核对识别依据。"),
+        ("probe_subtitle_track_labels", "处理后字幕标题", "每条字幕轨归一后的简写标签，例如“简日、繁日”，便于命名引用。"),
+        ("probe_subtitle_profile", "内封字幕组合", "按检测语言自动压缩的命名组合，例如“简繁日内封”；超过 3 种语言显示“多国内封”。不受自定义规则影响。"),
+        ("probe_subtitle_mapped", "字幕自定义映射", "仅当自定义组合规则命中时才有值，是写入 customization 的结果；未命中为空。"),
         ("probe_subtitle_count", "内封字幕数量", "容器中的字幕流数量。"),
         ("probe_video_width", "视频宽度", "主视频流像素宽度。"),
         ("probe_video_height", "视频高度", "主视频流像素高度。"),
@@ -256,20 +257,21 @@ class MediaFileProbe:
         audio_codec = cls._codec(audio.get("codec_name"), cls._AUDIO_CODEC)
         audio_codecs = cls._unique(cls._codec(item.get("codec_name"), cls._AUDIO_CODEC) for item in audios)
         audio_languages = cls._unique((cls._language(item) for item in audios), language=True)
-        subtitle_languages = cls._unique((cls._language(item) for item in subtitles), language=True)
+        # 每轨可能是双语组合标签（简日、繁日），保留为“处理后标题”便于命名引用
+        subtitle_track_labels = cls._unique((cls._language(item) for item in subtitles), language=True)
         subtitle_titles = cls._unique(
             str((item.get("tags") or {}).get("title") or "").strip() for item in subtitles
         )
-        # 组合标签（简日、繁日）先还原成原子语言并集，再压缩为命名组合：简日+繁日 → 简繁日内封
-        subtitle_atoms = sorted(
-            set().union(*(cls._decompose_label(label) for label in subtitle_languages)) if subtitle_languages else set(),
+        # 字幕语言只保留单语言：把组合标签拆回原子语言取并集，再压缩为命名组合（简日+繁日 → 简繁日内封）
+        subtitle_languages = sorted(
+            set().union(*(cls._decompose_label(label) for label in subtitle_track_labels)) if subtitle_track_labels else set(),
             key=cls._label_sort_key,
         )
-        if len(subtitle_atoms) > 3:
+        if len(subtitle_languages) > 3:
             # 多语种（如 CR/Netflix WEB-DL）逐字拼接会产生大量 ISO 代码串，直接归为多国
             subtitle_profile = "多国内封"
         else:
-            subtitle_profile = "".join(cls._PROFILE_TOKEN.get(item, item) for item in subtitle_atoms)
+            subtitle_profile = "".join(cls._PROFILE_TOKEN.get(item, item) for item in subtitle_languages)
             if subtitle_profile:
                 subtitle_profile += "内封"
         duration = round(cls._safe_float((payload.get("format") or {}).get("duration")), 3)
@@ -294,6 +296,7 @@ class MediaFileProbe:
             "probe_audio_languages": "、".join(audio_languages),
             "probe_subtitle_languages": "、".join(subtitle_languages),
             "probe_subtitle_titles": "、".join(subtitle_titles),
+            "probe_subtitle_track_labels": "、".join(subtitle_track_labels),
             "probe_subtitle_profile": subtitle_profile,
             "probe_subtitle_count": len(subtitles),
             "probe_video_width": width,

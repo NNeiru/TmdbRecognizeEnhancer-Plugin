@@ -255,7 +255,8 @@ async function clearProbeCache() {
   error.value = ''
   try {
     const capability = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/media-probe/cache/clear`))
-    if (data.value && capability) data.value.media_probe = capability
+    // 只合并容量/统计字段，保留 field_options 等目录信息，否则会误报“后端仍是旧实例”
+    if (data.value && capability) data.value.media_probe = { ...(data.value.media_probe || {}), ...capability }
   } catch (err) { error.value = explainError(err, '清除扫描缓存失败') }
   finally { saving.value = '' }
 }
