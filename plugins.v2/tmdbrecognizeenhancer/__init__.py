@@ -66,7 +66,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.7.0-beta.12"
+    plugin_version = "0.7.0-beta.13"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -151,14 +151,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "media_probe_overwrite_fields": [],
         "media_probe_field_policies": {},
         "media_probe_subtitle_to_customization": True,
+        # 未命中规则时自动回退为语言组合（简繁日内封等），默认只保留与自动结果不同的映射
         "media_probe_subtitle_rules": (
-            "简体 => 简体内封\n"
-            "繁体 => 繁体内封\n"
-            "简体+繁体 => 简繁内封\n"
-            "简体+日语 => 简日内封\n"
-            "繁体+日语 => 繁日内封\n"
-            "简体+繁体+日语 => 简繁日内封\n"
-            "中文+日语 => 中日内封\n"
             "中文 => 中字内封\n"
             ">=4 => 多国字幕"
         ),

@@ -514,7 +514,7 @@ def test_media_probe_runs_even_when_other_naming_modules_are_disabled(monkeypatc
         probe=Mock(return_value={
             "success": True,
             "fields": {"videoCodec": "H265", "videoBit": "10bit"},
-            "context": {"probe_subtitle_profile": "简日内封"},
+            "context": {"probe_subtitle_track_labels": "简日"},
             "streams": {"video": 1, "audio": 1, "subtitle": 2},
         }),
         apply_fields=module.MediaFileProbe.apply_fields,
@@ -530,7 +530,7 @@ def test_media_probe_runs_even_when_other_naming_modules_are_disabled(monkeypatc
     naming = build.event_data["rename_dict"]
     assert naming["videoCodec"] == "H265"
     assert naming["videoBit"] == "10bit"
-    assert naming["probe_subtitle_profile"] == "简日内封"
+    assert naming["probe_subtitle_track_labels"] == "简日"
     plugin._media_probe.probe.assert_called_once()
 
 

@@ -28,7 +28,7 @@ class MediaFileProbe:
         "fps": {"probe_fps"},
         "audioCodec": {"probe_audio_codec", "probe_audio_codecs", "probe_audio_languages"},
         "subtitle": {
-            "probe_subtitle_languages", "probe_subtitle_titles", "probe_subtitle_profile",
+            "probe_subtitle_languages", "probe_subtitle_titles", "probe_subtitle_track_labels",
             "probe_subtitle_mapped", "probe_subtitle_count",
         },
         "duration": {"probe_duration"},
@@ -42,10 +42,10 @@ class MediaFileProbe:
         ("probe_audio_codec", "扫描主音频编码", "默认音轨或首条音轨的编码。"),
         ("probe_audio_codecs", "全部音频编码", "容器内所有音轨编码，使用顿号连接并去重。"),
         ("probe_audio_languages", "音轨语言", "容器内音轨语言，使用顿号连接并去重。"),
-        ("probe_subtitle_languages", "内封字幕语言", "从字幕流 language 与 title 标签推断的语言；双语轨显示为组合标签，例如“简日”“繁日”。"),
-        ("probe_subtitle_titles", "内封字幕标题", "字幕轨原始 title 标签（轨道名），用于核对语言识别依据。"),
-        ("probe_subtitle_profile", "内封字幕组合", "按检测语言并集压缩的命名组合，例如“简日+繁日”得到“简繁日内封”；超过 3 种语言时显示“多国内封”。"),
-        ("probe_subtitle_mapped", "字幕自定义映射", "按用户字幕组合规则生成、可写入 customization 的结果。"),
+        ("probe_subtitle_languages", "内封字幕语言", "轨道 language 标签对应的语言；标题只用于细分简体/繁体，“简日双语”记为简体。"),
+        ("probe_subtitle_titles", "内封字幕标题", "字幕轨原始 title 标签（轨道名），例如“简日双语、繁日雙語”，用于核对识别依据。"),
+        ("probe_subtitle_track_labels", "处理后字幕标题", "每条字幕轨归一后的简写标签，例如“简日、繁日”，便于命名引用。"),
+        ("probe_subtitle_mapped", "字幕自定义映射", "自定义组合规则命中时为规则结果；未命中时回退为自动语言组合（如“简繁日内封”），写入 customization。"),
         ("probe_subtitle_count", "内封字幕数量", "容器中的字幕流数量。"),
         ("probe_video_width", "视频宽度", "主视频流像素宽度。"),
         ("probe_video_height", "视频高度", "主视频流像素高度。"),
@@ -117,8 +117,48 @@ class MediaFileProbe:
     _TOKEN_TO_LANGUAGE = {"简": "简体", "繁": "繁体", "中": "中文", "日": "日语", "英": "英语", "韩": "韩语"}
 
     @classmethod
+    def _chinese_variant(cls, source: str) -> str:
+        simplified = re.search(cls._SIMPLIFIED_HINT, source, re.IGNORECASE)
+        traditional = re.search(cls._TRADITIONAL_HINT, source, re.IGNORECASE)
+        if simplified and traditional:
+            return "中文"
+        if simplified:
+            return "简体"
+        if traditional:
+            return "繁体"
+        return ""
+
+    @classmethod
     def _language(cls, stream: Dict[str, Any]) -> str:
-        """把单条流的 language/title 标签归一成语言标签；双语轨返回组合标签（如“简日”）。"""
+        """单条流的单一语言：以 language 标签为准，标题只用于细分简体/繁体。
+
+        “简日双语”这类双语轨的 language 标签是 chi，因此语言记为“简体”，
+        标题里的“日”不会进入语言字段（它体现在 track label 里）。
+        """
+        tags = stream.get("tags") or {}
+        language = str(tags.get("language") or "").strip().lower()
+        title = str(tags.get("title") or "").strip()
+        source = f"{language} {title}".lower()
+        base = cls._LANGUAGE.get(language, "")
+        if base == "中文":
+            return cls._chinese_variant(source) or "中文"
+        if base:
+            return base
+        # language 标签缺失或未知时退回标题判断，仍只取单一语言（中文变体优先）
+        variant = cls._chinese_variant(source)
+        if variant:
+            return variant
+        if re.search(cls._JAPANESE_HINT, source, re.IGNORECASE):
+            return "日语"
+        if re.search(cls._ENGLISH_HINT, source, re.IGNORECASE):
+            return "英语"
+        if re.search(cls._KOREAN_HINT, source, re.IGNORECASE):
+            return "韩语"
+        return language.upper() if language and language != "und" else ""
+
+    @classmethod
+    def _track_label(cls, stream: Dict[str, Any]) -> str:
+        """每条轨的“处理后标题”：综合 language/title 归一成简写标签；双语轨得到组合（如“简日”）。"""
         tags = stream.get("tags") or {}
         language = str(tags.get("language") or "").strip().lower()
         title = str(tags.get("title") or "").strip()
@@ -142,6 +182,22 @@ class MediaFileProbe:
         if atoms:
             return atoms[0]
         return cls._LANGUAGE.get(language, language.upper() if language and language != "und" else "")
+
+    @classmethod
+    def _auto_profile(cls, labels: Iterable[str]) -> str:
+        """把轨道标签的原子语言并集压缩成命名组合；超过 3 种语言归为多国。"""
+        atoms = sorted(
+            set().union(*(cls._decompose_label(label) for label in labels)) if labels else set(),
+            key=cls._label_sort_key,
+        )
+        if not atoms:
+            return ""
+        if len(atoms) > 3:
+            return "多国内封"
+        if len(atoms) == 1:
+            # 单语言用全称更自然：简体内封、日语内封
+            return atoms[0] + "内封"
+        return "".join(cls._PROFILE_TOKEN.get(item, item) for item in atoms) + "内封"
 
     @classmethod
     def _decompose_label(cls, label: str) -> set:
@@ -260,18 +316,8 @@ class MediaFileProbe:
         subtitle_titles = cls._unique(
             str((item.get("tags") or {}).get("title") or "").strip() for item in subtitles
         )
-        # 组合标签（简日、繁日）先还原成原子语言并集，再压缩为命名组合：简日+繁日 → 简繁日内封
-        subtitle_atoms = sorted(
-            set().union(*(cls._decompose_label(label) for label in subtitle_languages)) if subtitle_languages else set(),
-            key=cls._label_sort_key,
-        )
-        if len(subtitle_atoms) > 3:
-            # 多语种（如 CR/Netflix WEB-DL）逐字拼接会产生大量 ISO 代码串，直接归为多国
-            subtitle_profile = "多国内封"
-        else:
-            subtitle_profile = "".join(cls._PROFILE_TOKEN.get(item, item) for item in subtitle_atoms)
-            if subtitle_profile:
-                subtitle_profile += "内封"
+        # 处理后标题保留每轨的组合信息（简日、繁日），供命名和映射规则使用
+        subtitle_track_labels = cls._unique((cls._track_label(item) for item in subtitles), language=True)
         duration = round(cls._safe_float((payload.get("format") or {}).get("duration")), 3)
         fields = {
             "videoCodec": video_codec,
@@ -294,7 +340,7 @@ class MediaFileProbe:
             "probe_audio_languages": "、".join(audio_languages),
             "probe_subtitle_languages": "、".join(subtitle_languages),
             "probe_subtitle_titles": "、".join(subtitle_titles),
-            "probe_subtitle_profile": subtitle_profile,
+            "probe_subtitle_track_labels": "、".join(subtitle_track_labels),
             "probe_subtitle_count": len(subtitles),
             "probe_video_width": width,
             "probe_video_height": height,
@@ -463,7 +509,12 @@ class MediaFileProbe:
 
     @classmethod
     def map_subtitles(cls, result: Dict[str, Any], rules: Any) -> str:
-        labels = [item for item in str((result.get("context") or {}).get("probe_subtitle_languages") or "").split("、") if item]
+        """按用户规则映射字幕组合；没有规则命中时回退到自动语言组合。"""
+        context = result.get("context") or {}
+        labels = [item for item in str(context.get("probe_subtitle_track_labels") or "").split("、") if item]
+        if not labels:
+            # 兼容旧缓存结果：track_labels 尚不存在时退回语言字段
+            labels = [item for item in str(context.get("probe_subtitle_languages") or "").split("、") if item]
         label_set = set(labels)
         # 规则两侧都同时按组合标签和原子语言并集比较：
         # “简体+繁体+日语”与“简日+繁日”可互相命中，用户不需要关心轨道封装方式
@@ -483,7 +534,7 @@ class MediaFileProbe:
                     return rule["value"]
             elif rule_set == label_set or (atom_set and rule_atoms == atom_set):
                 return rule["value"]
-        return ""
+        return cls._auto_profile(labels)
 
     @classmethod
     def apply_fields(

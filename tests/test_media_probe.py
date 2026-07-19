@@ -47,7 +47,7 @@ def test_parse_ffprobe_payload_to_mp_and_jinja_fields():
         "effect": "HDR10", "fps": 23.976, "audioCodec": "AAC",
     }
     assert result["context"]["probe_subtitle_languages"] == "简体、繁体、日语"
-    assert result["context"]["probe_subtitle_profile"] == "简繁日内封"
+    assert result["context"]["probe_subtitle_track_labels"] == "简体、繁体、日语"
     assert result["context"]["probe_audio_languages"] == "日语"
 
 
@@ -63,8 +63,10 @@ def test_fill_empty_preserves_mp_values_but_exposes_probe_context():
     assert rename_dict["videoCodec"] == "AV1"
     assert rename_dict["videoFormat"] == "2160P"
     assert rename_dict["audioCodec"] == "AAC"
-    assert rename_dict["probe_subtitle_profile"] == "简繁日内封"
-    assert {item["field"] for item in changes} == {"videoFormat", "audioCodec"}
+    assert rename_dict["probe_subtitle_track_labels"] == "简体、繁体、日语"
+    # 未配置规则时 mapped 回退为自动组合并按 fill_empty 写入空的 customization
+    assert rename_dict["customization"] == "简繁日内封"
+    assert {item["field"] for item in changes} == {"videoFormat", "audioCodec", "customization"}
 
 
 def test_per_field_priority_and_subtitle_customization_mapping():
@@ -156,7 +158,7 @@ def _subtitle_payload(*tags_list):
     }
 
 
-def test_dual_language_track_titles_resolve_to_composite_labels():
+def test_dual_language_tracks_expose_language_title_and_label_separately():
     probe = _probe_class()
 
     result = probe.parse_payload(_subtitle_payload(
@@ -164,9 +166,10 @@ def test_dual_language_track_titles_resolve_to_composite_labels():
         {"language": "chi", "title": "繁日雙語"},
     ))
 
-    assert result["context"]["probe_subtitle_languages"] == "简日、繁日"
+    # 语言字段只取 language 标签的单一语言（标题仅细分简繁），组合简写放在处理后标题
+    assert result["context"]["probe_subtitle_languages"] == "简体、繁体"
     assert result["context"]["probe_subtitle_titles"] == "简日双语、繁日雙語"
-    assert result["context"]["probe_subtitle_profile"] == "简繁日内封"
+    assert result["context"]["probe_subtitle_track_labels"] == "简日、繁日"
 
 
 def test_language_tag_variants_are_classified():
@@ -180,8 +183,9 @@ def test_language_tag_variants_are_classified():
         {"language": "chi", "title": "简繁双语"},
     ))
 
-    assert result["context"]["probe_subtitle_languages"] == "简体、简繁、繁体"
-    assert result["context"]["probe_subtitle_profile"] == "简繁内封"
+    # 简繁双语轨的 language 是 chi、标题同时含简繁 → 语言归为“中文”，标签保留“简繁”
+    assert result["context"]["probe_subtitle_languages"] == "简体、繁体、中文"
+    assert result["context"]["probe_subtitle_track_labels"] == "简体、简繁、繁体"
 
 
 def test_subtitle_rules_support_contains_and_threshold_in_order():
@@ -192,13 +196,14 @@ def test_subtitle_rules_support_contains_and_threshold_in_order():
         ">=4 => 多国字幕"
     )
 
-    def result_for(*languages):
-        return {"context": {"probe_subtitle_languages": "、".join(languages)}}
+    def result_for(*labels):
+        return {"context": {"probe_subtitle_track_labels": "、".join(labels)}}
 
     assert probe.map_subtitles(result_for("简体", "繁体", "日语"), rules) == "简繁日内封"
     assert probe.map_subtitles(result_for("简体", "日语", "英语"), rules) == "简日内封"
     assert probe.map_subtitles(result_for("中文", "英语", "GER", "SPA"), rules) == "多国字幕"
-    assert probe.map_subtitles(result_for("英语"), rules) == ""
+    # 未命中任何规则时回退到自动组合（单语言用全称）
+    assert probe.map_subtitles(result_for("英语"), rules) == "英语内封"
     assert probe.map_subtitles({"context": {}}, ">=1 => 有内封") == ""
 
 
@@ -214,8 +219,8 @@ def test_clear_cache_resets_entries():
 def test_composite_labels_match_atomic_rules_and_vice_versa():
     probe = _probe_class()
 
-    def result_for(*languages):
-        return {"context": {"probe_subtitle_languages": "、".join(languages)}}
+    def result_for(*labels):
+        return {"context": {"probe_subtitle_track_labels": "、".join(labels)}}
 
     # 简日+繁日 双语轨命中按原子语言写的规则
     assert probe.map_subtitles(result_for("简日", "繁日"), "简体+繁体+日语 => 简繁日内封") == "简繁日内封"
@@ -226,17 +231,24 @@ def test_composite_labels_match_atomic_rules_and_vice_versa():
     assert probe.map_subtitles(result_for("简体", "繁体", "日语"), "简日+繁日 => 简繁日内封") == "简繁日内封"
     # 包含匹配可按原子语言命中组合标签
     assert probe.map_subtitles(result_for("简日", "英语"), "包含:简体+日语 => 简日内封") == "简日内封"
-    # 单独的简体轨不会命中要求日语的规则
-    assert probe.map_subtitles(result_for("简体"), "简日+繁日 => 简繁日内封") == ""
+    # 单独的简体轨不命中要求日语的规则，回退到自动组合
+    assert probe.map_subtitles(result_for("简体"), "简日+繁日 => 简繁日内封") == "简体内封"
 
 
-def test_profile_falls_back_to_multi_language_label():
+def test_mapped_falls_back_to_auto_profile_and_multi_language_cap():
     probe = _probe_class()
 
     result = probe.parse_payload(_subtitle_payload(
+        {"language": "chi", "title": "简日双语"},
+        {"language": "chi", "title": "繁日雙語"},
+    ))
+    # 没有任何规则时，mapped 回退为自动组合：简日+繁日 → 简繁日内封
+    assert probe.map_subtitles(result, "") == "简繁日内封"
+
+    multi = probe.parse_payload(_subtitle_payload(
         {"language": "eng"}, {"language": "ger"}, {"language": "fre"}, {"language": "spa"},
     ))
-
-    assert result["context"]["probe_subtitle_profile"] == "多国内封"
-    assert "英语" in result["context"]["probe_subtitle_languages"]
-    assert len(result["context"]["probe_subtitle_languages"].split("、")) == 4
+    # 超过 3 种语言时自动组合归为多国，避免 ISO 代码拼接串
+    assert probe.map_subtitles(multi, "") == "多国内封"
+    assert "英语" in multi["context"]["probe_subtitle_languages"]
+    assert len(multi["context"]["probe_subtitle_languages"].split("、")) == 4

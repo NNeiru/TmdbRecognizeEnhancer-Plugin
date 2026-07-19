@@ -26,6 +26,7 @@ const groupProfileForm = ref({ id: '', display_name: '', kind: 'unknown', field_
 const probePath = ref('')
 const probeResult = ref(null)
 const probeForce = ref(true)
+const probeCacheNotice = ref('')
 const dialog = ref(false)
 const form = ref({ id: '', source_rule_id: '', field: 'videoBit', pattern: '', value: '{match}', action: 'override', enabled: true, priority: 100, label: '' })
 const previewTitle = ref('[Group] Example.S01E01.1080p.WEB-DL.H265.10bit.AAC.mkv')
@@ -253,9 +254,13 @@ async function previewMediaProbe() {
 async function clearProbeCache() {
   saving.value = 'probe-cache'
   error.value = ''
+  probeCacheNotice.value = ''
   try {
-    const capability = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/media-probe/cache/clear`))
-    if (data.value && capability) data.value.media_probe = capability
+    const response = await props.api.post(`${pluginBase.value}/metadata-tools/media-probe/cache/clear`)
+    const capability = unwrapResponse(response)
+    // 只合并容量/统计字段，保留 field_options 等目录信息，否则会误报“后端仍是旧实例”
+    if (data.value && capability) data.value.media_probe = { ...(data.value.media_probe || {}), ...capability }
+    probeCacheNotice.value = response?.data?.message || response?.message || '扫描缓存已清除'
   } catch (err) { error.value = explainError(err, '清除扫描缓存失败') }
   finally { saving.value = '' }
 }
@@ -602,7 +607,7 @@ onMounted(load)
               <VExpansionPanelTitle><div><div class="font-weight-medium">字幕语言映射</div><div class="text-caption text-medium-emphasis">把内封字幕轨组合映射为 customization 或 Jinja 扫描变量</div></div></VExpansionPanelTitle>
               <VExpansionPanelText><div class="subtitle-mapping-box">
                 <VSwitch v-model="config.media_probe_subtitle_to_customization" color="secondary" label="将字幕映射结果写入 customization" hide-details />
-                <VTextarea v-model="config.media_probe_subtitle_rules" label="字幕组合映射（每行一条，首条命中生效）" rows="4" auto-grow placeholder="简日+繁日 => 简繁日内封" hint="双语轨显示为组合标签（简日、繁日）；「简体+繁体+日语」与「简日+繁日」写法可互相命中。「包含:简体+日语 => 简日内封」为子集匹配；「>=4 => 多国字幕」按语言数量。" persistent-hint />
+                <VTextarea v-model="config.media_probe_subtitle_rules" label="字幕组合映射（每行一条，首条命中生效；未命中自动回退为语言组合）" rows="4" auto-grow placeholder="中文 => 中字内封" hint="未命中规则时自动生成语言组合（简繁日内封等），只需为想改名的组合写规则。「简体+繁体+日语」与「简日+繁日」写法可互相命中；「包含:简体+日语 => 简日内封」为子集匹配；「>=4 => 多国字幕」按语言数量。" persistent-hint />
                 <div class="text-caption text-medium-emphasis">可扫描 MKV/MP4 中独立存在的内封字幕流；烧录进画面的硬字幕没有字幕轨，ffprobe 无法判断语言。</div>
               </div></VExpansionPanelText>
             </VExpansionPanel>
@@ -623,6 +628,7 @@ onMounted(load)
             <VSpacer />
             <VBtn variant="tonal" size="small" prepend-icon="mdi-broom" :loading="saving === 'probe-cache'" @click="clearProbeCache">清除扫描缓存{{ typeof data.media_probe?.cache_entries === 'number' ? `（${data.media_probe.cache_entries} 条）` : '' }}</VBtn>
           </div>
+          <VAlert v-if="probeCacheNotice" type="success" variant="tonal" density="compact" closable @click:close="probeCacheNotice = ''">{{ probeCacheNotice }}。缓存只影响扫描结果复用；若刚更新过插件版本，需在 MP 插件页重载插件（或重启容器）后新逻辑才会生效。</VAlert>
           <template v-if="probeResult">
             <div class="d-flex flex-wrap ga-2"><VChip size="small" color="primary" variant="tonal">视频 {{ probeResult.streams?.video || 0 }} 条</VChip><VChip size="small" color="secondary" variant="tonal">音频 {{ probeResult.streams?.audio || 0 }} 条</VChip><VChip size="small" :color="probeResult.streams?.subtitle ? 'success' : 'default'" variant="tonal">字幕 {{ probeResult.streams?.subtitle || 0 }} 条</VChip><VChip v-if="probeResult.cached" size="small" variant="tonal">缓存结果</VChip></div>
             <VAlert v-for="item in probeResult.diagnostics || []" :key="item.code" :type="item.level === 'warning' ? 'warning' : 'info'" variant="tonal" density="compact">{{ item.message }}</VAlert>
