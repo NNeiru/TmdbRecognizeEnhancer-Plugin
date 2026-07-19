@@ -2900,7 +2900,7 @@ const openedItems = ref$3([]);
 const activatedItems = ref$3([]);
 const mediaExtensions = new Set(['mkv', 'mp4', 'avi', 'mov', 'ts', 'm2ts', 'webm', 'flv', 'wmv', 'mpg', 'mpeg']);
 
-const selectedItem = computed$3(() => activatedItems.value[0] || null);
+const selectedItem = computed$3(() => activatedItems.value[0]?.raw || activatedItems.value[0] || null);
 const selectedPath = computed$3(() => selectedItem.value?.type === 'file' ? selectedItem.value.path : '');
 
 function rootItem() {
@@ -3088,7 +3088,7 @@ return (_ctx, _cache) => {
                   }, {
                     prepend: _withCtx$3(({ item }) => [
                       _createVNode$3(_component_VIcon, {
-                        icon: item.type === 'dir' ? 'mdi-folder-outline' : 'mdi-file-video-outline',
+                        icon: (item.raw?.type || item.type) === 'dir' ? 'mdi-folder-outline' : 'mdi-file-video-outline',
                         size: "18"
                       }, null, 8, ["icon"])
                     ]),
@@ -3139,7 +3139,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const MediaFilePicker = /*#__PURE__*/_export_sfc(_sfc_main$3, [['__scopeId',"data-v-bcc1a34d"]]);
+const MediaFilePicker = /*#__PURE__*/_export_sfc(_sfc_main$3, [['__scopeId',"data-v-91d8624c"]]);
 
 const {toDisplayString:_toDisplayString$2,createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,openBlock:_openBlock$2,createBlock:_createBlock$2,createCommentVNode:_createCommentVNode$2,createElementVNode:_createElementVNode$2,createElementBlock:_createElementBlock$2,createVNode:_createVNode$2,Fragment:_Fragment$2,renderList:_renderList$2} = await importShared('vue');
 

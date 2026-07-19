@@ -18,7 +18,7 @@ const openedItems = ref([])
 const activatedItems = ref([])
 const mediaExtensions = new Set(['mkv', 'mp4', 'avi', 'mov', 'ts', 'm2ts', 'webm', 'flv', 'wmv', 'mpg', 'mpeg'])
 
-const selectedItem = computed(() => activatedItems.value[0] || null)
+const selectedItem = computed(() => activatedItems.value[0]?.raw || activatedItems.value[0] || null)
 const selectedPath = computed(() => selectedItem.value?.type === 'file' ? selectedItem.value.path : '')
 
 function rootItem() {
@@ -121,7 +121,7 @@ onMounted(loadStorages)
             expand-icon="mdi-folder"
             collapse-icon="mdi-folder-open"
           >
-            <template #prepend="{ item }"><VIcon :icon="item.type === 'dir' ? 'mdi-folder-outline' : 'mdi-file-video-outline'" size="18" /></template>
+            <template #prepend="{ item }"><VIcon :icon="(item.raw?.type || item.type) === 'dir' ? 'mdi-folder-outline' : 'mdi-file-video-outline'" size="18" /></template>
           </VTreeview>
         </div>
         <div class="selected-path"><span>已选择</span><code>{{ selectedPath || '请在目录树中选择一个媒体文件' }}</code></div>
