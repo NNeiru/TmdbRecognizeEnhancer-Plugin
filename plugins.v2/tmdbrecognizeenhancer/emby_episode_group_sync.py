@@ -48,6 +48,7 @@ class EmbyEpisodeGroupSynchronizer:
             config: Dict[str, Any],
             previous: Optional[Dict[str, Dict[str, Any]]] = None,
             dry_run: bool = False,
+            all_matches: bool = False,
     ) -> Dict[str, Any]:
         """在目标服务器中定位并写入剧集组，返回每台服务器的独立结果。"""
         selected = {
@@ -74,6 +75,7 @@ class EmbyEpisodeGroupSynchronizer:
                 job=job,
                 config=config,
                 dry_run=dry_run,
+                all_matches=all_matches,
             )
 
         retryable = any(
@@ -89,6 +91,7 @@ class EmbyEpisodeGroupSynchronizer:
             job: Dict[str, Any],
             config: Dict[str, Any],
             dry_run: bool,
+            all_matches: bool = False,
     ) -> Dict[str, Any]:
         if not instance or not getattr(instance, "_host", None) or not getattr(instance, "_apikey", None):
             return self._result("error", "Emby 实例缺少连接信息")
@@ -109,13 +112,84 @@ class EmbyEpisodeGroupSynchronizer:
             server_name,
             config.get("path_mappings") or [],
         )
+        if all_matches:
+            outcomes = []
+            for item in items:
+                try:
+                    outcome = self._reconcile_item(
+                        instance=instance,
+                        selected=item,
+                        job=job,
+                        config=config,
+                        dry_run=dry_run,
+                        mapped_path=mapped_path,
+                        selection="用户明确选择修改全部同 TMDBID 候选",
+                    )
+                except Exception as err:
+                    outcome = self._result(
+                        "error",
+                        f"处理候选时发生异常：{err}",
+                        item_id=str(item.get("Id") or ""),
+                        item_name=str(item.get("Name") or ""),
+                        item_path=str(item.get("Path") or ""),
+                    )
+                outcomes.append(outcome)
+            statuses = [str(item.get("status") or "error") for item in outcomes]
+            successful = sum(status in self.SUCCESS_STATUSES or status == "ready" for status in statuses)
+            if successful == len(outcomes):
+                status = "updated" if "updated" in statuses else "ready" if "ready" in statuses else "already"
+            elif successful:
+                status = "partial"
+            elif statuses and len(set(statuses)) == 1:
+                status = statuses[0]
+            else:
+                status = "partial"
+            return {
+                **self._result(
+                    status,
+                    f"已处理 {len(outcomes)} 个同 TMDBID Series：成功 {successful} 个，需处理 {len(outcomes) - successful} 个",
+                ),
+                "mapped_target_path": mapped_path,
+                "all_matches": True,
+                "candidate_count": len(items),
+                "conflict_policy": str(config.get("conflict_policy") or "skip"),
+                "items": outcomes,
+                "candidates": [self._candidate_summary(item) for item in items[:20]],
+            }
+
         selected, selection = self.select_series(items, mapped_path)
         if not selected:
             return {
                 **self._result("ambiguous", selection),
                 "mapped_target_path": mapped_path,
+                "candidate_count": len(items),
+                "conflict_policy": str(config.get("conflict_policy") or "skip"),
                 "candidates": [self._candidate_summary(item) for item in items[:20]],
             }
+
+        return self._reconcile_item(
+            instance=instance,
+            selected=selected,
+            job=job,
+            config=config,
+            dry_run=dry_run,
+            mapped_path=mapped_path,
+            selection=selection,
+        )
+
+    def _reconcile_item(
+            self,
+            instance: Any,
+            selected: Dict[str, Any],
+            job: Dict[str, Any],
+            config: Dict[str, Any],
+            dry_run: bool,
+            mapped_path: str,
+            selection: str,
+    ) -> Dict[str, Any]:
+        """幂等检查并更新一个已经确定的 Emby Series。"""
+        group_id = str(job.get("episode_group_id") or "").strip()
+        tmdb_id = self._safe_int(job.get("tmdb_id"))
 
         item_id = str(selected.get("Id") or "")
         item_name = str(selected.get("Name") or job.get("title") or f"TMDB {tmdb_id}")

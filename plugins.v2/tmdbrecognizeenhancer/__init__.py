@@ -410,6 +410,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "summary": "只读试跑 Emby Series 定位",
             },
             {
+                "path": "/episode-normalizer/emby-sync/apply-all",
+                "endpoint": self.apply_all_emby_sync_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "将剧集组写入全部同 TMDBID Series",
+            },
+            {
                 "path": "/episode-normalizer/emby-sync/retry",
                 "endpoint": self.retry_emby_sync_api,
                 "methods": ["POST"],
@@ -1267,6 +1274,52 @@ class TmdbRecognizeEnhancer(_PluginBase):
             },
             config=config,
             dry_run=True,
+        )
+        return schemas.Response(success=True, data=outcome)
+
+    def apply_all_emby_sync_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """用户明确确认后，将剧集组幂等写入所选 Emby 的全部同 TMDBID Series。"""
+        payload = payload or {}
+        tmdb_id = self._safe_int(payload.get("tmdb_id"), 0)
+        group_id = str(payload.get("episode_group_id") or "").strip()
+        target_path = str(payload.get("target_path") or "").strip()
+        requested_servers = [str(value) for value in payload.get("servers") or [] if str(value).strip()]
+        if not tmdb_id or not group_id:
+            return schemas.Response(success=False, message="请选择剧集组维护规则")
+        if not requested_servers:
+            return schemas.Response(success=False, message="请选择要修改全部候选的 Emby")
+        available_servers = {
+            str(item.get("name") or "")
+            for item in self._emby_sync.server_catalog()
+            if item.get("connected") and str(item.get("name") or "")
+        }
+        unavailable_servers = [name for name in requested_servers if name not in available_servers]
+        if unavailable_servers:
+            return schemas.Response(
+                success=False,
+                message=f"Emby 当前不可用或配置已变化：{'、'.join(unavailable_servers)}",
+            )
+        rule = next((
+            item for item in self._read_episode_rules()
+            if item.get("enabled", True)
+            and self._safe_int(item.get("tmdb_id"), 0) == tmdb_id
+            and item.get("target_type") == "group"
+            and str(item.get("episode_group_id") or "") == group_id
+        ), None)
+        if not rule:
+            return schemas.Response(success=False, message="该 TMDBID 当前没有匹配的剧集组维护规则")
+        config = self._emby_sync_runtime_config()
+        config["servers"] = requested_servers
+        outcome = self._emby_sync.reconcile(
+            job={
+                "tmdb_id": tmdb_id,
+                "episode_group_id": group_id,
+                "title": rule.get("title") or f"TMDB {tmdb_id}",
+                "target_path": target_path,
+            },
+            config=config,
+            dry_run=False,
+            all_matches=True,
         )
         return schemas.Response(success=True, data=outcome)
 

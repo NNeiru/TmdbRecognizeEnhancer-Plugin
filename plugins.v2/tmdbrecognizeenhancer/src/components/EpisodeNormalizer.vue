@@ -14,6 +14,7 @@ const years = Array.from({ length: now.getFullYear() - 1999 }, (_, index) => now
 const error = ref('')
 const notice = ref('')
 const snackbar = ref(false)
+const snackbarColor = ref('success')
 const subModule = ref('rules')
 const rules = ref([])
 const rulesOpen = ref(true)
@@ -64,6 +65,7 @@ const embySync = ref({
 const embyLoading = ref(false)
 const embySaving = ref(false)
 const embyPreviewing = ref(false)
+const embyApplyingAll = ref('')
 const embyPreview = ref(null)
 const embyPreviewRule = ref('')
 const embyPreviewPath = ref('')
@@ -72,6 +74,12 @@ let persistTimer = null
 let embyTimer = null
 let initialized = false
 let componentActive = true
+
+function showNotice(message, color = 'success') {
+  notice.value = message
+  snackbarColor.value = color
+  snackbar.value = true
+}
 
 const quarterKey = computed(() => `${board.value.year}-Q${board.value.quarter}`)
 const platforms = computed(() => [
@@ -191,8 +199,7 @@ async function saveEmbySync() {
     embySync.value = unwrapResponse(await props.api.post(
       `${props.pluginBase}/episode-normalizer/emby-sync/config`, embySync.value.config,
     )) || embySync.value
-    notice.value = 'Emby 剧集组联动设置已保存'
-    snackbar.value = true
+    showNotice('Emby 剧集组联动设置已保存')
     scheduleEmbyPoll()
   } catch (err) {
     error.value = err?.message || '联动设置保存失败'
@@ -223,6 +230,41 @@ async function previewEmbySync() {
     error.value = err?.message || 'Emby 定位试跑失败'
   } finally {
     embyPreviewing.value = false
+  }
+}
+
+async function applyAllEmbyCandidates(server, result) {
+  const [tmdbId, groupId] = String(embyPreviewRule.value || '').split('|')
+  const count = Number(result?.candidate_count || result?.candidates?.length || 0)
+  if (!tmdbId || !groupId || !server || count < 1) return
+  const policy = result?.conflict_policy === 'overwrite'
+    ? '已有不同 TmdbEg 的条目也会按当前设置覆盖。'
+    : '已有不同 TmdbEg 的条目会按当前安全策略跳过。'
+  if (!window.confirm(`确认处理 ${server} 中全部 ${count} 个同 TMDBID Series？${policy}`)) return
+  embyApplyingAll.value = server
+  error.value = ''
+  try {
+    const outcome = unwrapResponse(await props.api.post(
+      `${props.pluginBase}/episode-normalizer/emby-sync/apply-all`,
+      {
+        tmdb_id: Number(tmdbId), episode_group_id: groupId,
+        target_path: embyPreviewPath.value, servers: [server],
+      },
+    )) || {}
+    const serverResult = outcome.results?.[server]
+    if (!serverResult) throw new Error(outcome.reason || `${server} 没有返回处理结果`)
+    if (serverResult) {
+      embyPreview.value = {
+        ...(embyPreview.value || {}),
+        results: { ...(embyPreview.value?.results || {}), [server]: serverResult },
+      }
+    }
+    showNotice(`${server}：${serverResult.reason}`, embyResultColor(serverResult.status))
+    await loadEmbySync(true)
+  } catch (err) {
+    error.value = err?.message || '批量写入 Emby 剧集组失败'
+  } finally {
+    embyApplyingAll.value = ''
   }
 }
 
@@ -257,7 +299,7 @@ async function deleteEmbyJob(jobId = '') {
 function embyResultColor(status) {
   if (['updated', 'already', 'ready'].includes(status)) return 'success'
   if (['pending', 'running'].includes(status)) return 'info'
-  if (['conflict', 'ambiguous', 'unsupported'].includes(status)) return 'warning'
+  if (['conflict', 'ambiguous', 'unsupported', 'partial'].includes(status)) return 'warning'
   return 'error'
 }
 
@@ -266,6 +308,7 @@ function embyResultText(status) {
     ready: '定位成功', updated: '已写入', already: '已正确配置', pending: '等待入库',
     running: '正在处理', completed: '全部完成', attention: '需要处理', timeout: '等待超时',
     conflict: '已有冲突', ambiguous: '定位歧义', unsupported: '神医不支持', error: '请求失败',
+    partial: '部分完成',
   })[status] || status || '未知'
 }
 
@@ -302,8 +345,7 @@ async function manualAddRule() {
     }
     rules.value = data.rules || rules.value
     manualDialog.value = false
-    notice.value = `${data.title || `TMDB ${data.tmdb_id}`} 已加入${data.quarter ? ` ${data.quarter}` : ''} 维护规则`
-    snackbar.value = true
+    showNotice(`${data.title || `TMDB ${data.tmdb_id}`} 已加入${data.quarter ? ` ${data.quarter}` : ''} 维护规则`)
     await loadQuarter(false, true)
     if (data.needs_attention && data.rule) await openEditor(data.rule)
   } catch (err) {
@@ -327,8 +369,7 @@ async function deleteFilteredRules() {
       if (deletedIds.has(Number(item.tmdb_match?.best?.tmdb_id))) item.maintained = false
     })
     deleteRulesDialog.value = false
-    notice.value = `已删除 ${data.deleted || deletedIds.size} 条维护规则`
-    snackbar.value = true
+    showNotice(`已删除 ${data.deleted || deletedIds.size} 条维护规则`)
   } catch (err) {
     error.value = err?.message || '批量删除维护规则失败'
   } finally {
@@ -380,8 +421,7 @@ async function addCatalogItem(item, preference, tmdbId = '', singleFailure = tru
     rules.value = data.rules || rules.value
     Object.assign(item, data.item || {}, { maintained: true })
     failures.value = failures.value.filter(value => value.id !== item.id)
-    notice.value = data.message || `${item.display_name || item.name_cn || item.name} 已加入维护规则`
-    snackbar.value = true
+    showNotice(data.message || `${item.display_name || item.name_cn || item.name} 已加入维护规则`)
     if (data.needs_attention) openEditor(data.rule)
   } catch (err) {
     const failure = {
@@ -423,8 +463,7 @@ async function batchAdd() {
     }))
     if (failures.value.length) failureDialog.value = true
     const attention = data.needs_attention?.length || 0
-    notice.value = `已加入 ${data.added?.length || 0} 条${attention ? `，其中 ${attention} 条需要补充季度起点` : ''}`
-    snackbar.value = true
+    showNotice(`已加入 ${data.added?.length || 0} 条${attention ? `，其中 ${attention} 条需要补充季度起点` : ''}`)
     selectedIds.value = failures.value.map(item => item.id)
   } catch (err) {
     error.value = err?.message || '批量加入失败'
@@ -504,8 +543,7 @@ async function saveRule() {
     rules.value = data.rules || rules.value
     await loadQuarter(false, true)
     editorOpen.value = false
-    notice.value = '维护规则已保存'
-    snackbar.value = true
+    showNotice('维护规则已保存')
   } catch (err) {
     error.value = err?.message || '规则保存失败'
   } finally {
@@ -871,11 +909,11 @@ onMounted(async () => {
             <div v-for="(mapping, index) in embySync.config.path_mappings" :key="index" class="path-mapping-row">
               <VSelect
                 v-model="mapping.server" label="Emby"
-                :items="[{title:'全部 Emby',value:'*'}, ...embyServerItems]" hide-details density="compact"
+                :items="[{title:'全部 Emby',value:'*'}, ...embyServerItems]" hide-details density="compact" variant="outlined"
               />
-              <VTextField v-model="mapping.source" label="MP 路径前缀" placeholder="/media/TV" hide-details density="compact" />
+              <VTextField v-model="mapping.source" label="MP 路径前缀" placeholder="/media/TV" hide-details density="compact" variant="outlined" />
               <VIcon icon="mdi-arrow-right" color="medium-emphasis" />
-              <VTextField v-model="mapping.target" label="Emby 路径前缀" placeholder="/mnt/media/TV" hide-details density="compact" />
+              <VTextField v-model="mapping.target" label="Emby 路径前缀" placeholder="/mnt/media/TV" hide-details density="compact" variant="outlined" />
               <VBtn icon="mdi-delete-outline" color="error" variant="text" @click="embySync.config.path_mappings.splice(index, 1)" />
             </div>
           </div>
@@ -893,7 +931,7 @@ onMounted(async () => {
         <VCardItem>
           <template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-flask-outline" /></VAvatar></template>
           <VCardTitle>Series 定位试跑</VCardTitle>
-          <VCardSubtitle>只读检查将命中哪个 Emby 条目，不写入任何元数据</VCardSubtitle>
+          <VCardSubtitle>定位本身只读；出现同 TMDBID 歧义时，可确认将剧集组应用到全部候选</VCardSubtitle>
         </VCardItem>
         <VCardText>
           <div class="sync-preview-grid">
@@ -902,13 +940,35 @@ onMounted(async () => {
             <VBtn color="secondary" prepend-icon="mdi-radar" :loading="embyPreviewing" :disabled="!embyPreviewRule || !embyPreviewPath" @click="previewEmbySync">开始定位</VBtn>
           </div>
           <div v-if="embyPreview?.results" class="sync-result-list mt-4">
-            <VCard v-for="(result, server) in embyPreview.results" :key="server" variant="tonal">
+            <VCard
+              v-for="(result, server) in embyPreview.results" :key="server" variant="outlined"
+              class="sync-result-card" :class="`sync-result-${embyResultColor(result.status)}`"
+            >
               <VCardText>
-                <div class="d-flex align-center ga-2"><strong>{{ server }}</strong><VChip size="x-small" :color="embyResultColor(result.status)">{{ embyResultText(result.status) }}</VChip></div>
-                <div class="text-body-2 mt-1">{{ result.reason }}</div>
+                <div class="d-flex align-center flex-wrap ga-2">
+                  <VAvatar :color="embyResultColor(result.status)" variant="tonal" size="34"><VIcon :icon="result.status === 'ambiguous' ? 'mdi-source-branch' : result.status === 'updated' || result.status === 'already' ? 'mdi-check' : 'mdi-information-outline'" size="19" /></VAvatar>
+                  <strong>{{ server }}</strong>
+                  <VChip size="x-small" :color="embyResultColor(result.status)" variant="tonal">{{ embyResultText(result.status) }}</VChip>
+                  <VSpacer />
+                  <VBtn
+                    v-if="result.status === 'ambiguous' && Number(result.candidate_count || result.candidates?.length || 0) > 1"
+                    size="small" color="warning" variant="tonal" prepend-icon="mdi-playlist-check"
+                    :loading="embyApplyingAll === server" :disabled="Boolean(embyApplyingAll) && embyApplyingAll !== server" @click="applyAllEmbyCandidates(server, result)"
+                  >修改全部候选</VBtn>
+                </div>
+                <div class="text-body-2 mt-3">{{ result.reason }}</div>
+                <div v-if="result.mapped_target_path" class="mapped-path mt-3"><span>实际比较路径</span><code>{{ result.mapped_target_path }}</code></div>
                 <div v-if="result.item_name" class="text-caption text-medium-emphasis mt-1">{{ result.item_name }} · {{ result.item_path || '路径未知' }}</div>
                 <div v-if="result.existing_group_id" class="text-caption">当前 TmdbEg：{{ result.existing_group_id }}</div>
-                <div v-if="result.candidates?.length" class="text-caption mt-2">候选：{{ result.candidates.map(item => `${item.name} (${item.path || '无路径'})`).join('；') }}</div>
+                <div v-if="result.candidates?.length" class="candidate-path-list mt-3">
+                  <div v-for="item in result.candidates" :key="item.item_id"><span>{{ item.name }}</span><code>{{ item.path || '无路径' }}</code></div>
+                </div>
+                <div v-if="Number(result.candidate_count || 0) > Number(result.candidates?.length || 0)" class="text-caption text-medium-emphasis mt-2">
+                  共 {{ result.candidate_count }} 个候选，此处仅展示前 {{ result.candidates?.length || 0 }} 个
+                </div>
+                <div v-if="result.items?.length" class="candidate-path-list mt-3">
+                  <div v-for="item in result.items" :key="item.item_id"><span>{{ item.item_name }} · {{ embyResultText(item.status) }}</span><code>{{ item.item_path || '无路径' }}</code></div>
+                </div>
               </VCardText>
             </VCard>
           </div>
@@ -1100,7 +1160,7 @@ onMounted(async () => {
       </VCard>
     </VDialog>
 
-    <VSnackbar v-model="snackbar" color="success" timeout="3500">{{ notice }}</VSnackbar>
+    <VSnackbar v-model="snackbar" :color="snackbarColor" timeout="5000">{{ notice }}</VSnackbar>
   </div>
 </template>
 
@@ -1158,9 +1218,19 @@ onMounted(async () => {
 .sync-metrics strong { font-size: 1.15rem; }
 .sync-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; align-items: start; }
 .path-mapping-list { display: grid; gap: 9px; }
-.path-mapping-row { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(190px, 1fr) auto minmax(190px, 1fr) auto; gap: 8px; align-items: center; padding: 9px; border-radius: 12px; background: rgba(var(--v-theme-surface-variant), .24); }
+.path-mapping-row { display: grid; grid-template-columns: minmax(150px, .7fr) minmax(190px, 1fr) auto minmax(190px, 1fr) auto; gap: 8px; align-items: center; padding: 12px; border: 1px solid rgba(var(--v-theme-primary), .14); border-radius: 12px; background: linear-gradient(120deg, rgba(var(--v-theme-primary), .035), rgba(var(--v-theme-surface), 1) 58%); }
 .sync-preview-grid { display: grid; grid-template-columns: minmax(250px, .8fr) minmax(320px, 1.4fr) auto; gap: 10px; align-items: center; }
 .sync-result-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 10px; }
+.sync-result-card { border-width: 1px; background: rgb(var(--v-theme-surface)); }
+.sync-result-success { border-color: rgba(var(--v-theme-success), .34); background: linear-gradient(120deg, rgba(var(--v-theme-success), .07), rgba(var(--v-theme-surface), 1) 60%); }
+.sync-result-info { border-color: rgba(var(--v-theme-info), .3); background: linear-gradient(120deg, rgba(var(--v-theme-info), .065), rgba(var(--v-theme-surface), 1) 60%); }
+.sync-result-warning { border-color: rgba(var(--v-theme-warning), .38); background: linear-gradient(120deg, rgba(var(--v-theme-warning), .085), rgba(var(--v-theme-surface), 1) 60%); }
+.sync-result-error { border-color: rgba(var(--v-theme-error), .34); background: linear-gradient(120deg, rgba(var(--v-theme-error), .07), rgba(var(--v-theme-surface), 1) 60%); }
+.mapped-path { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: baseline; padding: 9px 11px; border-radius: 9px; background: rgba(var(--v-theme-primary), .045); font-size: .76rem; }
+.mapped-path span { color: rgba(var(--v-theme-on-surface), .6); }
+.mapped-path code, .candidate-path-list code { color: rgb(var(--v-theme-primary)); overflow-wrap: anywhere; }
+.candidate-path-list { display: grid; gap: 7px; }
+.candidate-path-list > div { display: grid; grid-template-columns: minmax(130px, .45fr) minmax(0, 1fr); gap: 10px; padding: 8px 10px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 9px; background: rgba(var(--v-theme-surface), .72); font-size: .76rem; }
 .sync-job-list { display: grid; gap: 10px; }
 .sync-job-card { border: 1px solid rgba(var(--v-theme-on-surface), .07); }
 .empty-sync { min-height: 190px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: rgba(var(--v-theme-on-surface), .55); }

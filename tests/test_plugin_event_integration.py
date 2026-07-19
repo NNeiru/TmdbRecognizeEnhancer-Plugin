@@ -190,6 +190,41 @@ def test_transfer_complete_queues_only_the_applied_episode_group(monkeypatch):
     assert jobs[0]["target_path"].endswith("Season 03/E01.mkv")
 
 
+def test_apply_all_emby_sync_requires_rule_and_forwards_explicit_batch(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({"enabled": True})
+    plugin.save_data(plugin.DATA_KEY_EPISODE_RULES, [{
+        "tmdb_id": 278043,
+        "title": "Example",
+        "enabled": True,
+        "target_type": "group",
+        "episode_group_id": "production-group",
+        "installments": [],
+    }])
+    reconcile = Mock(return_value={
+        "results": {"Genshin": {"status": "updated", "candidate_count": 2}},
+        "retryable": False,
+        "reason": "",
+    })
+    plugin._emby_sync = SimpleNamespace(
+        server_catalog=Mock(return_value=[{"name": "Genshin", "connected": True}]),
+        reconcile=reconcile,
+    )
+
+    response = plugin.apply_all_emby_sync_api({
+        "tmdb_id": 278043,
+        "episode_group_id": "production-group",
+        "target_path": "/media/Example/Season 01/E01.mkv",
+        "servers": ["Genshin"],
+    })
+
+    assert response.success is True
+    assert reconcile.call_args.kwargs["all_matches"] is True
+    assert reconcile.call_args.kwargs["dry_run"] is False
+    assert reconcile.call_args.kwargs["config"]["servers"] == ["Genshin"]
+
+
 def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
     module = _load_plugin(monkeypatch)
 

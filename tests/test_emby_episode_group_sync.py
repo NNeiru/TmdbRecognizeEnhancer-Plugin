@@ -50,6 +50,70 @@ def test_multiple_tmdb_series_requires_unique_path_match():
     assert "无法安全" in reason or "未能唯一" in reason
 
 
+def test_explicit_all_matches_updates_every_strict_tmdb_candidate():
+    instance = SimpleNamespace(_host="http://emby/", _apikey="secret", user="user-1")
+    services = {"Genshin": SimpleNamespace(type="emby", instance=instance)}
+    sync = EmbyEpisodeGroupSynchronizer(lambda: services)
+    candidates = [
+        {"Id": "one", "Name": "Anime A", "Path": "/library/a", "ProviderIds": {"Tmdb": "278043"}},
+        {"Id": "two", "Name": "Anime B", "Path": "/library/b", "ProviderIds": {"Tmdb": "278043"}},
+    ]
+    sync._find_series = lambda *_args: (candidates, "")
+    updated = []
+
+    def reconcile_item(**kwargs):
+        updated.append(kwargs["selected"]["Id"])
+        return {
+            "status": "updated", "reason": "ok", "item_id": kwargs["selected"]["Id"],
+            "item_name": kwargs["selected"]["Name"], "item_path": kwargs["selected"]["Path"],
+        }
+
+    sync._reconcile_item = reconcile_item
+    outcome = sync.reconcile(
+        {"tmdb_id": 278043, "episode_group_id": "group", "target_path": "/unknown/E01.mkv"},
+        {"servers": ["Genshin"], "path_mappings": []},
+        all_matches=True,
+    )
+
+    result = outcome["results"]["Genshin"]
+    assert result["status"] == "updated"
+    assert result["all_matches"] is True
+    assert result["candidate_count"] == 2
+    assert updated == ["one", "two"]
+    assert len(result["items"]) == 2
+
+
+def test_explicit_all_matches_isolates_one_candidate_failure():
+    instance = SimpleNamespace(_host="http://emby/", _apikey="secret", user="user-1")
+    services = {"Genshin": SimpleNamespace(type="emby", instance=instance)}
+    sync = EmbyEpisodeGroupSynchronizer(lambda: services)
+    candidates = [
+        {"Id": "broken", "Name": "Broken", "Path": "/library/a", "ProviderIds": {"Tmdb": "278043"}},
+        {"Id": "healthy", "Name": "Healthy", "Path": "/library/b", "ProviderIds": {"Tmdb": "278043"}},
+    ]
+    sync._find_series = lambda *_args: (candidates, "")
+
+    def reconcile_item(**kwargs):
+        if kwargs["selected"]["Id"] == "broken":
+            raise RuntimeError("simulated failure")
+        return {
+            "status": "already", "reason": "ok", "item_id": "healthy",
+            "item_name": "Healthy", "item_path": "/library/b",
+        }
+
+    sync._reconcile_item = reconcile_item
+    outcome = sync.reconcile(
+        {"tmdb_id": 278043, "episode_group_id": "group", "target_path": "/unknown/E01.mkv"},
+        {"servers": ["Genshin"], "path_mappings": []},
+        all_matches=True,
+    )
+
+    result = outcome["results"]["Genshin"]
+    assert result["status"] == "partial"
+    assert [item["status"] for item in result["items"]] == ["error", "already"]
+    assert "成功 1 个" in result["reason"]
+
+
 class FakeResponse:
     def __init__(self, status_code=200, payload=None):
         self.status_code = status_code
