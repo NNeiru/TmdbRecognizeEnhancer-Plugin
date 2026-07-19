@@ -66,7 +66,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.7.0-beta.2"
+    plugin_version = "0.7.0-beta.3"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -149,6 +149,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "videoFormat", "videoCodec", "videoBit", "audioCodec", "effect", "fps", "subtitle",
         ],
         "media_probe_overwrite_fields": [],
+        "media_probe_field_policies": {},
         "media_probe_subtitle_to_customization": True,
         "media_probe_subtitle_rules": (
             "简体 => 简体内封\n"
@@ -726,6 +727,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     {"key": "effect", "label": "HDR / 杜比视界"},
                     {"key": "fps", "label": "帧率"},
                     {"key": "subtitle", "label": "内封字幕语言与组合", "target": "customization"},
+                    {"key": "duration", "label": "媒体时长", "target": "probe_duration"},
                 ],
             },
             "recognition_rules": self._recognition_rules.catalog(),
@@ -771,6 +773,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "display_name": str(payload.get("display_name") or "").strip()[:80],
             "field_policy": str(payload.get("field_policy") or "fill_empty"),
             "field_values": payload.get("field_values") or {},
+            "custom_field_values": payload.get("custom_field_values") or {},
         }
         self.save_data(self.DATA_KEY_RELEASE_GROUP_PROFILES, profiles)
         self._release_group_registry.refresh(profiles)
@@ -2539,26 +2542,44 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return "未配置 Emby"
         return "监听整理入库" if self._emby_sync_thread and self._emby_sync_thread.is_alive() else "工作器未运行"
 
-    @staticmethod
     def _apply_release_group_supplements(
-            rename_dict: Dict[str, Any], supplements: Dict[str, Any],
+            self,
+            rename_dict: Dict[str, Any],
+            supplements: Dict[str, Any],
+            include_fields: Optional[set] = None,
+            exclude_fields: Optional[set] = None,
     ) -> List[Dict[str, Any]]:
         """按每条制作组档案的策略补充 MP 命名字段，并维护组合字段。"""
         changes: List[Dict[str, Any]] = []
         for field, spec in (supplements.get("fields") or {}).items():
+            if include_fields is not None and field not in include_fields:
+                continue
+            if exclude_fields is not None and field in exclude_fields:
+                continue
             value = spec.get("value")
             before = rename_dict.get(field)
-            overwrite = spec.get("policy") == "overwrite"
-            if value in (None, "") or (not overwrite and before not in (None, "", 0)):
+            policy = spec.get("policy") or "fill_empty"
+            if value in (None, "") or (policy == "fill_empty" and before not in (None, "", 0)):
                 continue
-            if before == value:
+            after = value
+            if policy == "append" and before not in (None, "", 0):
+                separator = (
+                    str(self._config.get("customization_separator") or "@")
+                    if field == "customization" else " "
+                )
+                before_text = str(before).strip()
+                value_text = str(value).strip()
+                parts = [part for part in before_text.split(separator) if part]
+                after = before_text if value_text in parts else f"{before_text}{separator}{value_text}"
+            if before == after:
                 continue
-            rename_dict[field] = value
+            rename_dict[field] = after
             changes.append({
                 "field": field,
                 "before": before,
-                "after": value,
+                "after": after,
                 "source": "release_group",
+                "policy": policy,
             })
         changed_fields = {item["field"] for item in changes}
         if changed_fields.intersection({"resourceType", "effect"}):
@@ -2593,9 +2614,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
         log_stages: List[str] = []
         log_details: List[str] = []
         raw_release_group = rename_dict.get("releaseGroup")
+        custom_field_keys = {str(item.get("key") or "") for item in self._custom_rename_fields}
+        supplements: Dict[str, Any] = {}
         if self._config.get("release_group_field_supplements_enabled") and raw_release_group:
             supplements = self._release_group_registry.supplements(raw_release_group)
-            supplement_changes = self._apply_release_group_supplements(rename_dict, supplements)
+            supplement_changes = self._apply_release_group_supplements(
+                rename_dict, supplements, exclude_fields=custom_field_keys,
+            )
             if supplement_changes:
                 log_stages.append("制作组字段补充")
                 log_details.append(f"按制作组补齐 {len(supplement_changes)} 个命名字段")
@@ -2621,8 +2646,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     self._config.get("media_probe_fields") or [],
                     self._config.get("media_probe_policy") or "fill_empty",
                     overwrite_fields=self._config.get("media_probe_overwrite_fields") or [],
+                    field_policies=self._config.get("media_probe_field_policies") or {},
                     subtitle_rules=self._config.get("media_probe_subtitle_rules"),
                     subtitle_to_customization=self._config.get("media_probe_subtitle_to_customization", True),
+                    customization_separator=self._config.get("customization_separator") or "@",
                 )
                 log_stages.append("媒体流扫描")
                 log_details.append(
@@ -2669,10 +2696,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
         independent, _ = self._rename_fields.split_by_target_dependency(self._custom_rename_fields)
         values, errors = self._rename_fields.evaluate(independent, rename_dict)
         rename_dict.update(values)
-        self._event_set(data, "rename_dict", rename_dict)
         if values:
             log_stages.append("自定义字段")
             log_details.append(f"生成了 {len(values)} 个自定义字段")
+        custom_supplement_changes = self._apply_release_group_supplements(
+            rename_dict, supplements, include_fields=custom_field_keys,
+        ) if supplements and custom_field_keys else []
+        if custom_supplement_changes:
+            log_stages.append("制作组自定义字段")
+            log_details.append(f"按制作组补充 {len(custom_supplement_changes)} 个 Jinja2 自定义字段")
+        self._event_set(data, "rename_dict", rename_dict)
         if errors:
             log_stages.append("自定义字段异常")
             log_details.append(f"{len(errors)} 个字段计算失败")
@@ -4677,6 +4710,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
             field for field in dict.fromkeys(str(item) for item in overwrite_fields)
             if field in MediaFileProbe.SCAN_TARGETS and field in merged["media_probe_fields"]
         ]
+        raw_probe_policies = merged.get("media_probe_field_policies") or {}
+        if not isinstance(raw_probe_policies, dict):
+            raw_probe_policies = {}
+        merged["media_probe_field_policies"] = {
+            str(key): str(value)
+            for key, value in raw_probe_policies.items()
+            if str(key) in merged["media_probe_fields"]
+            and str(value) in {"fill_empty", "overwrite", "append"}
+        }
         executable = str(merged.get("media_probe_executable") or "").strip()
         merged["media_probe_executable"] = executable[:500]
         subtitle_rules = str(merged.get("media_probe_subtitle_rules") or "")

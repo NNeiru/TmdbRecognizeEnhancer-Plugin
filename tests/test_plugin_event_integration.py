@@ -450,6 +450,39 @@ def test_conflicting_release_group_supplements_are_skipped(monkeypatch):
     assert result["conflicts"][0]["field"] == "resourceType"
 
 
+def test_release_group_append_and_custom_jinja_field_share_policy(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "custom_rename_fields_enabled": True,
+        "rename_mapping_enabled": False,
+        "release_group_field_supplements_enabled": True,
+    })
+    plugin._custom_rename_fields = ({
+        "key": "source_badges", "label": "来源标签",
+        "expression": "{{ probe_video_codec }}", "fallback": "", "enabled": True,
+        "dependencies": ["probe_video_codec"],
+    },)
+    plugin._rename_fields.evaluate = Mock(return_value=({"source_badges": "H265"}, []))
+    plugin._release_group_registry._compiled = [({
+        "id": "adweb", "pattern": "ADWeb", "display_name": "ADWeb", "kind": "unknown",
+        "field_policy": "append",
+        "field_values": {"effect": "DOVI"},
+        "custom_field_values": {"source_badges": "WEB-DL"},
+    }, __import__("re").compile("ADWeb", __import__("re").IGNORECASE))]
+    build = SimpleNamespace(event_data={
+        "rename_dict": {"releaseGroup": "ADWeb", "effect": "HDR10"},
+        "source_path": "",
+    })
+
+    plugin.on_transfer_rename_build(build)
+
+    naming = build.event_data["rename_dict"]
+    assert naming["effect"] == "HDR10 DOVI"
+    assert naming["source_badges"] == "H265 WEB-DL"
+
+
 def test_media_probe_runs_even_when_other_naming_modules_are_disabled(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = module.TmdbRecognizeEnhancer()

@@ -19,7 +19,7 @@ class MediaFileProbe:
     MP_FIELDS = {
         "videoFormat", "videoCodec", "videoBit", "audioCodec", "effect", "fps",
     }
-    SCAN_TARGETS = MP_FIELDS | {"subtitle"}
+    SCAN_TARGETS = MP_FIELDS | {"subtitle", "duration"}
     CONTEXT_BY_TARGET = {
         "videoFormat": {"probe_video_format", "probe_video_width", "probe_video_height"},
         "videoCodec": {"probe_video_codec"},
@@ -31,6 +31,7 @@ class MediaFileProbe:
             "probe_subtitle_languages", "probe_subtitle_profile", "probe_subtitle_mapped",
             "probe_subtitle_count",
         },
+        "duration": {"probe_duration"},
     }
     CONTEXT_FIELDS = (
         ("probe_video_codec", "扫描视频编码", "ffprobe 检测到的主视频流编码。"),
@@ -385,8 +386,10 @@ class MediaFileProbe:
             enabled_fields: Iterable[str],
             policy: str = "fill_empty",
             overwrite_fields: Optional[Iterable[str]] = None,
+            field_policies: Optional[Dict[str, str]] = None,
             subtitle_rules: Any = None,
             subtitle_to_customization: bool = True,
+            customization_separator: str = "@",
     ) -> List[Dict[str, Any]]:
         """把扫描结果注入命名上下文，并按策略补齐 MP 标准字段。"""
         selected_targets = cls.SCAN_TARGETS.intersection(str(item) for item in enabled_fields or [])
@@ -396,29 +399,51 @@ class MediaFileProbe:
         rename_dict.update({key: source_context.get(key) for key in context_keys if key in source_context})
         overwrite_all = str(policy or "fill_empty") == "overwrite"
         overwrite_set = {str(item) for item in overwrite_fields or []}
+        policies = {
+            str(key): str(value)
+            for key, value in (field_policies or {}).items()
+            if str(value) in {"fill_empty", "overwrite", "append"}
+        }
         changes: List[Dict[str, Any]] = []
         for field in selected:
             value = (result.get("fields") or {}).get(field)
             before = rename_dict.get(field)
-            overwrite = overwrite_all or field in overwrite_set
-            if value in (None, "") or (not overwrite and before not in (None, "", 0)):
+            field_policy = policies.get(field) or ("overwrite" if overwrite_all or field in overwrite_set else "fill_empty")
+            if value in (None, "") or (field_policy == "fill_empty" and before not in (None, "", 0)):
                 continue
-            if before == value:
+            after = value
+            if field_policy == "append" and before not in (None, "", 0):
+                before_text = str(before).strip()
+                value_text = str(value).strip()
+                parts = before_text.split()
+                after = before_text if value_text in parts else f"{before_text} {value_text}"
+            if before == after:
                 continue
-            rename_dict[field] = value
-            changes.append({"field": field, "before": before, "after": value, "source": "ffprobe"})
+            rename_dict[field] = after
+            changes.append({
+                "field": field, "before": before, "after": after,
+                "source": "ffprobe", "policy": field_policy,
+            })
         if "subtitle" in selected_targets:
             mapped = cls.map_subtitles(result, subtitle_rules)
             rename_dict["probe_subtitle_mapped"] = mapped
             if mapped and subtitle_to_customization:
                 before = rename_dict.get("customization")
-                overwrite = overwrite_all or "subtitle" in overwrite_set
-                if overwrite or before in (None, "", 0):
-                    if before != mapped:
-                        rename_dict["customization"] = mapped
+                field_policy = policies.get("subtitle") or (
+                    "overwrite" if overwrite_all or "subtitle" in overwrite_set else "fill_empty"
+                )
+                if field_policy != "fill_empty" or before in (None, "", 0):
+                    after = mapped
+                    if field_policy == "append" and before not in (None, "", 0):
+                        separator = str(customization_separator or "@")
+                        before_text = str(before).strip()
+                        parts = [part for part in before_text.split(separator) if part]
+                        after = before_text if mapped in parts else f"{before_text}{separator}{mapped}"
+                    if before != after:
+                        rename_dict["customization"] = after
                         changes.append({
-                            "field": "customization", "before": before, "after": mapped,
-                            "source": "ffprobe_subtitle",
+                            "field": "customization", "before": before, "after": after,
+                            "source": "ffprobe_subtitle", "policy": field_policy,
                         })
         if any(item["field"] in {"resourceType", "effect"} for item in changes):
             rename_dict["edition"] = " ".join(

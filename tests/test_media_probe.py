@@ -89,6 +89,37 @@ def test_per_field_priority_and_subtitle_customization_mapping():
     assert {item["field"] for item in changes} == {"videoBit", "customization"}
 
 
+def test_per_field_append_keeps_existing_effect_and_customization():
+    probe = _probe_class()
+    result = probe.parse_payload(_sample_payload())
+    result["fields"]["effect"] = "DOVI"
+    rename_dict = {"effect": "HDR10", "customization": "简体标题"}
+
+    changes = probe.apply_fields(
+        rename_dict,
+        result,
+        ["effect", "subtitle"],
+        field_policies={"effect": "append", "subtitle": "append"},
+        subtitle_rules="简体+繁体+日语 => 简繁日内封",
+        customization_separator="@",
+    )
+
+    assert rename_dict["effect"] == "HDR10 DOVI"
+    assert rename_dict["customization"] == "简体标题@简繁日内封"
+    assert {item["policy"] for item in changes} == {"append"}
+
+
+def test_duration_can_be_exposed_only_as_jinja_context():
+    probe = _probe_class()
+    result = probe.parse_payload(_sample_payload())
+    rename_dict = {}
+
+    changes = probe.apply_fields(rename_dict, result, ["duration"])
+
+    assert changes == []
+    assert rename_dict["probe_duration"] == 1438.125
+
+
 def test_unselected_stream_categories_are_not_exposed_to_jinja_context():
     probe = _probe_class()
     result = probe.parse_payload(_sample_payload())

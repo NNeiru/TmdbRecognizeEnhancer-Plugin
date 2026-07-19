@@ -38,7 +38,7 @@ const historyFilterItems = [
   { title: '全部模块', value: 'all' },
   { title: '识别与偏移', value: 'recognition' },
   { title: '字段与命名', value: 'operation' },
-  { title: '仅异常/拒绝', value: 'warning' },
+  { title: '仅异常/未接管', value: 'warning' },
 ]
 const filteredHistory = computed(() => history.value.filter(item => {
   if (historyFilter.value === 'all') return true
@@ -47,6 +47,12 @@ const filteredHistory = computed(() => history.value.filter(item => {
 }))
 const normalizerStatus = computed(() => status.value.episode_normalizer || {})
 const modules = computed(() => status.value.modules || {})
+
+function historyStatus(item) {
+  if (item.accepted) return { color: 'success', marker: 'success', label: item.kind === 'operation' ? '完成' : (item.best?.score ?? '通过') }
+  if (item.kind === 'operation') return { color: 'error', marker: 'warning', label: '异常' }
+  return { color: 'info', marker: 'info', label: '未接管' }
+}
 
 async function loadStatus() {
   loading.value = true
@@ -384,9 +390,9 @@ onMounted(loadStatus)
               <div class="d-flex align-center flex-wrap ga-2 mb-4"><div class="flex-grow-1"><div class="text-h6">模块运行日志</div><div class="text-body-2 text-medium-emphasis">汇总识别决策、集数偏移、字段覆盖及命名处理结果，不保存完整响应</div></div><VSelect v-model="historyFilter" :items="historyFilterItems" item-title="title" item-value="value" density="compact" hide-details class="history-filter" /><VBtn variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" :disabled="!history.length" @click="clearHistory">清空</VBtn><VBtn icon="mdi-refresh" variant="text" :loading="loading" @click="loadStatus" /></div>
               <div v-if="filteredHistory.length" class="history-list">
                 <div v-for="(item, historyIndex) in filteredHistory" :key="`${item.created_at}-${item.module}-${item.title}-${historyIndex}`" class="history-row">
-                  <div class="history-marker" :class="item.accepted ? 'history-marker-success' : 'history-marker-warning'"><span /></div>
+                  <div class="history-marker" :class="`history-marker-${historyStatus(item).marker}`"><span /></div>
                   <VCard variant="outlined" class="history-card">
-                    <VCardText><div class="d-flex align-start ga-3"><div class="flex-grow-1"><div class="d-flex flex-wrap align-center ga-2"><div class="font-weight-bold">{{ item.title }}</div><VChip size="x-small" color="primary" variant="tonal">{{ item.module || 'TMDB 搜索增强' }}</VChip></div><div v-if="item.original_title" class="text-caption text-medium-emphasis text-truncate mt-1" :title="item.original_title">原标题：{{ item.original_title }}</div><div class="text-caption text-medium-emphasis mt-1">{{ item.created_at }} · {{ item.reason }}</div><div v-if="item.episode_adjustment" class="text-caption mt-1">集数偏移：{{ item.episode_adjustment.reason }}<span v-if="item.episode_adjustment.season != null"> · S{{ item.episode_adjustment.season }}E{{ item.episode_adjustment.episode }}</span></div><div class="d-flex flex-wrap ga-1 mt-2"><VChip v-for="stage in item.stages" :key="stage" size="x-small" color="secondary" variant="tonal">{{ stage }}</VChip><VChip v-for="query in item.queries" :key="query" size="x-small" variant="tonal">{{ query }}</VChip><VChip v-if="item.web_search?.attempted" size="x-small" color="info" variant="tonal" prepend-icon="mdi-web">外部 {{ item.web_search.result_count }} 条 · 证据 {{ item.web_search.evidence_candidates || 0 }}</VChip></div></div><VChip :color="item.accepted ? 'success' : 'warning'" size="small">{{ item.kind === 'operation' ? (item.accepted ? '完成' : '异常') : (item.best?.score ?? '拒绝') }}</VChip></div></VCardText>
+                    <VCardText><div class="d-flex align-start ga-3"><div class="flex-grow-1"><div class="d-flex flex-wrap align-center ga-2"><div class="font-weight-bold">{{ item.title }}</div><VChip size="x-small" color="primary" variant="tonal">{{ item.module || 'TMDB 搜索增强' }}</VChip></div><div v-if="item.original_title" class="text-caption text-medium-emphasis text-truncate mt-1" :title="item.original_title">原标题：{{ item.original_title }}</div><div class="text-caption text-medium-emphasis mt-1">{{ item.created_at }} · {{ item.reason }}</div><div v-if="!item.accepted && item.kind !== 'operation'" class="text-caption text-info mt-1">插件未接管本次候选选择，MoviePilot 仍会继续执行原生识别与整理；这不代表最终整理失败。</div><div v-if="item.episode_adjustment" class="text-caption mt-1">集数偏移：{{ item.episode_adjustment.reason }}<span v-if="item.episode_adjustment.season != null"> · S{{ item.episode_adjustment.season }}E{{ item.episode_adjustment.episode }}</span></div><div class="d-flex flex-wrap ga-1 mt-2"><VChip v-for="stage in item.stages" :key="stage" size="x-small" color="secondary" variant="tonal">{{ stage }}</VChip><VChip v-for="query in item.queries" :key="query" size="x-small" variant="tonal">{{ query }}</VChip><VChip v-if="item.web_search?.attempted" size="x-small" color="info" variant="tonal" prepend-icon="mdi-web">外部 {{ item.web_search.result_count }} 条 · 证据 {{ item.web_search.evidence_candidates || 0 }}</VChip></div></div><VChip :color="historyStatus(item).color" size="small">{{ historyStatus(item).label }}</VChip></div></VCardText>
                   </VCard>
                 </div>
               </div>
@@ -471,6 +477,7 @@ onMounted(loadStatus)
 .history-row:last-child .history-marker::after { display: none; }
 .history-marker span { position: relative; z-index: 1; width: 14px; height: 14px; border: 3px solid rgb(var(--v-theme-surface)); border-radius: 50%; box-shadow: 0 0 0 2px currentColor; background: currentColor; }
 .history-marker-success { color: rgb(var(--v-theme-success)); }
+.history-marker-info { color: rgb(var(--v-theme-info)); }
 .history-marker-warning { color: rgb(var(--v-theme-warning)); }
 .history-card { min-width: 0; background: rgb(var(--v-theme-surface)); }
 .future-card { height: 100%; }

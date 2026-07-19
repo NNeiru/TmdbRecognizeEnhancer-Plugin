@@ -21,7 +21,7 @@ const source = ref('all')
 const page = ref(1)
 const groupKind = ref('all')
 const groupProfileDialog = ref(false)
-const groupProfileForm = ref({ id: '', display_name: '', kind: 'unknown', field_policy: 'fill_empty', field_values: {} })
+const groupProfileForm = ref({ id: '', display_name: '', kind: 'unknown', field_policy: 'fill_empty', field_values: {}, custom_field_values: {} })
 const probePath = ref('')
 const probeResult = ref(null)
 const dialog = ref(false)
@@ -96,7 +96,14 @@ const mediaProbeFieldItems = [
   { key: 'fps', label: '帧率', target: 'fps', detail: '读取主视频流的实际平均帧率' },
   { key: 'audioCodec', label: '音频信息', target: 'audioCodec', detail: '主音频编码，并提供全部音轨编码和语言上下文' },
   { key: 'subtitle', label: '内封字幕', target: 'customization', detail: '扫描容器内字幕流语言，按下方规则映射到 customization' },
+  { key: 'duration', label: '媒体时长', target: 'probe_duration', detail: '只作为 Jinja2 扫描变量提供，不覆盖 MP 标准字段' },
 ]
+const fieldPolicyItems = [
+  { title: '仅补空值', value: 'fill_empty' },
+  { title: '覆盖原值', value: 'overwrite' },
+  { title: '追加到原值', value: 'append' },
+]
+const selectedProbeFieldItems = computed(() => mediaProbeFieldItems.filter(item => probeFieldSelected(item.key)))
 const mediaProbeBackendSupported = computed(() => Object.prototype.hasOwnProperty.call(data.value || {}, 'media_probe') && Array.isArray(data.value.media_probe?.field_options))
 const supplementFieldItems = [
   { key: 'resourceType', label: '资源类型', placeholder: 'WEB-DL' },
@@ -183,7 +190,7 @@ async function load() {
 async function saveGroup(item, kind) {
   saving.value = item.id
   try {
-    data.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/release-group`, { id: item.id, kind, display_name: item.display_name, field_policy: item.field_policy, field_values: item.field_values })) || data.value
+    data.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/release-group`, { id: item.id, kind, display_name: item.display_name, field_policy: item.field_policy, field_values: item.field_values, custom_field_values: item.custom_field_values })) || data.value
   } catch (err) { error.value = explainError(err, '制作组类型保存失败') }
   finally { saving.value = '' }
 }
@@ -192,6 +199,7 @@ function openGroupProfile(item) {
   groupProfileForm.value = {
     id: item.id, display_name: item.display_name, kind: item.kind || 'unknown',
     field_policy: item.field_policy || 'fill_empty', field_values: { ...(item.field_values || {}) },
+    custom_field_values: { ...(item.custom_field_values || {}) },
   }
   groupProfileDialog.value = true
 }
@@ -227,19 +235,17 @@ function toggleProbeField(key, enabled) {
   if (!enabled) config.value.media_probe_overwrite_fields = (config.value.media_probe_overwrite_fields || []).filter(item => item !== key)
 }
 
-function probeFieldOverwrite(key) {
-  return config.value.media_probe_policy === 'overwrite' || (config.value.media_probe_overwrite_fields || []).includes(key)
+function probeFieldPolicy(key) {
+  const configured = config.value.media_probe_field_policies?.[key]
+  if (['fill_empty', 'overwrite', 'append'].includes(configured)) return configured
+  if (config.value.media_probe_policy === 'overwrite' || (config.value.media_probe_overwrite_fields || []).includes(key)) return 'overwrite'
+  return 'fill_empty'
 }
 
-function toggleProbeOverwrite(key, enabled) {
-  const fields = new Set(
-    config.value.media_probe_policy === 'overwrite'
-      ? (config.value.media_probe_fields || [])
-      : (config.value.media_probe_overwrite_fields || []),
-  )
-  enabled ? fields.add(key) : fields.delete(key)
-  config.value.media_probe_overwrite_fields = [...fields]
+function setProbeFieldPolicy(key, value) {
+  config.value.media_probe_field_policies = { ...(config.value.media_probe_field_policies || {}), [key]: value }
   config.value.media_probe_policy = 'fill_empty'
+  config.value.media_probe_overwrite_fields = []
 }
 
 function openRule(item = null) {
@@ -505,7 +511,7 @@ onMounted(load)
     <section v-else-if="section === 'groups'">
       <div class="filter-row mb-3"><VTextField v-model="search" label="搜索制作组或正则" prepend-inner-icon="mdi-magnify" clearable hide-details /><VSelect v-model="groupKind" label="参与判断的类型" :items="[{title:'全部类型',value:'all'}, ...kindItems]" hide-details /></div>
       <VTable density="comfortable" class="tools-table"><thead><tr><th>制作组规则</th><th>来源</th><th style="width:230px">类型</th><th style="width:150px">补充字段</th></tr></thead><tbody>
-        <tr v-for="item in pagedGroups" :key="item.id"><td><div class="font-weight-medium">{{ item.display_name }}</div><div class="rule-pattern">{{ item.pattern }}</div></td><td><VChip size="small" variant="tonal">{{ item.source_label }} · {{ item.category }}</VChip></td><td><VSelect :model-value="item.kind" :items="kindItems" density="compact" hide-details :loading="saving === item.id" @update:model-value="value => saveGroup(item, value)"><template #selection><VChip size="small" :color="kindColor(item.kind)" variant="tonal">{{ kindLabel(item.kind) }}</VChip></template></VSelect></td><td><VBtn size="small" variant="tonal" prepend-icon="mdi-tune-variant" @click="openGroupProfile(item)">{{ Object.keys(item.field_values || {}).length ? `${Object.keys(item.field_values).length} 项` : '设置' }}</VBtn></td></tr>
+        <tr v-for="item in pagedGroups" :key="item.id"><td><div class="font-weight-medium">{{ item.display_name }}</div><div class="rule-pattern">{{ item.pattern }}</div></td><td><VChip size="small" variant="tonal">{{ item.source_label }} · {{ item.category }}</VChip></td><td><VSelect :model-value="item.kind" :items="kindItems" density="compact" hide-details :loading="saving === item.id" @update:model-value="value => saveGroup(item, value)"><template #selection><VChip size="small" :color="kindColor(item.kind)" variant="tonal">{{ kindLabel(item.kind) }}</VChip></template></VSelect></td><td><VBtn size="small" variant="tonal" prepend-icon="mdi-tune-variant" @click="openGroupProfile(item)">{{ Object.keys(item.field_values || {}).length + Object.keys(item.custom_field_values || {}).length ? `${Object.keys(item.field_values || {}).length + Object.keys(item.custom_field_values || {}).length} 项` : '设置' }}</VBtn></td></tr>
       </tbody></VTable>
       <VPagination v-if="groupPageCount > 1" v-model="page" :length="groupPageCount" :total-visible="7" class="mt-3" />
     </section>
@@ -515,27 +521,33 @@ onMounted(load)
         <VCard variant="outlined"><VCardItem><VCardTitle>自动扫描策略</VCardTitle><VCardSubtitle>只在实际整理且容器能直接读取源文件时运行；同一文件会按大小和修改时间缓存。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
           <VAlert v-if="!mediaProbeBackendSupported" type="error" variant="tonal" density="compact">新版页面已加载，但插件后端仍是旧实例，因此字段目录显示为空且能力会被误报为 unavailable。请在 MP 插件页重载插件；没有重载入口时重启一次 MP 容器。</VAlert>
           <VAlert v-else :type="data.media_probe?.available ? 'success' : 'warning'" variant="tonal" density="compact">{{ data.media_probe?.message }}</VAlert>
-          <VSwitch v-model="config.media_probe_enabled" color="success" label="整理前扫描实际媒体流" hide-details />
-          <div class="probe-field-list">
-            <div v-for="item in mediaProbeFieldItems" :key="item.key" class="probe-field-row">
-              <VCheckboxBtn :model-value="probeFieldSelected(item.key)" color="primary" @update:model-value="value => toggleProbeField(item.key, value)" />
-              <div class="probe-field-main"><div class="font-weight-medium">{{ item.label }} <code>{{ item.target }}</code></div><div class="text-caption text-medium-emphasis">{{ item.detail }}</div></div>
-              <div class="probe-priority"><span class="text-caption">扫描值优先</span><VSwitch :model-value="probeFieldOverwrite(item.key)" color="orange" density="compact" hide-details :disabled="!probeFieldSelected(item.key)" @update:model-value="value => toggleProbeOverwrite(item.key, value)" /></div>
-            </div>
-          </div>
-          <VAlert type="info" variant="tonal" density="compact">“扫描值优先”关闭时只补 MP/文件名没有识别出的空字段；开启时该项以真实媒体流为准。每项独立控制，不需要全部采用同一优先级。</VAlert>
-          <VExpandTransition><div v-if="probeFieldSelected('subtitle')" class="subtitle-mapping-box">
-            <VSwitch v-model="config.media_probe_subtitle_to_customization" color="secondary" label="将字幕映射结果写入 customization" hide-details />
-            <VTextarea v-model="config.media_probe_subtitle_rules" label="字幕组合映射（每行一条）" rows="6" auto-grow placeholder="简体+繁体 => 简繁内封" hint="精确匹配容器内字幕语言集合；支持简体、繁体、日语、英语、韩语。右侧“扫描值优先”决定是否覆盖文件名已有 customization。" persistent-hint />
-            <div class="text-caption text-medium-emphasis">可扫描的是 MKV/MP4 内独立存在的内封字幕流；烧录进画面像素的硬字幕（常被称为内嵌字幕）没有字幕轨，ffprobe 无法判断语言。</div>
-          </div></VExpandTransition>
-          <VTextField v-model.number="config.media_probe_timeout" type="number" min="3" max="30" label="单文件超时（秒）" hide-details />
-          <VTextField v-model="config.media_probe_executable" label="自定义 ffprobe 路径（通常留空）" placeholder="/usr/local/bin/ffprobe" clearable hint="只在自定义镜像或手动挂载二进制时填写；留空会自动搜索常见路径" persistent-hint />
-          <VExpansionPanels v-if="mediaProbeBackendSupported && !data.media_probe?.available" variant="accordion"><VExpansionPanel><VExpansionPanelTitle>ffprobe 为什么不可用，怎么处理？</VExpansionPanelTitle><VExpansionPanelText>
-            <div class="text-body-2 mb-2">MoviePilot 当前官方 Dockerfile 已把 <code>ffmpeg</code> 和 <code>ffprobe</code> 放入 <code>/usr/local/bin</code>。这里不可用通常表示容器仍是旧镜像、自定义镜像遗漏了该文件，或只更新了插件而没有更新 MP 镜像。</div>
-            <ol class="ffprobe-help"><li>优先拉取当前 MoviePilot 镜像并重新创建容器，配置与挂载目录不会因此改变。</li><li>自定义镜像可从官方镜像继承，或把 ffprobe 持久挂载到 <code>/usr/local/bin/ffprobe:ro</code>。</li><li>容器内执行 <code>ffprobe -version</code> 验证，随后回到这里点击“重新读取 MP 规则”。</li></ol>
-            <VAlert type="warning" variant="tonal" density="compact" class="mt-3">插件不会自动执行 apt 或下载可执行文件：插件通常没有 root 权限，而且直接修改运行中容器会在重新创建后丢失，也会带来架构和供应链风险。</VAlert>
-          </VExpansionPanelText></VExpansionPanel></VExpansionPanels>
+          <div class="probe-enable-row"><VSwitch v-model="config.media_probe_enabled" color="success" label="整理前扫描实际媒体流" hide-details /><div class="d-flex flex-wrap ga-1"><VChip v-for="item in selectedProbeFieldItems" :key="item.key" size="x-small" color="secondary" variant="tonal">{{ item.label }} · {{ fieldPolicyItems.find(policy => policy.value === probeFieldPolicy(item.key))?.title }}</VChip><span v-if="!selectedProbeFieldItems.length" class="text-caption text-medium-emphasis">尚未选择扫描项</span></div></div>
+          <VExpansionPanels variant="accordion" multiple class="probe-panels">
+            <VExpansionPanel>
+              <VExpansionPanelTitle><div><div class="font-weight-medium">扫描字段与写入策略</div><div class="text-caption text-medium-emphasis">已选择 {{ selectedProbeFieldItems.length }} / {{ mediaProbeFieldItems.length }} 项；每项可补空、覆盖或追加</div></div></VExpansionPanelTitle>
+              <VExpansionPanelText><div class="probe-field-list">
+                <div v-for="item in mediaProbeFieldItems" :key="item.key" class="probe-field-row">
+                  <VCheckboxBtn :model-value="probeFieldSelected(item.key)" color="primary" @update:model-value="value => toggleProbeField(item.key, value)" />
+                  <div class="probe-field-main"><div class="font-weight-medium">{{ item.label }} <code>{{ item.target }}</code></div><div class="text-caption text-medium-emphasis">{{ item.detail }}</div></div>
+                  <VSelect :model-value="probeFieldPolicy(item.key)" :items="fieldPolicyItems" density="compact" hide-details class="probe-policy-select" :disabled="!probeFieldSelected(item.key)" @update:model-value="value => setProbeFieldPolicy(item.key, value)" />
+                </div>
+              </div><VAlert type="info" variant="tonal" density="compact" class="mt-3">追加模式保留原标题/MP 已识别值并去重添加扫描值，例如 <code>HDR10 + DOVI → HDR10 DOVI</code>；字幕映射按自定义占位符连接符追加。</VAlert></VExpansionPanelText>
+            </VExpansionPanel>
+            <VExpansionPanel v-if="probeFieldSelected('subtitle')">
+              <VExpansionPanelTitle><div><div class="font-weight-medium">字幕语言映射</div><div class="text-caption text-medium-emphasis">把内封字幕轨组合映射为 customization 或 Jinja 扫描变量</div></div></VExpansionPanelTitle>
+              <VExpansionPanelText><div class="subtitle-mapping-box">
+                <VSwitch v-model="config.media_probe_subtitle_to_customization" color="secondary" label="将字幕映射结果写入 customization" hide-details />
+                <VTextarea v-model="config.media_probe_subtitle_rules" label="字幕组合映射（每行一条）" rows="4" auto-grow placeholder="简体+繁体 => 简繁内封" hint="精确匹配容器内字幕语言集合；支持简体、繁体、日语、英语、韩语。" persistent-hint />
+                <div class="text-caption text-medium-emphasis">可扫描 MKV/MP4 中独立存在的内封字幕流；烧录进画面的硬字幕没有字幕轨，ffprobe 无法判断语言。</div>
+              </div></VExpansionPanelText>
+            </VExpansionPanel>
+            <VExpansionPanel>
+              <VExpansionPanelTitle><div><div class="font-weight-medium">高级设置与 ffprobe</div><div class="text-caption text-medium-emphasis">超时、自定义程序路径和安装诊断</div></div></VExpansionPanelTitle>
+              <VExpansionPanelText><div class="probe-advanced-grid"><VTextField v-model.number="config.media_probe_timeout" type="number" min="3" max="30" label="单文件超时（秒）" hide-details /><VTextField v-model="config.media_probe_executable" label="自定义 ffprobe 路径（通常留空）" placeholder="/usr/local/bin/ffprobe" clearable hide-details /></div>
+                <div v-if="mediaProbeBackendSupported && !data.media_probe?.available" class="mt-3"><div class="text-body-2 mb-2">MoviePilot 当前官方 Dockerfile 已包含 <code>/usr/local/bin/ffprobe</code>。不可用通常表示旧镜像或自定义镜像遗漏。</div><ol class="ffprobe-help"><li>拉取当前 MoviePilot 镜像并重新创建容器。</li><li>自定义镜像可继承官方镜像，或持久挂载 ffprobe。</li><li>容器内执行 <code>ffprobe -version</code> 验证。</li></ol><VAlert type="warning" variant="tonal" density="compact" class="mt-3">插件不自动下载或安装可执行文件，避免权限、容器重建丢失和供应链风险。</VAlert></div>
+              </VExpansionPanelText>
+            </VExpansionPanel>
+          </VExpansionPanels>
           <div class="d-flex justify-end"><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存扫描设置</VBtn></div>
         </VCardText></VCard>
         <VCard variant="outlined"><VCardItem><VCardTitle>文件试扫</VCardTitle><VCardSubtitle>请输入 MP 容器内部看到的真实媒体文件路径，不是宿主机映射前路径。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
@@ -547,7 +559,7 @@ onMounted(load)
           </div>
         </VCardText></VCard>
       </div>
-      <VAlert type="info" variant="tonal" density="compact">扫描可补齐 videoFormat、videoCodec、videoBit、audioCodec、effect、fps；字幕组合等更细信息以 <code>probe_subtitle_profile</code> 等上下文字段提供，可在“命名规则 → 自定义字段”中组合使用。</VAlert>
+      <VAlert type="info" variant="tonal" density="compact">扫描结果既可按策略写入 MP 标准字段，也会作为 <code>probe_*</code> 变量提供给“命名规则 → 自定义字段”。例如可用 <code v-pre>{{ probe_video_codec }}</code>、<code v-pre>{{ probe_effect }}</code>、<code v-pre>{{ probe_subtitle_mapped }}</code> 和 <code v-pre>{{ probe_duration }}</code> 自由组合。</VAlert>
     </section>
 
     <section v-else-if="props.mode === 'naming'">
@@ -673,10 +685,13 @@ onMounted(load)
     </section>
 
     <VDialog v-model="groupProfileDialog" max-width="900">
-      <VCard><VCardItem><VCardTitle>制作组类型与命名字段</VCardTitle><VCardSubtitle>{{ groupProfileForm.display_name }} · 类型可辅助 TMDB 判断，字段只在 MP 没识别出来时补齐。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
-        <VRow><VCol cols="12" sm="6"><VSelect v-model="groupProfileForm.kind" label="内容类型" :items="kindItems" hide-details /></VCol><VCol cols="12" sm="6"><VSelect v-model="groupProfileForm.field_policy" label="字段写入策略" :items="[{title:'仅补空值（推荐）',value:'fill_empty'},{title:'覆盖 MP 已识别值',value:'overwrite'}]" hide-details /></VCol></VRow>
-        <VAlert type="info" variant="tonal" density="compact">例如 ADWeb 固定补充 <code>resourceType = WEB-DL</code>。留空的字段完全不参与；多个合作组对同一字段给出不同值时会安全跳过，避免误命名。</VAlert>
-        <div class="supplement-field-grid"><VTextField v-for="item in supplementFieldItems" :key="item.key" v-model="groupProfileForm.field_values[item.key]" :label="`${item.label}（${item.key}）`" :placeholder="item.placeholder" clearable hide-details /></div>
+      <VCard><VCardItem><VCardTitle>制作组类型与命名字段</VCardTitle><VCardSubtitle>{{ groupProfileForm.display_name }} · 标准字段、自定义 Jinja 字段共用同一写入策略。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
+        <VRow><VCol cols="12" sm="6"><VSelect v-model="groupProfileForm.kind" label="内容类型" :items="kindItems" hide-details /></VCol><VCol cols="12" sm="6"><VSelect v-model="groupProfileForm.field_policy" label="字段写入策略" :items="fieldPolicyItems" hide-details /></VCol></VRow>
+        <VAlert type="info" variant="tonal" density="compact">处理顺序：制作组标准字段 → ffprobe 的 <code>probe_*</code> 变量 → 自定义 Jinja 字段计算 → 制作组对自定义字段补充。追加模式会保留已有内容并去重合并；多个合作组给出冲突值时仍会安全跳过。</VAlert>
+        <VExpansionPanels variant="accordion" multiple>
+          <VExpansionPanel><VExpansionPanelTitle>MP 标准命名字段</VExpansionPanelTitle><VExpansionPanelText><div class="supplement-field-grid"><VTextField v-for="item in supplementFieldItems" :key="item.key" v-model="groupProfileForm.field_values[item.key]" :label="`${item.label}（${item.key}）`" :placeholder="item.placeholder" clearable hide-details /></div></VExpansionPanelText></VExpansionPanel>
+          <VExpansionPanel v-if="customFields.length"><VExpansionPanelTitle>用户自定义 Jinja 字段（{{ customFields.length }}）</VExpansionPanelTitle><VExpansionPanelText><div class="supplement-field-grid"><VTextField v-for="item in customFields" :key="item.key" v-model="groupProfileForm.custom_field_values[item.key]" :label="`${item.label || item.key}（${item.key}）`" clearable hide-details /></div><div class="text-caption text-medium-emphasis mt-3">这里填的是该制作组对字段的固定补充值；字段本身的 Jinja 表达式仍在“命名规则 → 自定义字段”维护。</div></VExpansionPanelText></VExpansionPanel>
+        </VExpansionPanels>
       </VCardText><VDivider /><VCardActions class="rule-dialog-actions"><VSpacer /><VBtn variant="text" @click="groupProfileDialog = false">取消</VBtn><VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving === 'group-profile'" @click="saveGroupProfile">保存设置</VBtn></VCardActions></VCard>
     </VDialog>
 
@@ -779,12 +794,15 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .overlay-preview-actions { display: flex; align-items: center; min-height: 38px; }
 .probe-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .probe-config-body { display: grid; gap: 14px; }
+.probe-enable-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px; }
+.probe-panels { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
 .probe-field-list { display: grid; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
 .probe-field-row { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 12px; border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .probe-field-row:last-child { border-bottom: 0; }
 .probe-field-main { min-width: 0; }
-.probe-priority { min-width: 124px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.probe-policy-select { width: 148px; }
 .subtitle-mapping-box { display: grid; gap: 12px; padding: 14px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .05); }
+.probe-advanced-grid { display: grid; grid-template-columns: minmax(120px, .45fr) minmax(0, 1fr); gap: 12px; }
 .ffprobe-help { display: grid; gap: 6px; padding-left: 22px; }
 .probe-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 12px; border-radius: 10px; background: rgba(var(--v-theme-secondary), .055); }
 .probe-result-item { min-width: 0; display: flex; justify-content: space-between; gap: 12px; padding: 6px 8px; }
@@ -801,6 +819,7 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .group-layout-grid, .group-preview-form { grid-template-columns: 1fr; }
   .probe-settings-grid, .probe-result-grid, .supplement-field-grid { grid-template-columns: 1fr; }
   .probe-field-row { grid-template-columns: auto minmax(0, 1fr); }
-  .probe-priority { grid-column: 2; justify-content: flex-start; }
+  .probe-policy-select { grid-column: 2; width: 100%; }
+  .probe-advanced-grid { grid-template-columns: 1fr; }
 }
 </style>

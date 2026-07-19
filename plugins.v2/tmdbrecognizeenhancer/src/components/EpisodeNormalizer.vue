@@ -300,9 +300,9 @@ async function deleteEmbyJob(jobId = '') {
 }
 
 function embyResultColor(status) {
-  if (['updated', 'already', 'ready'].includes(status)) return 'success'
+  if (['updated', 'already', 'ready', 'completed'].includes(status)) return 'success'
   if (['pending', 'running'].includes(status)) return 'info'
-  if (['conflict', 'ambiguous', 'unsupported', 'partial'].includes(status)) return 'warning'
+  if (['conflict', 'ambiguous', 'unsupported', 'partial', 'attention', 'timeout'].includes(status)) return 'warning'
   return 'error'
 }
 

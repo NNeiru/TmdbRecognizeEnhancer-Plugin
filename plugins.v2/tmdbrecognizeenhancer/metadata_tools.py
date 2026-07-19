@@ -49,17 +49,24 @@ class ReleaseGroupRegistry:
             field_values = raw.get("field_values") or {}
             if not isinstance(field_values, dict):
                 field_values = {}
+            custom_field_values = raw.get("custom_field_values") or {}
+            if not isinstance(custom_field_values, dict):
+                custom_field_values = {}
+            policy = str(raw.get("field_policy") or "fill_empty").lower()
             normalized[str(rule_id)] = {
                 "kind": kind,
                 "display_name": str(raw.get("display_name") or "").strip()[:80],
-                "field_policy": (
-                    "overwrite" if str(raw.get("field_policy") or "fill_empty").lower() == "overwrite"
-                    else "fill_empty"
-                ),
+                "field_policy": policy if policy in {"fill_empty", "overwrite", "append"} else "fill_empty",
                 "field_values": {
                     str(key): str(field_values.get(key) or "").strip()[:120]
                     for key in RELEASE_GROUP_FIELD_KEYS
                     if str(field_values.get(key) or "").strip()
+                },
+                "custom_field_values": {
+                    str(key): str(value or "").strip()[:500]
+                    for key, value in custom_field_values.items()
+                    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", str(key))
+                    and str(value or "").strip()
                 },
             }
         return normalized
@@ -93,6 +100,7 @@ class ReleaseGroupRegistry:
                             "overridden": rule_id in normalized_profiles,
                             "field_policy": override.get("field_policy") or "fill_empty",
                             "field_values": deepcopy(override.get("field_values") or {}),
+                            "custom_field_values": deepcopy(override.get("custom_field_values") or {}),
                         })
         except Exception as err:
             message = f"无法读取 MP 内置制作组规则：{err}"
@@ -119,6 +127,7 @@ class ReleaseGroupRegistry:
                     "overridden": rule_id in normalized_profiles,
                     "field_policy": override.get("field_policy") or "fill_empty",
                     "field_values": deepcopy(override.get("field_values") or {}),
+                    "custom_field_values": deepcopy(override.get("custom_field_values") or {}),
                 })
         except Exception as err:
             if not catalog:
@@ -126,7 +135,7 @@ class ReleaseGroupRegistry:
 
         compiled: List[Tuple[Dict[str, Any], Any]] = []
         for item in catalog:
-            if item["kind"] == "unknown" and not item.get("field_values"):
+            if item["kind"] == "unknown" and not item.get("field_values") and not item.get("custom_field_values"):
                 continue
             try:
                 compiled.append((item, re.compile(item["pattern"], re.IGNORECASE)))
@@ -170,6 +179,7 @@ class ReleaseGroupRegistry:
                             "kind": item["kind"],
                             "field_policy": item.get("field_policy") or "fill_empty",
                             "field_values": deepcopy(item.get("field_values") or {}),
+                            "custom_field_values": deepcopy(item.get("custom_field_values") or {}),
                         })
                 except Exception:
                     continue
@@ -187,7 +197,11 @@ class ReleaseGroupRegistry:
         result = self.classify(release_group)
         candidates: Dict[str, List[Dict[str, Any]]] = {}
         for match in result.get("matches") or []:
-            for field, value in (match.get("field_values") or {}).items():
+            combined_values = {
+                **(match.get("field_values") or {}),
+                **(match.get("custom_field_values") or {}),
+            }
+            for field, value in combined_values.items():
                 candidates.setdefault(field, []).append({
                     "value": value,
                     "policy": match.get("field_policy") or "fill_empty",
@@ -201,9 +215,15 @@ class ReleaseGroupRegistry:
             if len(distinct) != 1:
                 conflicts.append({"field": field, "values": sorted(distinct), "matches": values})
                 continue
+            policies = {str(item.get("policy") or "fill_empty") for item in values}
+            effective_policy = (
+                "overwrite" if "overwrite" in policies
+                else "append" if "append" in policies
+                else "fill_empty"
+            )
             fields[field] = {
                 "value": values[0]["value"],
-                "policy": "overwrite" if any(item["policy"] == "overwrite" for item in values) else "fill_empty",
+                "policy": effective_policy,
                 "matches": values,
             }
         return {
