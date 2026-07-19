@@ -156,7 +156,7 @@ def _subtitle_payload(*tags_list):
     }
 
 
-def test_dual_language_track_titles_resolve_to_simplified_and_traditional():
+def test_dual_language_track_titles_resolve_to_composite_labels():
     probe = _probe_class()
 
     result = probe.parse_payload(_subtitle_payload(
@@ -164,8 +164,9 @@ def test_dual_language_track_titles_resolve_to_simplified_and_traditional():
         {"language": "chi", "title": "繁日雙語"},
     ))
 
-    assert result["context"]["probe_subtitle_languages"] == "简体、繁体"
-    assert result["context"]["probe_subtitle_profile"] == "简繁内封"
+    assert result["context"]["probe_subtitle_languages"] == "简日、繁日"
+    assert result["context"]["probe_subtitle_titles"] == "简日双语、繁日雙語"
+    assert result["context"]["probe_subtitle_profile"] == "简繁日内封"
 
 
 def test_language_tag_variants_are_classified():
@@ -179,7 +180,8 @@ def test_language_tag_variants_are_classified():
         {"language": "chi", "title": "简繁双语"},
     ))
 
-    assert result["context"]["probe_subtitle_languages"] == "简体、繁体、中文"
+    assert result["context"]["probe_subtitle_languages"] == "简体、简繁、繁体"
+    assert result["context"]["probe_subtitle_profile"] == "简繁内封"
 
 
 def test_subtitle_rules_support_contains_and_threshold_in_order():
@@ -198,6 +200,25 @@ def test_subtitle_rules_support_contains_and_threshold_in_order():
     assert probe.map_subtitles(result_for("中文", "英语", "GER", "SPA"), rules) == "多国字幕"
     assert probe.map_subtitles(result_for("英语"), rules) == ""
     assert probe.map_subtitles({"context": {}}, ">=1 => 有内封") == ""
+
+
+def test_composite_labels_match_atomic_rules_and_vice_versa():
+    probe = _probe_class()
+
+    def result_for(*languages):
+        return {"context": {"probe_subtitle_languages": "、".join(languages)}}
+
+    # 简日+繁日 双语轨命中按原子语言写的规则
+    assert probe.map_subtitles(result_for("简日", "繁日"), "简体+繁体+日语 => 简繁日内封") == "简繁日内封"
+    # 组合标签规则同样命中双语轨，别名（簡日雙語）也可用
+    assert probe.map_subtitles(result_for("简日", "繁日"), "简日+繁日 => 简繁日内封") == "简繁日内封"
+    assert probe.map_subtitles(result_for("简日", "繁日"), "簡日雙語+繁日雙語 => 简繁日内封") == "简繁日内封"
+    # 组合标签规则也能命中三条独立单语轨的文件
+    assert probe.map_subtitles(result_for("简体", "繁体", "日语"), "简日+繁日 => 简繁日内封") == "简繁日内封"
+    # 包含匹配可按原子语言命中组合标签
+    assert probe.map_subtitles(result_for("简日", "英语"), "包含:简体+日语 => 简日内封") == "简日内封"
+    # 单独的简体轨不会命中要求日语的规则
+    assert probe.map_subtitles(result_for("简体"), "简日+繁日 => 简繁日内封") == ""
 
 
 def test_profile_falls_back_to_multi_language_label():

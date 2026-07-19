@@ -28,8 +28,8 @@ class MediaFileProbe:
         "fps": {"probe_fps"},
         "audioCodec": {"probe_audio_codec", "probe_audio_codecs", "probe_audio_languages"},
         "subtitle": {
-            "probe_subtitle_languages", "probe_subtitle_profile", "probe_subtitle_mapped",
-            "probe_subtitle_count",
+            "probe_subtitle_languages", "probe_subtitle_titles", "probe_subtitle_profile",
+            "probe_subtitle_mapped", "probe_subtitle_count",
         },
         "duration": {"probe_duration"},
     }
@@ -42,8 +42,9 @@ class MediaFileProbe:
         ("probe_audio_codec", "扫描主音频编码", "默认音轨或首条音轨的编码。"),
         ("probe_audio_codecs", "全部音频编码", "容器内所有音轨编码，使用顿号连接并去重。"),
         ("probe_audio_languages", "音轨语言", "容器内音轨语言，使用顿号连接并去重。"),
-        ("probe_subtitle_languages", "内封字幕语言", "从字幕流 language 与 title 标签推断的语言。"),
-        ("probe_subtitle_profile", "内封字幕组合", "便于命名的组合，例如“简日内封”“简繁日内封”；超过 3 种语言时显示“多国内封”。"),
+        ("probe_subtitle_languages", "内封字幕语言", "从字幕流 language 与 title 标签推断的语言；双语轨显示为组合标签，例如“简日”“繁日”。"),
+        ("probe_subtitle_titles", "内封字幕标题", "字幕轨原始 title 标签（轨道名），用于核对语言识别依据。"),
+        ("probe_subtitle_profile", "内封字幕组合", "按检测语言并集压缩的命名组合，例如“简日+繁日”得到“简繁日内封”；超过 3 种语言时显示“多国内封”。"),
         ("probe_subtitle_mapped", "字幕自定义映射", "按用户字幕组合规则生成、可写入 customization 的结果。"),
         ("probe_subtitle_count", "内封字幕数量", "容器中的字幕流数量。"),
         ("probe_video_width", "视频宽度", "主视频流像素宽度。"),
@@ -105,37 +106,65 @@ class MediaFileProbe:
             return "LPCM"
         return mapping.get(raw, raw.upper())
 
-    # 简繁判定需覆盖字幕组常见写法：简日双语/簡日雙語 这类标题里只出现单字“简/繁”
+    # 简繁判定需覆盖字幕组常见写法：简日双语/簡日雙語 这类标题里只出现单字“简/繁”；
+    # 日/英/韩允许出现在语言组合词里（简日、日英、中英），但不单独出现时不猜测
     _SIMPLIFIED_HINT = r"(?:简|簡|\bchs\b|\bsc\b|\bgb(?:2312|18030|k)?\b|zh[-_]?(?:cn|sg|hans)|simplified)"
     _TRADITIONAL_HINT = r"(?:繁|正体|正體|\bcht\b|\btc\b|\bbig5\b|zh[-_]?(?:tw|hk|mo|hant)|traditional)"
+    _JAPANESE_HINT = r"(?:日语|日文|日本語|\bjpn?\b|\bja\b|(?<=[简簡繁中英])日|日(?=[简簡繁中英双雙语語]))"
+    _ENGLISH_HINT = r"(?:英语|英文|english|\beng\b|\ben\b|(?<=[简簡繁中日])英|英(?=[简簡繁中日双雙语語]))"
+    _KOREAN_HINT = r"(?:韩语|韓語|korean|\bkor?\b|(?<=[简簡繁中日英])[韩韓]|[韩韓](?=[简簡繁中日英双雙语語]))"
+    _GENERIC_CHINESE_HINT = r"(?:(?<=[日英韩韓])中|中(?=[日英韩韓]))"
+    _TOKEN_TO_LANGUAGE = {"简": "简体", "繁": "繁体", "中": "中文", "日": "日语", "英": "英语", "韩": "韩语"}
 
     @classmethod
     def _language(cls, stream: Dict[str, Any]) -> str:
+        """把单条流的 language/title 标签归一成语言标签；双语轨返回组合标签（如“简日”）。"""
         tags = stream.get("tags") or {}
         language = str(tags.get("language") or "").strip().lower()
         title = str(tags.get("title") or "").strip()
         source = f"{language} {title}".lower()
-        simplified = re.search(cls._SIMPLIFIED_HINT, source, re.IGNORECASE)
-        traditional = re.search(cls._TRADITIONAL_HINT, source, re.IGNORECASE)
-        if simplified and traditional:
-            return "中文"
-        if simplified:
-            return "简体"
-        if traditional:
-            return "繁体"
-        if re.search(r"(?:日语|日文|日本語|\bjpn?\b|\bja\b)", source, re.IGNORECASE):
-            return "日语"
-        if re.search(r"(?:英语|英文|english|\beng\b|\ben\b)", source, re.IGNORECASE):
-            return "英语"
-        if re.search(r"(?:韩语|韓語|korean|\bkor?\b)", source, re.IGNORECASE):
-            return "韩语"
+        atoms = []
+        if re.search(cls._SIMPLIFIED_HINT, source, re.IGNORECASE):
+            atoms.append("简体")
+        if re.search(cls._TRADITIONAL_HINT, source, re.IGNORECASE):
+            atoms.append("繁体")
+        if not atoms and re.search(cls._GENERIC_CHINESE_HINT, source, re.IGNORECASE):
+            atoms.append("中文")
+        if re.search(cls._JAPANESE_HINT, source, re.IGNORECASE):
+            atoms.append("日语")
+        if re.search(cls._ENGLISH_HINT, source, re.IGNORECASE):
+            atoms.append("英语")
+        if re.search(cls._KOREAN_HINT, source, re.IGNORECASE):
+            atoms.append("韩语")
+        atoms.sort(key=lambda item: cls._LANGUAGE_ORDER.get(item, 99))
+        if len(atoms) >= 2:
+            return "".join(cls._PROFILE_TOKEN[item] for item in atoms)
+        if atoms:
+            return atoms[0]
         return cls._LANGUAGE.get(language, language.upper() if language and language != "und" else "")
+
+    @classmethod
+    def _decompose_label(cls, label: str) -> set:
+        """把“简日”这类组合标签还原成原子语言集合；未知标签原样返回。"""
+        if not label:
+            return set()
+        if label in cls._LANGUAGE_ORDER:
+            return {label}
+        parts = [cls._TOKEN_TO_LANGUAGE.get(char) for char in label]
+        if len(label) >= 2 and all(parts):
+            return set(parts)
+        return {label}
+
+    @classmethod
+    def _label_sort_key(cls, label: str):
+        orders = sorted(cls._LANGUAGE_ORDER.get(atom, 99) for atom in cls._decompose_label(label))
+        return (orders, label)
 
     @classmethod
     def _unique(cls, values: Iterable[str], language: bool = False) -> List[str]:
         output = list(dict.fromkeys(value for value in values if value))
         if language:
-            output.sort(key=lambda value: (cls._LANGUAGE_ORDER.get(value, 99), value))
+            output.sort(key=cls._label_sort_key)
         return output
 
     @staticmethod
@@ -228,11 +257,19 @@ class MediaFileProbe:
         audio_codecs = cls._unique(cls._codec(item.get("codec_name"), cls._AUDIO_CODEC) for item in audios)
         audio_languages = cls._unique((cls._language(item) for item in audios), language=True)
         subtitle_languages = cls._unique((cls._language(item) for item in subtitles), language=True)
-        if len(subtitle_languages) > 3:
+        subtitle_titles = cls._unique(
+            str((item.get("tags") or {}).get("title") or "").strip() for item in subtitles
+        )
+        # 组合标签（简日、繁日）先还原成原子语言并集，再压缩为命名组合：简日+繁日 → 简繁日内封
+        subtitle_atoms = sorted(
+            set().union(*(cls._decompose_label(label) for label in subtitle_languages)) if subtitle_languages else set(),
+            key=cls._label_sort_key,
+        )
+        if len(subtitle_atoms) > 3:
             # 多语种（如 CR/Netflix WEB-DL）逐字拼接会产生大量 ISO 代码串，直接归为多国
             subtitle_profile = "多国内封"
         else:
-            subtitle_profile = "".join(cls._PROFILE_TOKEN.get(item, item) for item in subtitle_languages)
+            subtitle_profile = "".join(cls._PROFILE_TOKEN.get(item, item) for item in subtitle_atoms)
             if subtitle_profile:
                 subtitle_profile += "内封"
         duration = round(cls._safe_float((payload.get("format") or {}).get("duration")), 3)
@@ -256,6 +293,7 @@ class MediaFileProbe:
             "probe_audio_codecs": "、".join(audio_codecs),
             "probe_audio_languages": "、".join(audio_languages),
             "probe_subtitle_languages": "、".join(subtitle_languages),
+            "probe_subtitle_titles": "、".join(subtitle_titles),
             "probe_subtitle_profile": subtitle_profile,
             "probe_subtitle_count": len(subtitles),
             "probe_video_width": width,
@@ -369,6 +407,11 @@ class MediaFileProbe:
             "英": "英语", "英文": "英语", "eng": "英语",
             "韩": "韩语", "韩文": "韩语", "kor": "韩语",
             "中": "中文",
+            "簡日": "简日", "简日双语": "简日", "簡日雙語": "简日",
+            "繁日双语": "繁日", "繁日雙語": "繁日",
+            "簡繁": "简繁", "简繁双语": "简繁", "簡繁雙語": "简繁",
+            "中日双语": "中日", "中日雙語": "中日",
+            "簡英": "简英", "简英双语": "简英", "簡英雙語": "简英",
         }
         rules: List[Dict[str, Any]] = []
         for raw in lines:
@@ -412,17 +455,25 @@ class MediaFileProbe:
 
     @classmethod
     def map_subtitles(cls, result: Dict[str, Any], rules: Any) -> str:
-        detected = [item for item in str((result.get("context") or {}).get("probe_subtitle_languages") or "").split("、") if item]
-        detected_set = set(detected)
+        labels = [item for item in str((result.get("context") or {}).get("probe_subtitle_languages") or "").split("、") if item]
+        label_set = set(labels)
+        # 规则两侧都同时按组合标签和原子语言并集比较：
+        # “简体+繁体+日语”与“简日+繁日”可互相命中，用户不需要关心轨道封装方式
+        atom_set = set().union(*(cls._decompose_label(label) for label in labels)) if labels else set()
         for rule in cls.parse_subtitle_rules(rules):
             match_mode = rule.get("match") or "exact"
             if match_mode == "min_count":
-                if detected_set and len(detected_set) >= rule.get("min_count", 0):
+                if atom_set and len(atom_set) >= rule.get("min_count", 0):
                     return rule["value"]
-            elif match_mode == "contains":
-                if detected_set and set(rule["languages"]).issubset(detected_set):
+                continue
+            rule_set = set(rule.get("languages") or [])
+            if not rule_set:
+                continue
+            rule_atoms = set().union(*(cls._decompose_label(label) for label in rule_set))
+            if match_mode == "contains":
+                if label_set and (rule_set.issubset(label_set | atom_set) or rule_atoms.issubset(atom_set)):
                     return rule["value"]
-            elif set(rule["languages"]) == detected_set:
+            elif rule_set == label_set or (atom_set and rule_atoms == atom_set):
                 return rule["value"]
         return ""
 
