@@ -68,8 +68,10 @@ async function resetTree() {
   error.value = ''
   activatedItems.value = []
   openedItems.value = []
-  const root = rootItem()
-  treeItems.value = [root]
+  treeItems.value = [rootItem()]
+  // 必须从 ref 取回响应式代理再填充 children；
+  // 直接改原始对象不会触发树的重新渲染，且 __loaded 会挡住后续点击重试。
+  const root = treeItems.value[0]
   loading.value = true
   await fetchChildren(root)
   openedItems.value = [root]
