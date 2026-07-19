@@ -7,6 +7,7 @@ const props = defineProps({
   pluginBase: { type: String, required: true },
   runtimeStatus: { type: Object, default: () => ({}) },
 })
+const emit = defineEmits(['config-saved'])
 
 const now = new Date()
 const uiStateKey = 'tmdbrecognizeenhancer:episode-normalizer-ui:v1'
@@ -196,9 +197,11 @@ async function saveEmbySync() {
   embySaving.value = true
   error.value = ''
   try {
-    embySync.value = unwrapResponse(await props.api.post(
+    const saved = unwrapResponse(await props.api.post(
       `${props.pluginBase}/episode-normalizer/emby-sync/config`, embySync.value.config,
     )) || embySync.value
+    embySync.value = saved
+    emit('config-saved', saved)
     showNotice('Emby 剧集组联动设置已保存')
     scheduleEmbyPoll()
   } catch (err) {

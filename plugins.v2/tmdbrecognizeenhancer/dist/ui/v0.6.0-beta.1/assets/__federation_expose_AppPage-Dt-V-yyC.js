@@ -135,9 +135,11 @@ const _sfc_main$3 = {
   pluginBase: { type: String, required: true },
   runtimeStatus: { type: Object, default: () => ({}) },
 },
-  setup(__props) {
+  emits: ['config-saved'],
+  setup(__props, { emit: __emit }) {
 
 const props = __props;
+const emit = __emit;
 
 const now = new Date();
 const years = Array.from({ length: now.getFullYear() - 1999 }, (_, index) => now.getFullYear() + 1 - index);
@@ -326,9 +328,11 @@ async function saveEmbySync() {
   embySaving.value = true;
   error.value = '';
   try {
-    embySync.value = unwrapResponse(await props.api.post(
+    const saved = unwrapResponse(await props.api.post(
       `${props.pluginBase}/episode-normalizer/emby-sync/config`, embySync.value.config,
     )) || embySync.value;
+    embySync.value = saved;
+    emit('config-saved', saved);
     showNotice('Emby 剧集组联动设置已保存');
     scheduleEmbyPoll();
   } catch (err) {
@@ -2863,7 +2867,7 @@ return (_ctx, _cache) => {
 }
 
 };
-const EpisodeNormalizer = /*#__PURE__*/_export_sfc(_sfc_main$3, [['__scopeId',"data-v-b1ac2fcb"]]);
+const EpisodeNormalizer = /*#__PURE__*/_export_sfc(_sfc_main$3, [['__scopeId',"data-v-6b2bd4e3"]]);
 
 const {toDisplayString:_toDisplayString$2,createTextVNode:_createTextVNode$2,resolveComponent:_resolveComponent$2,withCtx:_withCtx$2,openBlock:_openBlock$2,createBlock:_createBlock$2,createCommentVNode:_createCommentVNode$2,createElementVNode:_createElementVNode$2,createElementBlock:_createElementBlock$2,createVNode:_createVNode$2,Fragment:_Fragment$2,renderList:_renderList$2} = await importShared('vue');
 
@@ -6219,6 +6223,41 @@ async function saveConfig() {
   }
 }
 
+function mergeEmbySyncConfig(sync = {}) {
+  const saved = sync?.config || {};
+  const patch = {
+    emby_episode_group_sync_enabled: Boolean(saved.enabled),
+    emby_episode_group_sync_servers: Array.isArray(saved.servers) ? saved.servers : [],
+    emby_episode_group_sync_initial_delay_seconds: Number(saved.initial_delay_seconds ?? 15),
+    emby_episode_group_sync_retry_seconds: Number(saved.retry_seconds ?? 30),
+    emby_episode_group_sync_max_wait_minutes: Number(saved.max_wait_minutes ?? 15),
+    emby_episode_group_sync_path_mappings: Array.isArray(saved.path_mappings) ? saved.path_mappings : [],
+    emby_episode_group_sync_conflict_policy: saved.conflict_policy || 'skip',
+    emby_episode_group_sync_refresh_metadata: saved.refresh_metadata !== false,
+  };
+  let moduleStatus = '等待插件总开关与集数偏移模块';
+  if (!saved.enabled) moduleStatus = '已停用';
+  else if (!sync.available) moduleStatus = '当前 MP 不支持媒体服务器服务目录';
+  else if (sync.active) moduleStatus = sync.worker_running ? '监听整理入库' : '工作器未运行';
+  status.value = {
+    ...status.value,
+    config: { ...(status.value.config || {}), ...patch },
+    modules: {
+      ...(status.value.modules || {}),
+      emby_episode_group_sync: {
+        ...(status.value.modules?.emby_episode_group_sync || {}),
+        enabled: Boolean(saved.enabled),
+        status: moduleStatus,
+        ...(sync.counts || {}),
+      },
+    },
+    episode_normalizer: {
+      ...(status.value.episode_normalizer || {}),
+      emby_sync: sync,
+    },
+  };
+}
+
 async function runPreview() {
   previewing.value = true;
   error.value = '';
@@ -7745,7 +7784,8 @@ return (_ctx, _cache) => {
                         key: 0,
                         api: __props.api,
                         "plugin-base": pluginBase.value,
-                        "runtime-status": normalizerStatus.value
+                        "runtime-status": normalizerStatus.value,
+                        onConfigSaved: mergeEmbySyncConfig
                       }, null, 8, ["api", "plugin-base", "runtime-status"]))
                     : _createCommentVNode("", true)
                 ], 1024))
@@ -7763,6 +7803,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-1817ff5f"]]);
+const AppPage = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-bec02c28"]]);
 
 export { AppPage as default };

@@ -147,6 +147,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "release_group_normalize_unknown_connectors": False,
     }
 
+    # 这组配置由集数偏移页的独立接口维护。主设置页可能长期保留旧快照，
+    # 因此通用保存接口不能用旧值反向覆盖刚保存的 Emby 联动设置。
+    EMBY_SYNC_CONFIG_KEYS = (
+        "emby_episode_group_sync_enabled",
+        "emby_episode_group_sync_servers",
+        "emby_episode_group_sync_initial_delay_seconds",
+        "emby_episode_group_sync_retry_seconds",
+        "emby_episode_group_sync_max_wait_minutes",
+        "emby_episode_group_sync_path_mappings",
+        "emby_episode_group_sync_conflict_policy",
+        "emby_episode_group_sync_refresh_metadata",
+    )
+
     RENAME_SEPARATOR_FIELDS = {
         "title", "en_title", "original_title", "name", "en_name", "original_name",
         "resourceType", "effect", "edition", "videoFormat", "resource_term",
@@ -191,6 +204,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._customization_separator_adapter = CustomizationSeparatorAdapter()
         self._diagnostics = PerformanceDiagnostics()
         self._preview_state = threading.local()
+        self._config_lock = threading.RLock()
         self._history_lock = threading.RLock()
         self._web_cache_lock = threading.RLock()
         self._web_cache: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
@@ -205,7 +219,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
         """加载配置并启停名称识别事件处理器。"""
-        self._config = self._normalize_config(config or {})
+        with self._config_lock:
+            self._config = self._normalize_config(config or {})
         if self._tmdb_api:
             self._close_tmdb_client()
         self._tmdb_api = TmdbApi()
@@ -644,8 +659,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def save_config_api(self, config: dict = Body(...)) -> schemas.Response:
         """校验并保存联邦界面提交的插件配置。"""
-        self._config = self._normalize_config(config or {})
-        self.update_config(self._current_config())
+        submitted = dict(config or {})
+        with self._config_lock:
+            # Emby 联动在子模块内独立保存。保留运行时最新值，避免主页面的
+            # 旧配置快照在随后保存其它模块时把联动开关和路径映射重置。
+            for key in self.EMBY_SYNC_CONFIG_KEYS:
+                submitted[key] = deepcopy(self._config.get(key, self.DEFAULT_CONFIG[key]))
+            self._config = self._normalize_config(submitted)
+            self.update_config(self._current_config())
         self._refresh_metadata_tools()
         self._sync_runtime_adapter_state()
         self._sync_subtitle_adapter_state()
@@ -1236,9 +1257,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "emby_episode_group_sync_conflict_policy": payload.get("conflict_policy"),
             "emby_episode_group_sync_refresh_metadata": payload.get("refresh_metadata"),
         }
-        merged = {**self._config, **{key: value for key, value in updates.items() if value is not None}}
-        self._config = self._normalize_config(merged)
-        self.update_config(self._current_config())
+        with self._config_lock:
+            merged = {**self._config, **{key: value for key, value in updates.items() if value is not None}}
+            self._config = self._normalize_config(merged)
+            self.update_config(self._current_config())
         self._sync_emby_worker_state()
         return self.get_emby_sync_api()
 

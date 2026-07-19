@@ -225,6 +225,51 @@ def test_apply_all_emby_sync_requires_rule_and_forwards_explicit_batch(monkeypat
     assert reconcile.call_args.kwargs["config"]["servers"] == ["Genshin"]
 
 
+def test_emby_sync_config_survives_repeated_and_stale_general_saves(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "episode_normalizer_enabled": True,
+    })
+    plugin._sync_emby_worker_state = Mock()
+    plugin._refresh_metadata_tools = Mock()
+    plugin._sync_runtime_adapter_state = Mock()
+    plugin._sync_subtitle_adapter_state = Mock()
+    plugin._sync_customization_separator_state = Mock()
+    plugin._sync_event_handler_state = Mock()
+
+    response = plugin.save_emby_sync_config_api({
+        "enabled": True,
+        "servers": ["Genshin"],
+        "retry_seconds": 45,
+        "path_mappings": [{
+            "server": "Genshin", "source": "/pilipili", "target": "/mnt2/strm/pilipili2",
+        }],
+    })
+    assert response.success is True
+    assert plugin._config["emby_episode_group_sync_enabled"] is True
+    assert plugin._config["emby_episode_group_sync_servers"] == ["Genshin"]
+
+    # 子模块再次只保存一个字段时，未提交的联动配置必须沿用当前值。
+    plugin.save_emby_sync_config_api({"retry_seconds": 90})
+    assert plugin._config["emby_episode_group_sync_enabled"] is True
+    assert plugin._config["emby_episode_group_sync_servers"] == ["Genshin"]
+    assert plugin._config["emby_episode_group_sync_retry_seconds"] == 90
+
+    # 模拟主页面仍持有保存前的旧快照；通用保存不得反向关闭独立联动配置。
+    stale = plugin._current_config()
+    stale["emby_episode_group_sync_enabled"] = False
+    stale["emby_episode_group_sync_servers"] = []
+    stale["emby_episode_group_sync_path_mappings"] = []
+    plugin.save_config_api(stale)
+    assert plugin._config["emby_episode_group_sync_enabled"] is True
+    assert plugin._config["emby_episode_group_sync_servers"] == ["Genshin"]
+    assert plugin._config["emby_episode_group_sync_path_mappings"] == [{
+        "server": "Genshin", "source": "/pilipili", "target": "/mnt2/strm/pilipili2",
+    }]
+
+
 def test_custom_rename_catalog_only_exposes_real_naming_context(monkeypatch):
     module = _load_plugin(monkeypatch)
 

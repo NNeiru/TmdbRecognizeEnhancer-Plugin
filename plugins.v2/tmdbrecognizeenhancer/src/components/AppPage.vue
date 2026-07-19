@@ -77,6 +77,41 @@ async function saveConfig() {
   }
 }
 
+function mergeEmbySyncConfig(sync = {}) {
+  const saved = sync?.config || {}
+  const patch = {
+    emby_episode_group_sync_enabled: Boolean(saved.enabled),
+    emby_episode_group_sync_servers: Array.isArray(saved.servers) ? saved.servers : [],
+    emby_episode_group_sync_initial_delay_seconds: Number(saved.initial_delay_seconds ?? 15),
+    emby_episode_group_sync_retry_seconds: Number(saved.retry_seconds ?? 30),
+    emby_episode_group_sync_max_wait_minutes: Number(saved.max_wait_minutes ?? 15),
+    emby_episode_group_sync_path_mappings: Array.isArray(saved.path_mappings) ? saved.path_mappings : [],
+    emby_episode_group_sync_conflict_policy: saved.conflict_policy || 'skip',
+    emby_episode_group_sync_refresh_metadata: saved.refresh_metadata !== false,
+  }
+  let moduleStatus = '等待插件总开关与集数偏移模块'
+  if (!saved.enabled) moduleStatus = '已停用'
+  else if (!sync.available) moduleStatus = '当前 MP 不支持媒体服务器服务目录'
+  else if (sync.active) moduleStatus = sync.worker_running ? '监听整理入库' : '工作器未运行'
+  status.value = {
+    ...status.value,
+    config: { ...(status.value.config || {}), ...patch },
+    modules: {
+      ...(status.value.modules || {}),
+      emby_episode_group_sync: {
+        ...(status.value.modules?.emby_episode_group_sync || {}),
+        enabled: Boolean(saved.enabled),
+        status: moduleStatus,
+        ...(sync.counts || {}),
+      },
+    },
+    episode_normalizer: {
+      ...(status.value.episode_normalizer || {}),
+      emby_sync: sync,
+    },
+  }
+}
+
 async function runPreview() {
   previewing.value = true
   error.value = ''
@@ -369,6 +404,7 @@ onMounted(loadStatus)
                 <EpisodeNormalizer
                   v-if="tab === 'episodes'"
                   :api="api" :plugin-base="pluginBase" :runtime-status="normalizerStatus"
+                  @config-saved="mergeEmbySyncConfig"
                 />
               </KeepAlive>
             </div>
