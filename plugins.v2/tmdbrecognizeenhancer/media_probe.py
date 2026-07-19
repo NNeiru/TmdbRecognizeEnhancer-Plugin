@@ -341,7 +341,15 @@ class MediaFileProbe:
                 "last_error": self._last_error,
             }
 
-    def probe(self, source_path: Any, timeout: int = 12, executable_path: Any = "") -> Dict[str, Any]:
+    def clear_cache(self) -> int:
+        """清空扫描缓存并返回清除的条数；下次扫描会重新读取文件。"""
+        with self._lock:
+            cleared = len(self._cache)
+            self._cache.clear()
+            return cleared
+
+    def probe(self, source_path: Any, timeout: int = 12, executable_path: Any = "",
+              force: bool = False) -> Dict[str, Any]:
         executable = self._resolve_executable(executable_path)
         if not executable:
             return {"success": False, "reason": "容器中未找到 ffprobe", "fields": {}, "context": {}}
@@ -351,7 +359,7 @@ class MediaFileProbe:
         stat = path.stat()
         cache_key = (str(path), int(stat.st_size), int(stat.st_mtime_ns))
         with self._lock:
-            cached = self._cache.get(cache_key)
+            cached = None if force else self._cache.get(cache_key)
             if cached is not None:
                 self._cache.move_to_end(cache_key)
                 self._cache_hits += 1

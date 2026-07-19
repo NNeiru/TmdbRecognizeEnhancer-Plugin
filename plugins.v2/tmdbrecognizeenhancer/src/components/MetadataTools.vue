@@ -25,6 +25,7 @@ const groupProfileDialog = ref(false)
 const groupProfileForm = ref({ id: '', display_name: '', kind: 'unknown', field_policy: 'fill_empty', field_values: {}, custom_field_values: {} })
 const probePath = ref('')
 const probeResult = ref(null)
+const probeForce = ref(true)
 const dialog = ref(false)
 const form = ref({ id: '', source_rule_id: '', field: 'videoBit', pattern: '', value: '{match}', action: 'override', enabled: true, priority: 100, label: '' })
 const previewTitle = ref('[Group] Example.S01E01.1080p.WEB-DL.H265.10bit.AAC.mkv')
@@ -244,8 +245,18 @@ async function previewMediaProbe() {
   probeResult.value = null
   error.value = ''
   try {
-    probeResult.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/media-probe/preview`, { source_path: probePath.value, timeout: config.value.media_probe_timeout }))
+    probeResult.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/media-probe/preview`, { source_path: probePath.value, timeout: config.value.media_probe_timeout, force: probeForce.value }))
   } catch (err) { error.value = explainError(err, '媒体流扫描失败') }
+  finally { saving.value = '' }
+}
+
+async function clearProbeCache() {
+  saving.value = 'probe-cache'
+  error.value = ''
+  try {
+    const capability = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/media-probe/cache/clear`))
+    if (data.value && capability) data.value.media_probe = capability
+  } catch (err) { error.value = explainError(err, '清除扫描缓存失败') }
   finally { saving.value = '' }
 }
 
@@ -606,7 +617,12 @@ onMounted(load)
         </VCardText></VCard>
         <VCard variant="outlined"><VCardItem><VCardTitle>文件试扫</VCardTitle><VCardSubtitle>请输入 MP 容器内部看到的真实媒体文件路径，不是宿主机映射前路径。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
           <div class="probe-path-row"><VTextField v-model="probePath" label="容器内文件路径" placeholder="/downloads/anime/Example.mkv" prepend-inner-icon="mdi-file-video-outline" hide-details /><MediaFilePicker v-model="probePath" :api="props.api" /></div>
-          <VBtn color="secondary" prepend-icon="mdi-waveform" :loading="saving === 'media-probe'" :disabled="!probePath" @click="previewMediaProbe">开始扫描</VBtn>
+          <div class="d-flex align-center flex-wrap ga-2">
+            <VBtn color="secondary" prepend-icon="mdi-waveform" :loading="saving === 'media-probe'" :disabled="!probePath" @click="previewMediaProbe">开始扫描</VBtn>
+            <VCheckbox v-model="probeForce" label="忽略缓存重新扫描" density="compact" color="secondary" hide-details />
+            <VSpacer />
+            <VBtn variant="tonal" size="small" prepend-icon="mdi-broom" :loading="saving === 'probe-cache'" @click="clearProbeCache">清除扫描缓存{{ typeof data.media_probe?.cache_entries === 'number' ? `（${data.media_probe.cache_entries} 条）` : '' }}</VBtn>
+          </div>
           <template v-if="probeResult">
             <div class="d-flex flex-wrap ga-2"><VChip size="small" color="primary" variant="tonal">视频 {{ probeResult.streams?.video || 0 }} 条</VChip><VChip size="small" color="secondary" variant="tonal">音频 {{ probeResult.streams?.audio || 0 }} 条</VChip><VChip size="small" :color="probeResult.streams?.subtitle ? 'success' : 'default'" variant="tonal">字幕 {{ probeResult.streams?.subtitle || 0 }} 条</VChip><VChip v-if="probeResult.cached" size="small" variant="tonal">缓存结果</VChip></div>
             <VAlert v-for="item in probeResult.diagnostics || []" :key="item.code" :type="item.level === 'warning' ? 'warning' : 'info'" variant="tonal" density="compact">{{ item.message }}</VAlert>

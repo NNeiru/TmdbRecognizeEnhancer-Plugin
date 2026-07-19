@@ -202,6 +202,15 @@ def test_subtitle_rules_support_contains_and_threshold_in_order():
     assert probe.map_subtitles({"context": {}}, ">=1 => 有内封") == ""
 
 
+def test_clear_cache_resets_entries():
+    probe = _probe_class()()
+    probe._cache[("x", 1, 2)] = {"success": True}
+
+    assert probe.clear_cache() == 1
+    assert probe.clear_cache() == 0
+    assert probe.capability()["cache_entries"] == 0
+
+
 def test_composite_labels_match_atomic_rules_and_vice_versa():
     probe = _probe_class()
 

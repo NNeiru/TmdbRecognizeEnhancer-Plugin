@@ -66,7 +66,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.7.0-beta.11"
+    plugin_version = "0.7.0-beta.12"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -491,6 +491,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "summary": "读取实际媒体流并预览命名字段",
             },
             {
+                "path": "/metadata-tools/media-probe/cache/clear",
+                "endpoint": self.clear_media_probe_cache_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "清除媒体流扫描缓存",
+            },
+            {
                 "path": "/metadata-tools/recognition-rule",
                 "endpoint": self.save_recognition_rule_api,
                 "methods": ["POST"],
@@ -782,6 +789,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._release_group_registry.refresh(profiles)
         return self.get_metadata_tools_api()
 
+    def clear_media_probe_cache_api(self) -> schemas.Response:
+        """清空 ffprobe 扫描缓存；下次整理或试扫会重新读取文件。"""
+        cleared = self._media_probe.clear_cache()
+        return schemas.Response(
+            success=True,
+            message=f"已清除 {cleared} 条扫描缓存",
+            data=self._media_probe.capability(self._config.get("media_probe_executable")),
+        )
+
     def preview_media_probe_api(self, payload: dict = Body(...)) -> schemas.Response:
         """对容器内可读取文件执行一次 ffprobe，只返回预览，不修改文件。"""
         path = str(payload.get("source_path") or "").strip()
@@ -793,6 +809,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 payload.get("timeout"), self._safe_int(self._config.get("media_probe_timeout"), 12),
             ),
             executable_path=self._config.get("media_probe_executable"),
+            force=bool(payload.get("force")),
         )
         if not result.get("success"):
             return schemas.Response(success=False, message=str(result.get("reason") or "媒体流扫描失败"), data=result)
