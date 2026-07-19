@@ -43,7 +43,7 @@ class MediaFileProbe:
         ("probe_audio_codecs", "全部音频编码", "容器内所有音轨编码，使用顿号连接并去重。"),
         ("probe_audio_languages", "音轨语言", "容器内音轨语言，使用顿号连接并去重。"),
         ("probe_subtitle_languages", "内封字幕语言", "从字幕流 language 与 title 标签推断的语言。"),
-        ("probe_subtitle_profile", "内封字幕组合", "便于命名的组合，例如“简日内封”“简繁日内封”。"),
+        ("probe_subtitle_profile", "内封字幕组合", "便于命名的组合，例如“简日内封”“简繁日内封”；超过 3 种语言时显示“多国内封”。"),
         ("probe_subtitle_mapped", "字幕自定义映射", "按用户字幕组合规则生成、可写入 customization 的结果。"),
         ("probe_subtitle_count", "内封字幕数量", "容器中的字幕流数量。"),
         ("probe_video_width", "视频宽度", "主视频流像素宽度。"),
@@ -105,20 +105,30 @@ class MediaFileProbe:
             return "LPCM"
         return mapping.get(raw, raw.upper())
 
+    # 简繁判定需覆盖字幕组常见写法：简日双语/簡日雙語 这类标题里只出现单字“简/繁”
+    _SIMPLIFIED_HINT = r"(?:简|簡|\bchs\b|\bsc\b|\bgb(?:2312|18030|k)?\b|zh[-_]?(?:cn|sg|hans)|simplified)"
+    _TRADITIONAL_HINT = r"(?:繁|正体|正體|\bcht\b|\btc\b|\bbig5\b|zh[-_]?(?:tw|hk|mo|hant)|traditional)"
+
     @classmethod
     def _language(cls, stream: Dict[str, Any]) -> str:
         tags = stream.get("tags") or {}
         language = str(tags.get("language") or "").strip().lower()
         title = str(tags.get("title") or "").strip()
         source = f"{language} {title}".lower()
-        if re.search(r"(?:简体|简中|简体中文|\bchs\b|zh[-_]?cn|simplified)", source, re.IGNORECASE):
+        simplified = re.search(cls._SIMPLIFIED_HINT, source, re.IGNORECASE)
+        traditional = re.search(cls._TRADITIONAL_HINT, source, re.IGNORECASE)
+        if simplified and traditional:
+            return "中文"
+        if simplified:
             return "简体"
-        if re.search(r"(?:繁体|繁中|繁體|正體|\bcht\b|zh[-_]?tw|traditional)", source, re.IGNORECASE):
+        if traditional:
             return "繁体"
-        if re.search(r"(?:日语|日文|日本語|\bjpn\b|\bja\b)", source, re.IGNORECASE):
+        if re.search(r"(?:日语|日文|日本語|\bjpn?\b|\bja\b)", source, re.IGNORECASE):
             return "日语"
-        if re.search(r"(?:英语|英文|\beng\b|\ben\b)", source, re.IGNORECASE):
+        if re.search(r"(?:英语|英文|english|\beng\b|\ben\b)", source, re.IGNORECASE):
             return "英语"
+        if re.search(r"(?:韩语|韓語|korean|\bkor?\b)", source, re.IGNORECASE):
+            return "韩语"
         return cls._LANGUAGE.get(language, language.upper() if language and language != "und" else "")
 
     @classmethod
@@ -218,9 +228,13 @@ class MediaFileProbe:
         audio_codecs = cls._unique(cls._codec(item.get("codec_name"), cls._AUDIO_CODEC) for item in audios)
         audio_languages = cls._unique((cls._language(item) for item in audios), language=True)
         subtitle_languages = cls._unique((cls._language(item) for item in subtitles), language=True)
-        subtitle_profile = "".join(cls._PROFILE_TOKEN.get(item, item) for item in subtitle_languages)
-        if subtitle_profile:
-            subtitle_profile += "内封"
+        if len(subtitle_languages) > 3:
+            # 多语种（如 CR/Netflix WEB-DL）逐字拼接会产生大量 ISO 代码串，直接归为多国
+            subtitle_profile = "多国内封"
+        else:
+            subtitle_profile = "".join(cls._PROFILE_TOKEN.get(item, item) for item in subtitle_languages)
+            if subtitle_profile:
+                subtitle_profile += "内封"
         duration = round(cls._safe_float((payload.get("format") or {}).get("duration")), 3)
         fields = {
             "videoCodec": video_codec,
@@ -341,7 +355,12 @@ class MediaFileProbe:
 
     @staticmethod
     def parse_subtitle_rules(value: Any) -> List[Dict[str, Any]]:
-        """解析用户友好的“简体+繁体 => 简繁内封”精确组合规则。"""
+        """解析字幕组合规则，按行序首条命中。
+
+        - ``简体+繁体 => 简繁内封``：精确匹配语言集合；
+        - ``包含:简体+日语 => 简日内封``（或 ``含:``）：检测集合包含左侧全部语言即命中；
+        - ``>=4 => 多国字幕``：检测语言数量达到阈值即命中。
+        """
         lines = value.splitlines() if isinstance(value, str) else value if isinstance(value, list) else []
         aliases = {
             "简": "简体", "简中": "简体", "简体中文": "简体", "chs": "简体",
@@ -353,20 +372,42 @@ class MediaFileProbe:
         }
         rules: List[Dict[str, Any]] = []
         for raw in lines:
+            match_mode = "exact"
+            min_count = 0
             if isinstance(raw, dict):
                 languages = raw.get("languages") or []
                 output = str(raw.get("value") or "").strip()
+                match_mode = str(raw.get("match") or "exact")
+                min_count = MediaFileProbe._safe_int(raw.get("min_count"))
             else:
                 text = str(raw or "").strip()
                 if not text or text.startswith("#") or "=>" not in text:
                     continue
                 left, output = text.split("=>", 1)
-                languages = re.split(r"\s*[+,&，、]\s*", left.strip())
+                left = left.strip()
                 output = output.strip()
+                languages = []
+                threshold = re.match(r"^(?:语言|任意)?\s*(?:>=|≥)\s*(\d+)$", left)
+                if threshold:
+                    match_mode = "min_count"
+                    min_count = int(threshold.group(1))
+                else:
+                    contains = re.match(r"^包?含[:：]\s*(.*)$", left)
+                    if contains:
+                        match_mode = "contains"
+                        left = contains.group(1)
+                    languages = re.split(r"\s*[+,&，、]\s*", left)
+            if match_mode == "min_count":
+                if min_count >= 1 and output:
+                    rules.append({"match": "min_count", "min_count": min_count, "languages": [], "value": output[:120]})
+                continue
             canonical = [aliases.get(str(item).strip().lower(), str(item).strip()) for item in languages]
             canonical = sorted(set(item for item in canonical if item), key=lambda item: (MediaFileProbe._LANGUAGE_ORDER.get(item, 99), item))
             if canonical and output:
-                rules.append({"languages": canonical, "value": output[:120]})
+                rules.append({
+                    "match": "contains" if match_mode == "contains" else "exact",
+                    "languages": canonical, "value": output[:120],
+                })
         return rules
 
     @classmethod
@@ -374,7 +415,14 @@ class MediaFileProbe:
         detected = [item for item in str((result.get("context") or {}).get("probe_subtitle_languages") or "").split("、") if item]
         detected_set = set(detected)
         for rule in cls.parse_subtitle_rules(rules):
-            if set(rule["languages"]) == detected_set:
+            match_mode = rule.get("match") or "exact"
+            if match_mode == "min_count":
+                if detected_set and len(detected_set) >= rule.get("min_count", 0):
+                    return rule["value"]
+            elif match_mode == "contains":
+                if detected_set and set(rule["languages"]).issubset(detected_set):
+                    return rule["value"]
+            elif set(rule["languages"]) == detected_set:
                 return rule["value"]
         return ""
 

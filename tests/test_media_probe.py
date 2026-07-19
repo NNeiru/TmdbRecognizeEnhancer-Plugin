@@ -141,3 +141,72 @@ def test_sdr_is_context_only_and_does_not_fill_effect():
 
     assert "effect" not in result["fields"]
     assert result["context"]["probe_effect"] == "SDR"
+
+
+def _subtitle_payload(*tags_list):
+    return {
+        "streams": [
+            {
+                "codec_type": "video", "codec_name": "hevc",
+                "width": 1920, "height": 1080, "disposition": {"default": 1},
+            },
+            *({"codec_type": "subtitle", "codec_name": "ass", "tags": tags} for tags in tags_list),
+        ],
+        "format": {},
+    }
+
+
+def test_dual_language_track_titles_resolve_to_simplified_and_traditional():
+    probe = _probe_class()
+
+    result = probe.parse_payload(_subtitle_payload(
+        {"language": "chi", "title": "简日双语"},
+        {"language": "chi", "title": "繁日雙語"},
+    ))
+
+    assert result["context"]["probe_subtitle_languages"] == "简体、繁体"
+    assert result["context"]["probe_subtitle_profile"] == "简繁内封"
+
+
+def test_language_tag_variants_are_classified():
+    probe = _probe_class()
+
+    result = probe.parse_payload(_subtitle_payload(
+        {"language": "zh-hans"},
+        {"language": "zh-hant"},
+        {"language": "chi", "title": "GB2312"},
+        {"language": "chi", "title": "BIG5"},
+        {"language": "chi", "title": "简繁双语"},
+    ))
+
+    assert result["context"]["probe_subtitle_languages"] == "简体、繁体、中文"
+
+
+def test_subtitle_rules_support_contains_and_threshold_in_order():
+    probe = _probe_class()
+    rules = (
+        "简体+繁体+日语 => 简繁日内封\n"
+        "包含:简体+日语 => 简日内封\n"
+        ">=4 => 多国字幕"
+    )
+
+    def result_for(*languages):
+        return {"context": {"probe_subtitle_languages": "、".join(languages)}}
+
+    assert probe.map_subtitles(result_for("简体", "繁体", "日语"), rules) == "简繁日内封"
+    assert probe.map_subtitles(result_for("简体", "日语", "英语"), rules) == "简日内封"
+    assert probe.map_subtitles(result_for("中文", "英语", "GER", "SPA"), rules) == "多国字幕"
+    assert probe.map_subtitles(result_for("英语"), rules) == ""
+    assert probe.map_subtitles({"context": {}}, ">=1 => 有内封") == ""
+
+
+def test_profile_falls_back_to_multi_language_label():
+    probe = _probe_class()
+
+    result = probe.parse_payload(_subtitle_payload(
+        {"language": "eng"}, {"language": "ger"}, {"language": "fre"}, {"language": "spa"},
+    ))
+
+    assert result["context"]["probe_subtitle_profile"] == "多国内封"
+    assert "英语" in result["context"]["probe_subtitle_languages"]
+    assert len(result["context"]["probe_subtitle_languages"].split("、")) == 4

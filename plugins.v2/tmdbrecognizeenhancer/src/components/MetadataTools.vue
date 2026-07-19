@@ -591,7 +591,7 @@ onMounted(load)
               <VExpansionPanelTitle><div><div class="font-weight-medium">字幕语言映射</div><div class="text-caption text-medium-emphasis">把内封字幕轨组合映射为 customization 或 Jinja 扫描变量</div></div></VExpansionPanelTitle>
               <VExpansionPanelText><div class="subtitle-mapping-box">
                 <VSwitch v-model="config.media_probe_subtitle_to_customization" color="secondary" label="将字幕映射结果写入 customization" hide-details />
-                <VTextarea v-model="config.media_probe_subtitle_rules" label="字幕组合映射（每行一条）" rows="4" auto-grow placeholder="简体+繁体 => 简繁内封" hint="精确匹配容器内字幕语言集合；支持简体、繁体、日语、英语、韩语。" persistent-hint />
+                <VTextarea v-model="config.media_probe_subtitle_rules" label="字幕组合映射（每行一条，首条命中生效）" rows="4" auto-grow placeholder="简体+繁体 => 简繁内封" hint="默认精确匹配语言集合；「包含:简体+日语 => 简日内封」为子集匹配；「>=4 => 多国字幕」按语言数量。支持简体、繁体、中文、日语、英语、韩语。" persistent-hint />
                 <div class="text-caption text-medium-emphasis">可扫描 MKV/MP4 中独立存在的内封字幕流；烧录进画面的硬字幕没有字幕轨，ffprobe 无法判断语言。</div>
               </div></VExpansionPanelText>
             </VExpansionPanel>
