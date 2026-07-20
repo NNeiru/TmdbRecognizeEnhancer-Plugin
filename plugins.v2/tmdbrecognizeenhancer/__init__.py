@@ -74,7 +74,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.7.0-beta.30"
+    plugin_version = "0.7.0-beta.31"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -4116,6 +4116,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidates,
         )
         candidates = self._attach_context_evidence(candidates, search_title)
+        candidates = self._attach_episode_coordinate_evidence(candidates, hints)
         scored = [self._score_candidate(search_title, queries, candidate, hints) for candidate in candidates]
         excluded_scored = [
             self._score_candidate(search_title, queries, candidate, hints)
@@ -4128,6 +4129,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         ranked, duplicate_summary = self._collapse_duplicate_candidates(scored)
         ranked, shadow_count = self._suppress_shadow_season_entries(ranked, hints)
         duplicate_summary["shadow_season_count"] = shadow_count
+        ranked = self._rescore_eligible_candidates(
+            search_title, queries, candidates, ranked, hints,
+        )
+        scored.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
         ranked, decisive = self._apply_decisive_year_evidence(ranked, hints)
         ranked, shared_decisive = self._apply_shared_recognition_evidence(ranked)
         ranked, policy_decisive = self._promote_policy_candidate(
@@ -4172,6 +4177,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 candidates,
             )
             candidates = self._attach_context_evidence(candidates, search_title)
+            candidates = self._attach_episode_coordinate_evidence(candidates, hints)
             scored = [self._score_candidate(search_title, queries, candidate, hints) for candidate in candidates]
             excluded_scored = [
                 self._score_candidate(search_title, queries, candidate, hints)
@@ -4183,6 +4189,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
             ranked, duplicate_summary = self._collapse_duplicate_candidates(scored)
             ranked, shadow_count = self._suppress_shadow_season_entries(ranked, hints)
             duplicate_summary["shadow_season_count"] = shadow_count
+            ranked = self._rescore_eligible_candidates(
+                search_title, queries, candidates, ranked, hints,
+            )
+            scored.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
             ranked, decisive = self._apply_decisive_year_evidence(ranked, hints)
             ranked, shared_decisive = self._apply_shared_recognition_evidence(ranked)
             ranked, policy_decisive = self._promote_policy_candidate(
@@ -4314,6 +4324,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidates, hints
         )
         candidates = self._attach_context_evidence(candidates, title)
+        candidates = self._attach_episode_coordinate_evidence(candidates, hints)
         candidates.sort(
             key=lambda item: (
                 int(self._safe_int(item.get("id"), 0) == candidate_policy.get("preferred_id")),
@@ -4633,7 +4644,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 (hit["query_index"], hit["rank"]) for hit in item.get("_query_hits", [])
             ),
         )
-        if self._config.get("fetch_aliases"):
+        needs_coordinate_detail = bool(
+            requested_type == MediaType.TV
+            and self._safe_int(hints.get("season"), 0) > 0
+        )
+        if self._config.get("fetch_aliases") or needs_coordinate_detail:
             for candidate in ordered[: int(self._config["detail_limit"])]:
                 media_type = self._normalize_media_type(candidate.get("media_type"))
                 try:
@@ -4644,6 +4659,98 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 except Exception as err:
                     logger.debug(f"[TMDB识别增强] 获取 TMDB {candidate.get('id')} 详情失败：{err}")
         return ordered
+
+    def _attach_episode_coordinate_evidence(
+            self,
+            candidates: List[Dict[str, Any]],
+            hints: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """为前排电视剧候选补充独立于目标编集规则的季集存在性证据。"""
+        requested_season = self._safe_int(hints.get("season"), 0)
+        if requested_season <= 0:
+            return candidates
+        requested_episode = self._optional_int(hints.get("episode"))
+        detail_limit = max(1, int(self._config.get("detail_limit") or 1))
+        checked = 0
+        for candidate in candidates:
+            if self._normalize_media_type(candidate.get("media_type")) != MediaType.TV:
+                continue
+            if checked >= detail_limit:
+                break
+            checked += 1
+            tmdb_id = self._safe_int(candidate.get("id"), 0)
+            if not tmdb_id:
+                continue
+            detail = candidate if candidate.get("seasons") or candidate.get("episode_groups") else None
+            try:
+                candidate["_season_coordinate_evidence"] = self._normalizer().coordinate_evidence(
+                    tmdb_id=tmdb_id,
+                    season=requested_season,
+                    episode=requested_episode,
+                    info=detail,
+                )
+            except Exception as err:
+                logger.debug(f"[TMDB识别增强] TMDB {tmdb_id} 季集证据检查失败：{err}")
+        return candidates
+
+    def _rescore_eligible_candidates(
+            self,
+            original_title: str,
+            queries: List[str],
+            candidates: List[Dict[str, Any]],
+            ranked: List[Dict[str, Any]],
+            hints: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """候选硬过滤与重复项归并后，按剩余候选重新计算有效排名分。"""
+        surviving_keys = {
+            (str(item.get("media_type") or ""), self._safe_int(item.get("tmdb_id"), 0))
+            for item in ranked
+        }
+        raw_by_key = {
+            (
+                (media_type.value if media_type else ""),
+                self._safe_int(item.get("id"), 0),
+            ): item
+            for item in candidates
+            if (media_type := self._normalize_media_type(item.get("media_type")))
+        }
+        survivors = [
+            raw_by_key[key] for key in surviving_keys
+            if key in raw_by_key
+        ]
+        for candidate in survivors:
+            candidate.pop("_eligible_rank", None)
+        hit_groups: Dict[Tuple[int, str], List[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
+        for candidate in survivors:
+            for hit in candidate.get("_query_hits") or []:
+                group_key = (
+                    self._safe_int(hit.get("query_index"), 99),
+                    str(hit.get("source") or "tmdb"),
+                )
+                hit_groups.setdefault(group_key, []).append((candidate, hit))
+        for entries in hit_groups.values():
+            entries.sort(key=lambda value: self._safe_int(value[1].get("rank"), 99))
+            for effective_rank, (candidate, _) in enumerate(entries):
+                previous = candidate.get("_eligible_rank")
+                if previous is None or effective_rank < self._safe_int(previous, 99):
+                    candidate["_eligible_rank"] = effective_rank
+
+        rescored = {}
+        for candidate in survivors:
+            media_type = self._normalize_media_type(candidate.get("media_type"))
+            key = (
+                media_type.value if media_type else "",
+                self._safe_int(candidate.get("id"), 0),
+            )
+            rescored[key] = self._score_candidate(original_title, queries, candidate, hints)
+        for item in ranked:
+            key = (str(item.get("media_type") or ""), self._safe_int(item.get("tmdb_id"), 0))
+            updated = rescored.get(key)
+            if updated:
+                item.clear()
+                item.update(updated)
+        ranked.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
+        return ranked
 
     def _search_typed_candidates(
             self,
@@ -5230,7 +5337,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             or hit.get("source") == "moviepilot_share"
         ]
         best_rank = min((hit.get("rank", 0) for hit in tmdb_hits), default=int(self._config["candidate_limit"]))
-        rank_component = max(0.0, 100.0 - best_rank * (100.0 / max(int(self._config["candidate_limit"]), 1)))
+        eligible_rank = self._safe_int(candidate.get("_eligible_rank"), best_rank)
+        rank_component = max(
+            0.0,
+            100.0 - eligible_rank * (100.0 / max(int(self._config["candidate_limit"]), 1)),
+        )
         query_confidence, query_evidence = self._query_confidence(tmdb_hits)
         weighted = [
             (best_components["token"], float(self._config["token_weight"])),
@@ -5326,7 +5437,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
             and self._safe_int(season.get("season_number"), -1) >= 0
         }
         if requested_season and candidate_type == MediaType.TV:
-            if season_numbers:
+            coordinate_evidence = candidate.get("_season_coordinate_evidence") or {}
+            if coordinate_evidence.get("checked"):
+                season_exists = coordinate_evidence.get("season_exists")
+                if season_exists is False:
+                    score -= float(self._config["season_missing_penalty"])
+            elif season_numbers:
                 season_exists = requested_season in season_numbers
                 if not season_exists:
                     score -= float(self._config["season_missing_penalty"])
@@ -5344,6 +5460,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "vote_count": self._safe_int(candidate.get("vote_count"), 0),
             "query_index": best_query_index,
             "tmdb_rank": best_rank,
+            "eligible_rank": eligible_rank,
             "identity_names": list(dict.fromkeys(
                 normalized for value in (
                     display_name,
@@ -5376,6 +5493,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "matched_name": best_components["matched_name"],
             "exact_original": exact_original,
             "season_exists": season_exists,
+            "season_coordinate_evidence": candidate.get("_season_coordinate_evidence") or {},
             "web_discovered": bool(candidate.get("_web_discovered")),
             "shared_recognition": bool(candidate.get("_shared_recognition")),
             "web_evidence": web_evidence,

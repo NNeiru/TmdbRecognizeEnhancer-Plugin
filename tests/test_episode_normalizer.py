@@ -106,6 +106,29 @@ def test_default_absolute_episode_maps_to_production_season():
     assert (result["season"], result["episode"]) == (2, 1)
 
 
+def test_coordinate_evidence_checks_production_group_independently():
+    """默认编集缺少目标季时，可信 Production 组仍应证明该 Series 可容纳坐标。"""
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+
+    result = normalizer.coordinate_evidence(100, season=2, episode=1)
+
+    assert result["season_exists"] is True
+    assert result["episode_exists"] is True
+    assert result["source"] == "episode_group"
+    assert result["matched_group_id"] == "production"
+
+
+def test_coordinate_evidence_keeps_missing_group_episode_non_fatal():
+    """剧集组已有目标季但尚未建立最新集时，应保留季号证据而不误判缺季。"""
+    normalizer = EpisodeNormalizer(FakeTmdbApi())
+
+    result = normalizer.coordinate_evidence(100, season=2, episode=13)
+
+    assert result["season_exists"] is True
+    assert result["episode_exists"] is False
+    assert "可能尚未建立" in result["reason"]
+
+
 def test_missing_season_with_clear_absolute_episode_maps_to_target_season():
     normalizer = EpisodeNormalizer(FakeTmdbApi())
     rule = {

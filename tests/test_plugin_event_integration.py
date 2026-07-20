@@ -1400,6 +1400,120 @@ def test_later_tv_season_year_does_not_override_series_first_air_year(monkeypatc
     assert decisive is None
 
 
+def test_group_coordinate_evidence_cancels_default_missing_season_penalty(monkeypatch):
+    """候选默认编集缺季但可信剧集组存在时，不应因目标编集设置受到缺季扣分。"""
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "fetch_aliases": False,
+        "season_missing_penalty": 20,
+    })
+    candidate = {
+        "id": 106449,
+        "media_type": module.MediaType.TV,
+        "name": "Example Anime",
+        "first_air_date": "2020-01-01",
+        "seasons": [{"season_number": 1, "episode_count": 182}],
+        "_season_coordinate_evidence": {
+            "checked": True,
+            "season_exists": True,
+            "episode_exists": True,
+            "source": "episode_group",
+            "matched_group_id": "production",
+        },
+        "_query_hits": [{
+            "query": "Example Anime", "query_index": 0, "rank": 0,
+            "result_count": 1, "source": "tmdb_tv",
+        }],
+    }
+
+    scored = plugin._score_candidate(
+        "Example Anime", ["Example Anime"], candidate,
+        {"media_type": module.MediaType.TV, "season": 5, "episode": 7},
+    )
+
+    assert scored["season_exists"] is True
+    assert scored["season_coordinate_evidence"]["source"] == "episode_group"
+    assert scored["score"] == 100.0
+
+
+def test_coordinate_evidence_does_not_read_episode_normalizer_rule(monkeypatch):
+    """候选季集校验不得依赖用户最终选择默认编集还是剧集组。"""
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({"detail_limit": 3})
+    plugin._read_episode_rules = Mock(side_effect=AssertionError("不应读取集数偏移规则"))
+    plugin._episode_normalizer = SimpleNamespace(
+        coordinate_evidence=Mock(return_value={
+            "checked": True,
+            "season_exists": True,
+            "episode_exists": True,
+            "source": "episode_group",
+        }),
+    )
+    candidates = [{
+        "id": 106449,
+        "media_type": module.MediaType.TV,
+        "seasons": [{"season_number": 1, "episode_count": 182}],
+    }]
+
+    result = plugin._attach_episode_coordinate_evidence(
+        candidates, {"season": 5, "episode": 7},
+    )
+
+    assert result[0]["_season_coordinate_evidence"]["season_exists"] is True
+    plugin._episode_normalizer.coordinate_evidence.assert_called_once()
+
+
+def test_surviving_candidate_is_rescored_with_effective_rank(monkeypatch):
+    """前排候选被硬过滤后，剩余候选应重算排名分但保留原查询结果数量。"""
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "candidate_limit": 8,
+        "rank_weight": 40,
+        "query_confidence_weight": 20,
+        "token_weight": 20,
+        "similarity_weight": 10,
+        "prefix_weight": 10,
+        "anchor_weight": 0,
+    })
+    removed = {
+        "id": 1,
+        "media_type": module.MediaType.TV,
+        "name": "Removed",
+        "_query_hits": [{
+            "query": "Example", "query_index": 0, "rank": 0,
+            "result_count": 2, "source": "tmdb_tv",
+        }],
+    }
+    survivor = {
+        "id": 2,
+        "media_type": module.MediaType.TV,
+        "name": "Example",
+        "_query_hits": [{
+            "query": "Example", "query_index": 0, "rank": 1,
+            "result_count": 2, "source": "tmdb_tv",
+        }],
+    }
+    initially_scored = plugin._score_candidate(
+        "Example", ["Example"], survivor, {"media_type": module.MediaType.TV},
+    )
+    ranked = [dict(initially_scored)]
+
+    result = plugin._rescore_eligible_candidates(
+        "Example", ["Example"], [removed, survivor], ranked,
+        {"media_type": module.MediaType.TV},
+    )
+
+    assert result[0]["tmdb_rank"] == 1
+    assert result[0]["eligible_rank"] == 0
+    assert result[0]["components"]["rank"] == 100.0
+    assert result[0]["query_evidence"]["result_count"] == 2
+    assert result[0]["query_evidence"]["unique"] is False
+    assert result[0]["score"] > initially_scored["score"]
+
+
 def test_exact_year_can_decide_between_same_title_adaptations(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

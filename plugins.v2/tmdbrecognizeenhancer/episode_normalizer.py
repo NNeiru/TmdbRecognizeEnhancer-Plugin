@@ -20,6 +20,8 @@ class EpisodeNormalizer:
         r"特别|特別|番外|特典|未放送|总集|總集|総集|特别篇|特別編|スペシャル|外伝|短編"
     )
     TAIL_EXTENSION_LIMIT = 4
+    COORDINATE_GROUP_LIMIT = 6
+    COORDINATE_GROUP_MIN_PRIORITY = 60
 
     def __init__(self, tmdb_api: Any):
         self._tmdb = tmdb_api
@@ -77,6 +79,126 @@ class EpisodeNormalizer:
         """仅当默认编集不是正常多季结构时，返回主流多季剧集组。"""
         recommendation = self.recommend_target(tmdb_id)
         return recommendation.get("group") if recommendation.get("target_type") == "group" else None
+
+    def coordinate_evidence(
+            self,
+            tmdb_id: int,
+            season: int,
+            episode: Optional[int] = None,
+            info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        检查默认编集或可信剧集组能否解释来源季集坐标。
+
+        此判断只服务于 Series 候选可信度，与用户最终选择的目标编集无关。
+
+        :param tmdb_id: TMDB 电视剧 ID
+        :param season: 来源标题解析出的季号
+        :param episode: 来源标题解析出的集号
+        :param info: 可选的 TMDB 详情，用于复用候选检索已经取得的数据
+        :return: 默认编集与可信剧集组的季集存在性证据
+        """
+        requested_season = self._safe_int(season, 0)
+        requested_episode = self._optional_int(episode)
+        if requested_season <= 0:
+            return {
+                "checked": False,
+                "season_exists": None,
+                "episode_exists": None,
+                "source": "not-applicable",
+                "reason": "标题没有可校验的正季坐标",
+            }
+
+        series_info = deepcopy(info) if isinstance(info, dict) and info else self._series_info(tmdb_id)
+        default_seasons = {
+            self._safe_int(item.get("season_number"), -1): self._safe_int(item.get("episode_count"), 0)
+            for item in series_info.get("seasons") or []
+            if isinstance(item, dict) and self._safe_int(item.get("season_number"), -1) >= 0
+        }
+        default_season_exists = requested_season in default_seasons
+        default_episode_count = default_seasons.get(requested_season, 0)
+        default_episode_exists = None
+        if requested_episode is not None and default_season_exists and default_episode_count > 0:
+            default_episode_exists = requested_episode <= default_episode_count
+        if default_season_exists and (requested_episode is None or default_episode_exists is True):
+            return {
+                "checked": True,
+                "season_exists": True,
+                "episode_exists": default_episode_exists,
+                "source": "default",
+                "matched_group_id": "",
+                "matched_group_name": "TMDB 默认编集",
+                "checked_group_count": 0,
+                "reason": "TMDB 默认编集包含来源季集坐标",
+            }
+
+        checked_groups = 0
+        season_match: Optional[Dict[str, Any]] = None
+        metadata = sorted(
+            self._group_metadata(series_info),
+            key=self._coordinate_group_priority,
+            reverse=True,
+        )
+        for group in metadata:
+            priority = self._coordinate_group_priority(group)
+            if priority < self.COORDINATE_GROUP_MIN_PRIORITY:
+                continue
+            group_id = str(group.get("id") or "").strip()
+            if not group_id:
+                continue
+            try:
+                layout = self._group_layout(tmdb_id, group_id)
+            except Exception:
+                continue
+            checked_groups += 1
+            coordinates = layout.get("by_coord") or {}
+            group_season_exists = any(
+                self._safe_int(item.get("season"), -1) == requested_season
+                and not item.get("is_special")
+                for item in layout.get("all_entries") or []
+            )
+            if not group_season_exists:
+                if checked_groups >= self.COORDINATE_GROUP_LIMIT:
+                    break
+                continue
+            evidence = {
+                "checked": True,
+                "season_exists": True,
+                "episode_exists": (
+                    (requested_season, requested_episode) in coordinates
+                    if requested_episode is not None else None
+                ),
+                "source": "episode_group",
+                "matched_group_id": group_id,
+                "matched_group_name": group.get("name") or "未命名剧集组",
+                "matched_group_type": self._safe_int(group.get("type"), 0),
+                "checked_group_count": checked_groups,
+                "reason": "可信 TMDB 剧集组包含来源季集坐标",
+            }
+            if evidence["episode_exists"] is True or requested_episode is None:
+                return evidence
+            season_match = season_match or evidence
+            if checked_groups >= self.COORDINATE_GROUP_LIMIT:
+                break
+
+        if season_match:
+            season_match["checked_group_count"] = checked_groups
+            season_match["reason"] = "可信 TMDB 剧集组包含来源季号，但目标集可能尚未建立"
+            return season_match
+        return {
+            "checked": True,
+            "season_exists": default_season_exists,
+            "episode_exists": default_episode_exists,
+            "source": "default" if default_season_exists else "none",
+            "matched_group_id": "",
+            "matched_group_name": "TMDB 默认编集" if default_season_exists else "",
+            "checked_group_count": checked_groups,
+            "reason": (
+                "TMDB 默认编集包含来源季号，但目标集可能尚未建立"
+                if default_season_exists else
+                "默认编集与可信剧集组均未发现来源季号"
+            ),
+        }
 
     def recommend_target(self, tmdb_id: int) -> Dict[str, Any]:
         """在默认编集与剧集组之间选择更符合主流多季分配的目标。"""
@@ -655,6 +777,21 @@ class EpisodeNormalizer:
         missing = max(0, default_count - cls._safe_int(profile.get("episode_count"), 0))
         if missing > cls.TAIL_EXTENSION_LIMIT:
             score -= min(35, (missing - cls.TAIL_EXTENSION_LIMIT) * 4)
+        return score
+
+    @classmethod
+    def _coordinate_group_priority(cls, group: Dict[str, Any]) -> int:
+        """按组类型和名称筛选适合证明正季坐标的剧集组。"""
+        group_type = cls._safe_int(group.get("type"), 0)
+        name = str(group.get("name") or "").casefold()
+        score = {6: 100, 1: 72, 7: 64, 2: 10}.get(group_type, 30)
+        if any(token in name for token in ("season", "production", "制片", "制作", "シーズン", "季")):
+            score += 24
+        if any(token in name for token in (
+                "absolute", "netflix", "disney", "crunchyroll", "broadcast",
+                "air date", "dvd", "blu-ray", "stream", "平台", "放送顺", "放送順",
+        )):
+            score -= 45
         return score
 
     @staticmethod
