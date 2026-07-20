@@ -5,7 +5,7 @@
 ## 运行要求
 
 - MoviePilot V2 `>= 2.13.0`
-- 插件版本：`0.7.0-beta.20`
+- 插件版本：`0.7.0-beta.21`
 - 集数偏移需要 MoviePilot 开启“识别插件优先”
 - Emby 剧集组联动需要 MP 已配置 Emby，并在 Emby 安装支持 `TmdbEg` 的 StrmAssistant
 
