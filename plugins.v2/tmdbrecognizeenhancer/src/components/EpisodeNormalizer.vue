@@ -1164,8 +1164,8 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.normalizer-card { border-color: rgba(var(--v-theme-on-surface), .1); }
-.submodule-nav { border: 1px solid rgba(var(--v-theme-primary), .12); overflow: hidden; }
+.normalizer-card { border-color: rgba(var(--v-theme-on-surface), .1); border-radius: 14px; }
+.submodule-nav { border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 12px; overflow: hidden; background: rgba(var(--v-theme-on-surface), .018); }
 .submodule-nav :deep(.v-tab) { min-height: 52px; }
 .episode-normalizer :deep(.v-card-title),
 .episode-normalizer :deep(.v-card-subtitle),

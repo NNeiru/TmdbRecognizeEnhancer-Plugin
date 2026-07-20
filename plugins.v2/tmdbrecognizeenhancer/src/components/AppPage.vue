@@ -480,16 +480,22 @@ onMounted(loadStatus)
 .hero-glow-a { width: 220px; height: 220px; right: 8%; top: -120px; }
 .hero-glow-b { width: 150px; height: 150px; left: 30%; bottom: -110px; }
 .page-body { padding: 18px 16px 28px; }
-.metric-card, .workspace-card, .history-card, .future-card { border-color: rgba(var(--v-theme-on-surface), .1); }
+.metric-card, .workspace-card, .history-card, .future-card { border-color: rgba(var(--v-theme-on-surface), .1); border-radius: 14px; }
 .metric-card { height: 100%; background: linear-gradient(145deg, rgba(var(--v-theme-surface),1), rgba(var(--v-theme-primary),.035)); }
-.master-switch { background: linear-gradient(120deg, rgba(var(--v-theme-primary),.055), rgba(var(--v-theme-surface),1)); }
+.master-switch { border-radius: 14px; background: linear-gradient(120deg, rgba(var(--v-theme-primary),.055), rgba(var(--v-theme-surface),1)); }
 .module-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.module-card { min-width: 0; }
+.module-card { min-width: 0; height: 100%; border-radius: 14px; background: rgb(var(--v-theme-surface)); }
 .status-line { display: flex; justify-content: space-between; gap: 14px; margin-top: 12px; color: rgba(var(--v-theme-on-surface),.68); font-size: .86rem; }
 .status-line strong { color: rgb(var(--v-theme-on-surface)); text-align: right; }
 .workspace-card { overflow: visible; }
+.workspace-card > :deep(.v-tabs) { border-radius: 14px 14px 0 0; background: rgba(var(--v-theme-on-surface), .018); }
 .workspace-panels, .workspace-panel { width: 100%; }
 .tab-content { min-height: 440px; padding: 26px; }
+.workspace-panel :deep(.v-card--variant-outlined),
+.workspace-panel :deep(.v-card--variant-flat.v-card--border) { border-color: rgba(var(--v-theme-on-surface), .1); border-radius: 14px; box-shadow: none; }
+.workspace-panel :deep(.v-expansion-panels) { border-radius: 14px; overflow: hidden; }
+.workspace-panel :deep(.v-expansion-panel-title) { min-height: 60px; }
+.workspace-panel :deep(.v-field) { border-radius: 10px; }
 .flow-step { position: relative; display: grid; grid-template-columns: 28px 38px 1fr; gap: 14px; align-items: center; margin-bottom: 22px; }
 .flow-step:not(:last-child)::after { content: ''; position: absolute; left: 46px; top: 42px; width: 1px; height: 30px; background: rgba(var(--v-theme-primary),.25); }
 .flow-index { color: rgba(var(--v-theme-on-surface),.5); font-size: .8rem; font-weight: 700; }

@@ -156,10 +156,10 @@ const findings = computed(() => {
 </template>
 
 <style scoped>
-.diagnostic-header { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
+.diagnostic-header { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; min-height: 68px; padding: 12px 14px; border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 14px; background: rgba(var(--v-theme-on-surface), .018); }
 .interval-select { flex: 0 0 110px; }
 .live-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-.live-metric { min-width: 0; padding: 14px 16px 9px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; background: rgba(var(--v-theme-surface-variant), .2); }
+.live-metric { min-width: 0; padding: 14px 16px 9px; border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 14px; background: rgba(var(--v-theme-surface-variant), .16); }
 .live-metric span { display: block; color: rgba(var(--v-theme-on-surface), .62); font-size: .78rem; }
 .live-metric strong { display: block; margin-top: 2px; font-size: 1.15rem; }
 .live-metric svg { display: block; width: 100%; height: 34px; margin-top: 4px; overflow: visible; }

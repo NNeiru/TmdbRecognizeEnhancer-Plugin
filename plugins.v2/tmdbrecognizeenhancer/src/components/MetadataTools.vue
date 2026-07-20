@@ -1178,10 +1178,10 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .overlay-preview-form { display: grid; gap: 14px; }
 .overlay-preview-actions { display: flex; align-items: center; min-height: 38px; }
 .module-control-card, .workspace-card { background: rgb(var(--v-theme-surface)); box-shadow: none !important; }
-.module-control-card { border-radius: 12px !important; }
+.module-control-card { border-radius: 14px !important; }
 .module-control-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 22px; padding-block: 12px !important; }
 .module-status-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
-.workspace-card { border-radius: 12px !important; }
+.workspace-card { border-radius: 14px !important; }
 .probe-workspace { display: grid; grid-template-columns: minmax(360px, .86fr) minmax(480px, 1.14fr); gap: 16px; align-items: start; }
 .probe-strategy-card, .probe-trial-card { min-width: 0; }
 .strm-page { display: grid; gap: 14px; }

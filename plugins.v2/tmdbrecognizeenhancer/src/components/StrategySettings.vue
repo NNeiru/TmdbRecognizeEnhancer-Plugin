@@ -14,7 +14,7 @@ const config = computed({
 
 const weightTotal = computed(() => [
   'token_weight', 'similarity_weight', 'prefix_weight', 'rank_weight', 'query_confidence_weight', 'anchor_weight', 'year_weight', 'type_weight',
-  'seasonal_evidence_weight', 'recognition_memory_weight',
+  'release_group_type_weight', 'seasonal_evidence_weight', 'recognition_memory_weight',
 ].reduce((sum, key) => sum + Number(config.value[key] || 0), 0))
 
 const tmdbFirstMode = computed(() => config.value.recognition_mode === 'tmdb_first')
@@ -71,39 +71,65 @@ function applyBalancedPreset() {
       </VCardText>
     </VCard>
 
-    <VCard variant="outlined" class="setting-card mb-4">
+    <VCard variant="outlined" class="setting-card main-strategy-card mb-4">
       <VCardItem>
         <template #prepend><VIcon icon="mdi-text-search" color="primary" /></template>
-        <VCardTitle>标题与候选信息</VCardTitle>
-        <VCardSubtitle>决定提交给 TMDB 的标题以及用于核验候选的信息</VCardSubtitle>
-      </VCardItem>
-      <VCardText class="toggle-grid">
-        <div class="toggle-item">
-          <div><strong>优先使用 MP 解析标题</strong><small>复用识别词和解析器处理后的主体名称</small></div>
-          <VSwitch v-model="config.prefer_parsed_title" color="primary" hide-details />
-        </div>
-        <div class="toggle-item">
-          <div><strong>使用年份提示</strong><small>标题带年份时参与候选筛选与评分</small></div>
-          <VSwitch v-model="config.use_year_hint" color="primary" hide-details />
-        </div>
-        <div class="toggle-item">
-          <div><strong>原标题交叉验证</strong><small>确认降级结果仍与未缩减标题相关</small></div>
-          <VSwitch v-model="config.use_original_title_evidence" color="primary" hide-details />
-        </div>
-        <div class="toggle-item">
-          <div><strong>拉取别名与译名</strong><small>{{ tmdbFirstMode ? '用于展示和诊断，不改变首结果评分' : '用于标题、译名和罗马音交叉验证' }}</small></div>
-          <VSwitch v-model="config.fetch_aliases" color="primary" hide-details />
-        </div>
-      </VCardText>
-    </VCard>
-
-    <VCard variant="outlined" class="setting-card mb-4">
-      <VCardItem>
-        <template #prepend><VIcon icon="mdi-compass-rose" color="secondary" /></template>
-        <VCardTitle>上下文辅助</VCardTitle>
-        <VCardSubtitle>只在搜索已经返回对应候选时形成额外证据</VCardSubtitle>
+        <VCardTitle>识别依据与搜索策略</VCardTitle>
+        <VCardSubtitle>集中设置标题来源、降级搜索和辅助证据</VCardSubtitle>
       </VCardItem>
       <VCardText>
+        <div class="strategy-section">
+          <div class="section-label"><VIcon icon="mdi-format-title" size="18" /><div><strong>标题与候选信息</strong><small>决定提交给 TMDB 的标题和候选核验范围</small></div></div>
+          <div class="toggle-grid">
+            <div class="toggle-item">
+              <div><strong>优先使用 MP 解析标题</strong><small>复用识别词和解析器处理后的主体名称</small></div>
+              <VSwitch v-model="config.prefer_parsed_title" color="primary" hide-details />
+            </div>
+            <div class="toggle-item">
+              <div><strong>使用年份提示</strong><small>标题带年份时参与候选筛选与评分</small></div>
+              <VSwitch v-model="config.use_year_hint" color="primary" hide-details />
+            </div>
+            <div class="toggle-item">
+              <div><strong>原标题交叉验证</strong><small>确认降级结果仍与未缩减标题相关</small></div>
+              <VSwitch v-model="config.use_original_title_evidence" color="primary" hide-details />
+            </div>
+            <div class="toggle-item">
+              <div><strong>拉取别名与译名</strong><small>{{ tmdbFirstMode ? '用于展示和诊断，不改变首结果评分' : '用于标题、译名和罗马音交叉验证' }}</small></div>
+              <VSwitch v-model="config.fetch_aliases" color="primary" hide-details />
+            </div>
+          </div>
+        </div>
+
+        <template v-if="!tmdbFirstMode">
+          <VDivider class="section-divider" />
+          <div class="strategy-section">
+            <div class="section-label"><VIcon icon="mdi-source-branch" size="18" color="warning" /><div><strong>标题降级与外部验证</strong><small>完整标题无结果时依次尝试，候选仍需通过原标题关联检查</small></div></div>
+            <div class="toggle-grid strategy-fallback-grid">
+              <div class="toggle-item"><div><strong>主体名称降级</strong><small>例如 Mushoku Tensei: … → Mushoku Tensei</small></div><VSwitch v-model="config.main_title_fallback" color="primary" hide-details /></div>
+              <div class="toggle-item"><div><strong>逐词缩短</strong><small>每次缩短仍须通过原标题锚点验证</small></div><VSwitch v-model="config.progressive_fallback" color="warning" hide-details /></div>
+              <div class="toggle-item"><div><strong>搜索引擎交叉验证</strong><small>只接受指向具体 TMDB 条目的直链证据</small></div><VSwitch v-model="config.web_search_fallback" color="warning" hide-details /></div>
+            </div>
+            <VExpandTransition>
+              <div v-if="config.web_search_fallback" class="web-fallback-box mt-3">
+                <VAlert type="warning" variant="tonal" density="compact" class="mb-3">自动模式固定使用 DuckDuckGo；只有 TMDB 直链与原标题或候选别名共现时才形成证据。</VAlert>
+                <VRow dense>
+                  <VCol cols="12" md="4"><VSelect v-model="config.web_search_engine" :items="[
+                    { title: '自动选择', value: 'auto' }, { title: 'DuckDuckGo', value: 'duckduckgo' },
+                    { title: 'Google', value: 'google' }, { title: 'Brave', value: 'brave' },
+                    { title: 'Yahoo', value: 'yahoo' }, { title: 'Yandex', value: 'yandex' }, { title: 'Mojeek', value: 'mojeek' },
+                  ]" density="compact" label="搜索引擎" hide-details /></VCol>
+                  <VCol cols="6" md="2"><VTextField v-model.number="config.web_search_max_results" density="compact" type="number" min="3" max="15" label="最多结果" hide-details /></VCol>
+                  <VCol cols="6" md="2"><VTextField v-model.number="config.web_search_timeout" density="compact" type="number" min="5" max="30" label="超时" suffix="秒" hide-details /></VCol>
+                  <VCol cols="12" md="4"><VTextField v-model.number="config.web_search_min_evidence" density="compact" type="number" min="50" max="100" label="最低证据分" hint="建议不低于 78" persistent-hint /></VCol>
+                </VRow>
+              </div>
+            </VExpandTransition>
+          </div>
+        </template>
+
+        <VDivider class="section-divider" />
+        <div class="strategy-section">
+          <div class="section-label"><VIcon icon="mdi-compass-rose" size="18" color="secondary" /><div><strong>候选辅助证据</strong><small>只对搜索已经返回的候选提供偏好，不会凭空创建 TMDB 结果</small></div></div>
         <div class="evidence-grid">
           <div class="evidence-box">
             <div class="evidence-head">
@@ -129,6 +155,15 @@ function applyBalancedPreset() {
               <VCol cols="6"><VTextField v-model.number="config.recognition_memory_ttl_days" density="compact" hide-details type="number" min="1" max="90" label="保存时间" suffix="天" :disabled="!config.recognition_memory_enabled" /></VCol>
             </VRow>
           </div>
+          <div class="evidence-box">
+            <div class="evidence-head">
+              <div><strong>制作组辅助验证</strong><small>根据已分类字幕组判断动画或真人倾向</small></div>
+              <VSwitch v-model="config.release_group_assist_enabled" color="success" hide-details />
+            </div>
+            <div class="evidence-note">只作为候选偏好，不替代标题识别；制作组未分类时不参与。</div>
+            <div v-if="!tmdbFirstMode" class="compact-slider"><span>影响强度</span><VSlider v-model="config.release_group_type_weight" :min="0" :max="30" :step="1" color="success" hide-details :disabled="!config.release_group_assist_enabled" /><strong>{{ config.release_group_type_weight }}</strong></div>
+          </div>
+        </div>
         </div>
       </VCardText>
     </VCard>
@@ -162,34 +197,6 @@ function applyBalancedPreset() {
             <VCol cols="6" md="3"><VTextField v-model.number="config.candidate_limit" density="compact" type="number" min="1" max="20" label="每词候选上限" /></VCol>
             <VCol cols="6" md="3"><VTextField v-model.number="config.detail_limit" density="compact" type="number" min="0" max="15" label="详情拉取上限" /></VCol>
           </VRow>
-        </VExpansionPanelText>
-      </VExpansionPanel>
-
-      <VExpansionPanel v-if="!tmdbFirstMode" value="fallback">
-        <VExpansionPanelTitle>
-          <div class="panel-title"><VIcon icon="mdi-source-branch" color="warning" /><div><strong>标题降级与外部验证</strong><small>主体降级、逐词缩短和搜索引擎兜底</small></div></div>
-        </VExpansionPanelTitle>
-        <VExpansionPanelText>
-          <div class="toggle-grid compact-toggles">
-            <div class="toggle-item"><div><strong>主体名称降级</strong><small>例如 Mushoku Tensei: … → Mushoku Tensei</small></div><VSwitch v-model="config.main_title_fallback" color="primary" hide-details /></div>
-            <div class="toggle-item"><div><strong>逐词缩短</strong><small>实验性；每次缩短仍须通过原标题锚点</small></div><VSwitch v-model="config.progressive_fallback" color="warning" hide-details /></div>
-            <div class="toggle-item"><div><strong>搜索引擎交叉验证</strong><small>只接受指向具体 TMDB 条目的直链证据</small></div><VSwitch v-model="config.web_search_fallback" color="warning" hide-details /></div>
-          </div>
-          <VExpandTransition>
-            <div v-if="config.web_search_fallback" class="web-fallback-box mt-4">
-              <VAlert type="warning" variant="tonal" density="compact" class="mb-3">自动模式固定使用 DuckDuckGo；只有 TMDB 直链与原标题或候选别名共现时才形成证据。</VAlert>
-              <VRow dense>
-                <VCol cols="12" md="4"><VSelect v-model="config.web_search_engine" :items="[
-                  { title: '自动选择', value: 'auto' }, { title: 'DuckDuckGo', value: 'duckduckgo' },
-                  { title: 'Google', value: 'google' }, { title: 'Brave', value: 'brave' },
-                  { title: 'Yahoo', value: 'yahoo' }, { title: 'Yandex', value: 'yandex' }, { title: 'Mojeek', value: 'mojeek' },
-                ]" density="compact" label="搜索引擎" /></VCol>
-                <VCol cols="6" md="2"><VTextField v-model.number="config.web_search_max_results" density="compact" type="number" min="3" max="15" label="最多结果" /></VCol>
-                <VCol cols="6" md="2"><VTextField v-model.number="config.web_search_timeout" density="compact" type="number" min="5" max="30" label="超时" suffix="秒" /></VCol>
-                <VCol cols="12" md="4"><VTextField v-model.number="config.web_search_min_evidence" density="compact" type="number" min="50" max="100" label="最低证据分" hint="建议不低于 78" persistent-hint /></VCol>
-              </VRow>
-            </div>
-          </VExpandTransition>
         </VExpansionPanelText>
       </VExpansionPanel>
 
@@ -238,17 +245,26 @@ function applyBalancedPreset() {
 .mode-toggle { flex: 0 0 auto; border-radius: 10px; overflow: hidden; }
 .mode-summary { margin-bottom: 16px; }
 .setting-card { border-color: rgba(var(--v-theme-on-surface), .1); border-radius: 14px; }
+.main-strategy-card { overflow: hidden; }
 .module-switches { display: flex; flex-wrap: wrap; gap: 6px 28px; }
 .module-switches :deep(.v-input) { flex: 0 0 auto; }
+.strategy-section { min-width: 0; }
+.section-label { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.section-label > div { min-width: 0; }
+.section-label strong { display: block; font-size: .92rem; }
+.section-label small { display: block; margin-top: 2px; color: rgba(var(--v-theme-on-surface), .56); font-size: .75rem; line-height: 1.35; }
+.section-divider { margin: 18px 0; opacity: .68; }
 .toggle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.strategy-fallback-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .toggle-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 72px; padding: 10px 14px; border-radius: 12px; background: rgba(var(--v-theme-on-surface), .035); }
 .toggle-item > div, .evidence-head > div { min-width: 0; }
 .toggle-item strong, .evidence-head strong { display: block; font-size: .9rem; }
 .toggle-item small, .evidence-head small, .panel-title small { display: block; margin-top: 3px; color: rgba(var(--v-theme-on-surface), .58); font-size: .75rem; line-height: 1.35; }
 .toggle-item :deep(.v-input), .evidence-head :deep(.v-input) { flex: 0 0 auto; }
-.evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.evidence-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .evidence-box { padding: 15px; border: 1px solid rgba(var(--v-theme-primary), .1); border-radius: 13px; background: rgba(var(--v-theme-primary), .025); }
 .evidence-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; margin-bottom: 12px; }
+.evidence-note { min-height: 42px; color: rgba(var(--v-theme-on-surface), .58); font-size: .76rem; line-height: 1.45; }
 .compact-slider { display: grid; grid-template-columns: 66px minmax(80px, 1fr) 30px; align-items: center; gap: 8px; margin-top: 12px; color: rgba(var(--v-theme-on-surface), .67); font-size: .78rem; }
 .compact-slider strong { color: rgb(var(--v-theme-primary)); text-align: right; font-variant-numeric: tabular-nums; }
 .advanced-panels { border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 14px; overflow: hidden; }
@@ -259,7 +275,6 @@ function applyBalancedPreset() {
 .panel-title strong { display: block; font-size: .92rem; }
 .slider-label { display: flex; justify-content: space-between; margin-bottom: -6px; color: rgba(var(--v-theme-on-surface), .72); }
 .slider-label strong { color: rgb(var(--v-theme-primary)); font-variant-numeric: tabular-nums; }
-.compact-toggles { margin-bottom: 2px; }
 .web-fallback-box { padding: 14px; border: 1px solid rgba(var(--v-theme-warning), .22); border-radius: 13px; background: rgba(var(--v-theme-warning), .04); }
 .panel-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; color: rgba(var(--v-theme-on-surface), .62); font-size: .82rem; }
 .weight-box { padding: 10px 12px; border-radius: 11px; background: rgba(var(--v-theme-primary), .04); }
@@ -269,7 +284,10 @@ function applyBalancedPreset() {
   .strategy-hero { align-items: stretch; flex-direction: column; }
   .mode-toggle { width: 100%; }
   .mode-toggle :deep(.v-btn) { flex: 1 1 50%; }
-  .toggle-grid, .evidence-grid { grid-template-columns: 1fr; }
+  .toggle-grid, .strategy-fallback-grid, .evidence-grid { grid-template-columns: 1fr; }
   .panel-toolbar { align-items: flex-start; flex-direction: column; }
+}
+@media (min-width: 761px) and (max-width: 1180px) {
+  .strategy-fallback-grid, .evidence-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>
