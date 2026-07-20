@@ -91,7 +91,6 @@ def _push(sync, target="/mp/media/Anime/E01.mkv", payload=None):
             "servers": ["主 Emby"],
             "path_mappings": [{
                 "server": "主 Emby", "source": "/mp/media", "target": "/emby/library",
-                "target_kind": "strm",
             }],
         },
     )
@@ -104,10 +103,10 @@ def test_push_uses_mapped_path_and_pro_contract():
 
     result = outcome["results"]["主 Emby"]
     assert result["status"] == "synced"
-    assert result["mapped_path"] == "/emby/library/Anime/E01.strm"
+    assert result["mapped_path"] == "/emby/library/Anime/E01.mkv"
     url, params, body = state["calls"][0]
     assert url == "http://emby/emby/Items/SyncMediaInfo"
-    assert params == {"Path": "/emby/library/Anime/E01.strm", "api_key": "secret"}
+    assert params == {"Path": "/emby/library/Anime/E01.mkv", "api_key": "secret"}
     assert body == _payload()
 
 

@@ -33,36 +33,6 @@ def test_path_mapping_prefers_server_specific_longest_prefix():
     assert mapped == "/library/series/Anime/Season 02/E01.mkv"
 
 
-def test_strm_path_mapping_targets_emby_item_and_replaces_media_extension():
-    mapped = EmbyEpisodeGroupSynchronizer.map_path(
-        "/pilipili/动画/相反的你和我 (2026)/Season 01/E03.mkv",
-        "Genshin",
-        [{
-            "server": "Genshin",
-            "source": "/pilipili",
-            "target": "/mnt2/strm/pilipili2",
-            "target_kind": "strm",
-        }],
-    )
-
-    assert mapped == "/mnt2/strm/pilipili2/动画/相反的你和我 (2026)/Season 01/E03.strm"
-
-
-def test_regular_media_path_mapping_preserves_media_extension():
-    mapped = EmbyEpisodeGroupSynchronizer.map_path(
-        "/pilipili/动画/A/E03.mp4",
-        "Genshin",
-        [{
-            "server": "Genshin",
-            "source": "/pilipili",
-            "target": "/mnt/media",
-            "target_kind": "media",
-        }],
-    )
-
-    assert mapped == "/mnt/media/动画/A/E03.mp4"
-
-
 def test_multiple_tmdb_series_requires_unique_path_match():
     items = [
         {"Id": "one", "Name": "Anime", "Path": "/library/a/Anime"},
