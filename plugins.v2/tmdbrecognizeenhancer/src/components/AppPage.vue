@@ -299,7 +299,7 @@ onMounted(loadStatus)
                 </VCard>
                 <VCard variant="outlined" class="module-card">
                   <VCardItem><template #prepend><VAvatar color="purple" variant="tonal"><VIcon icon="mdi-waveform" /></VAvatar></template><VCardTitle>媒体信息识别</VCardTitle><VCardSubtitle>{{ modules.media_probe?.status || (config.media_probe_enabled ? '已启用' : '已停用') }}</VCardSubtitle></VCardItem>
-                  <VCardText><VSwitch v-model="config.media_probe_enabled" color="purple" label="启用模块" hide-details /><div class="status-line"><span>扫描字段</span><strong>{{ config.media_probe_fields?.length || 0 }} 项</strong></div><div class="status-line"><span>作用阶段</span><strong>整理前 / 命名渲染前</strong></div></VCardText>
+                  <VCardText><VSwitch v-model="config.media_probe_enabled" color="purple" label="启用模块" hide-details /><div class="status-line"><span>扫描字段</span><strong>{{ config.media_probe_fields?.length || 0 }} 项</strong></div><div class="status-line"><span>作用阶段</span><strong>整理前 / 命名渲染前</strong></div><div class="status-line"><span>神医 Pro 联动</span><strong>{{ modules.strm_media_info_sync?.status || '已停用' }}</strong></div></VCardText>
                 </VCard>
                 <VCard variant="outlined" class="module-card">
                   <VCardItem><template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-code-braces" /></VAvatar></template><VCardTitle>自定义命名字段</VCardTitle><VCardSubtitle>{{ modules.rename_fields?.status || '状态未知' }}</VCardSubtitle></VCardItem>

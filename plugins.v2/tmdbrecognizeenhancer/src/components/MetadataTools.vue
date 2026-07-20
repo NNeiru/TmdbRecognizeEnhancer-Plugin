@@ -27,6 +27,13 @@ const probePath = ref('')
 const probeResult = ref(null)
 const probeForce = ref(true)
 const probeCacheNotice = ref('')
+const strmSync = ref({
+  available: false, enabled: false, active: false, worker_running: false,
+  servers: [], jobs: [], counts: { pending: 0, completed: 0, attention: 0 },
+  config: { enabled: false, servers: [], initial_delay_seconds: 20, retry_seconds: 30, max_wait_minutes: 30, path_mappings: [] },
+})
+const strmTargetPath = ref('')
+const strmPreview = ref(null)
 const dialog = ref(false)
 const form = ref({ id: '', source_rule_id: '', field: 'videoBit', pattern: '', value: '{match}', action: 'override', enabled: true, priority: 100, label: '' })
 const previewTitle = ref('[Group] Example.S01E01.1080p.WEB-DL.H265.10bit.AAC.mkv')
@@ -111,6 +118,18 @@ const fieldPolicyItems = [
 ]
 const selectedProbeFieldItems = computed(() => mediaProbeFieldItems.filter(item => probeFieldSelected(item.key)))
 const mediaProbeBackendSupported = computed(() => Object.prototype.hasOwnProperty.call(data.value || {}, 'media_probe') && Array.isArray(data.value.media_probe?.field_options))
+const strmServerItems = computed(() => (strmSync.value.servers || []).map(item => ({
+  title: `${item.name}${item.connected ? '' : '（未连接）'}`,
+  value: item.name,
+  props: { disabled: !item.connected },
+})))
+const strmStatusText = computed(() => {
+  if (!strmSync.value.available) return '当前 MoviePilot 不支持媒体服务器服务目录'
+  if (!strmSync.value.config?.enabled) return '已停用'
+  if (!config.value.media_probe_enabled) return '等待启用整理前媒体流扫描'
+  if (!strmSync.value.servers?.length) return '未配置 Emby'
+  return strmSync.value.worker_running ? '正在监听整理入库' : '后台工作器未运行'
+})
 const supplementFieldItems = [
   { key: 'resourceType', label: '资源类型', placeholder: 'WEB-DL' },
   { key: 'webSource', label: '流媒体平台', placeholder: 'Netflix / Bilibili' },
@@ -209,9 +228,69 @@ async function load() {
   error.value = ''
   try {
     data.value = unwrapResponse(await props.api.get(`${pluginBase.value}/metadata-tools`)) || data.value
+    if (props.mode === 'probe' && Object.prototype.hasOwnProperty.call(data.value || {}, 'strm_sync')) {
+      await loadStrmSync()
+    }
   } catch (err) {
     error.value = explainError(err, '内置识别规则加载失败')
   } finally { loading.value = false }
+}
+
+async function loadStrmSync() {
+  strmSync.value = unwrapResponse(await props.api.get(`${pluginBase.value}/metadata-tools/strm-sync`)) || strmSync.value
+}
+
+async function saveStrmSync() {
+  saving.value = 'strm-config'
+  error.value = ''
+  try {
+    strmSync.value = unwrapResponse(await props.api.post(
+      `${pluginBase.value}/metadata-tools/strm-sync/config`, strmSync.value.config,
+    )) || strmSync.value
+  } catch (err) { error.value = explainError(err, '神医联动设置保存失败') }
+  finally { saving.value = '' }
+}
+
+function addStrmMapping() {
+  if (!Array.isArray(strmSync.value.config.path_mappings)) strmSync.value.config.path_mappings = []
+  strmSync.value.config.path_mappings.push({ server: '*', source: '', target: '' })
+}
+
+async function previewStrmSync() {
+  saving.value = 'strm-preview'
+  strmPreview.value = null
+  error.value = ''
+  try {
+    strmPreview.value = unwrapResponse(await props.api.post(
+      `${pluginBase.value}/metadata-tools/strm-sync/preview`, {
+        source_path: probePath.value,
+        target_path: strmTargetPath.value || probePath.value,
+        servers: strmSync.value.config.servers,
+      },
+    ))
+    await loadStrmSync()
+  } catch (err) { error.value = explainError(err, '神医媒体信息试推失败') }
+  finally { saving.value = '' }
+}
+
+async function retryStrmJob(jobId = '') {
+  saving.value = `strm-retry:${jobId || 'all'}`
+  try {
+    strmSync.value = unwrapResponse(await props.api.post(
+      `${pluginBase.value}/metadata-tools/strm-sync/retry`, { job_id: jobId },
+    )) || strmSync.value
+  } catch (err) { error.value = explainError(err, '重新排队失败') }
+  finally { saving.value = '' }
+}
+
+async function deleteStrmJob(jobId = '') {
+  saving.value = `strm-delete:${jobId || 'finished'}`
+  try {
+    strmSync.value = unwrapResponse(await props.api.post(
+      `${pluginBase.value}/metadata-tools/strm-sync/delete`, jobId ? { job_id: jobId } : { finished_only: true },
+    )) || strmSync.value
+  } catch (err) { error.value = explainError(err, '删除任务失败') }
+  finally { saving.value = '' }
 }
 
 async function saveGroup(item, kind) {
@@ -717,6 +796,67 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
             <VExpansionPanels variant="accordion"><VExpansionPanel><VExpansionPanelTitle><div><div class="font-weight-medium">全部 Jinja2 扫描变量</div><div class="text-caption text-medium-emphasis">{{ probeContextPreviewItems.length }} 个字段；0 是有效结果，— 表示文件没有提供对应信息</div></div></VExpansionPanelTitle><VExpansionPanelText><div class="probe-variable-grid"><div v-for="item in probeContextPreviewItems" :key="item.key" class="probe-variable-cell" :title="item.description || item.label"><div class="probe-variable-meta"><span class="probe-variable-label">{{ item.label }}</span><code>{{ item.key }}</code></div><span class="probe-variable-value" :class="{ 'is-empty': item.value === '' || item.value == null }">{{ item.value === '' || item.value == null ? '—' : item.value }}</span></div></div></VExpansionPanelText></VExpansionPanel></VExpansionPanels>
           </template>
         </VCardText></VCard>
+        <VCard variant="outlined" class="strm-sync-card">
+          <VCardItem>
+            <template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-server-network" /></VAvatar></template>
+            <VCardTitle>神医媒体信息联动 <VChip size="x-small" color="secondary" variant="tonal" class="ms-1">仅 Pro</VChip></VCardTitle>
+            <VCardSubtitle>把 MP 在传输前扫好的媒体流直接推送给 StrmAssistant Pro，由神医写入 Emby，避免网盘侧重复 ffprobe。</VCardSubtitle>
+            <template #append><VChip size="small" :color="strmSync.active ? 'success' : 'default'" variant="tonal">{{ strmStatusText }}</VChip></template>
+          </VCardItem>
+          <VCardText class="probe-config-body">
+            <VAlert type="warning" variant="tonal" density="compact">
+              此功能依赖神医助手（StrmAssistant）<strong>Pro</strong> 注册的 <code>POST /Items/SyncMediaInfo</code> 接口；社区版没有该接口，试推会显示“不支持”。不会生成或依赖 <code>-mediainfo.json</code> 文件，也不调用 ffmpeg。
+            </VAlert>
+            <VAlert v-if="!config.media_probe_enabled" type="warning" variant="tonal" density="compact">请先开启上方“整理前扫描实际媒体流”并保存；联动直接复用传输前的 ffprobe 原始结果。</VAlert>
+            <div class="strm-summary-row">
+              <VSwitch v-model="strmSync.config.enabled" color="secondary" label="启用神医 Pro 媒体信息推送" hide-details />
+              <div><span>等待</span><strong>{{ strmSync.counts?.pending || 0 }}</strong></div>
+              <div><span>完成</span><strong>{{ strmSync.counts?.completed || 0 }}</strong></div>
+              <div><span>需处理</span><strong>{{ strmSync.counts?.attention || 0 }}</strong></div>
+            </div>
+            <div class="strm-config-grid">
+              <VSelect v-model="strmSync.config.servers" :items="strmServerItems" multiple chips clearable label="目标 Emby（留空表示全部）" hide-details />
+              <VTextField v-model.number="strmSync.config.initial_delay_seconds" type="number" min="0" max="300" label="首次等待（秒）" hint="给 Emby 留出发现新文件的时间" persistent-hint />
+              <VTextField v-model.number="strmSync.config.retry_seconds" type="number" min="10" max="600" label="重试间隔（秒）" hint="Path 尚未入库时后台重试" persistent-hint />
+              <VTextField v-model.number="strmSync.config.max_wait_minutes" type="number" min="1" max="1440" label="最长等待（分钟）" hint="超时后保留任务供手动重试" persistent-hint />
+            </div>
+            <div class="d-flex align-center flex-wrap ga-2"><div class="font-weight-medium">MP → Emby 路径映射</div><VSpacer /><VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="addStrmMapping">添加映射</VBtn></div>
+            <div v-if="strmSync.config.path_mappings?.length" class="strm-mapping-list">
+              <div v-for="(mapping, index) in strmSync.config.path_mappings" :key="index" class="strm-mapping-row">
+                <VSelect v-model="mapping.server" :items="[{ title: '全部服务器', value: '*' }, ...strmServerItems]" label="服务器" density="compact" hide-details />
+                <VTextField v-model="mapping.source" label="MP 目标路径前缀" placeholder="/media" density="compact" hide-details />
+                <VIcon icon="mdi-arrow-right" color="medium-emphasis" />
+                <VTextField v-model="mapping.target" label="Emby 路径前缀" placeholder="/mnt/media" density="compact" hide-details />
+                <VBtn icon="mdi-delete-outline" color="error" variant="text" @click="strmSync.config.path_mappings.splice(index, 1)" />
+              </div>
+            </div>
+            <div class="d-flex justify-end"><VBtn color="secondary" prepend-icon="mdi-content-save" :loading="saving === 'strm-config'" @click="saveStrmSync">保存神医联动设置</VBtn></div>
+            <VDivider />
+            <div class="text-subtitle-2">立即试推（会真实写入 Emby）</div>
+            <div class="text-caption text-medium-emphasis">复用上方“文件试扫”的容器内源路径；目标路径必须填写成 MP 整理后的路径，路径映射后用于神医在 Emby 中定位条目。</div>
+            <div class="strm-preview-row">
+              <VTextField :model-value="probePath" label="MP 可读源文件" readonly hide-details />
+              <VTextField v-model="strmTargetPath" label="MP 整理后目标路径" placeholder="/media/TV/Anime/Season 01/E01.mkv" hide-details />
+              <VBtn color="secondary" prepend-icon="mdi-send-check-outline" :loading="saving === 'strm-preview'" :disabled="!probePath || !strmTargetPath" @click="previewStrmSync">扫描并试推</VBtn>
+            </div>
+            <VAlert v-if="strmPreview" :type="strmPreview.retryable ? 'warning' : 'info'" variant="tonal" density="compact">
+              <div v-for="(result, name) in strmPreview.results || {}" :key="name"><strong>{{ name }}</strong>：{{ result.status }} · {{ result.reason }}<span v-if="result.mapped_path">（{{ result.mapped_path }}）</span></div>
+              <div v-if="!Object.keys(strmPreview.results || {}).length">{{ strmPreview.reason || '没有服务器结果' }}</div>
+            </VAlert>
+            <VCard variant="tonal">
+              <VCardItem><VCardTitle class="text-subtitle-1">推送任务</VCardTitle><VCardSubtitle>最多保留 80 条已结束记录</VCardSubtitle><template #append><div class="d-flex ga-1"><VBtn size="small" variant="text" prepend-icon="mdi-replay" @click="retryStrmJob()">重试未完成</VBtn><VBtn size="small" variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" @click="deleteStrmJob()">清理已结束</VBtn></div></template></VCardItem>
+              <VCardText v-if="strmSync.jobs?.length" class="strm-job-list">
+                <div v-for="job in strmSync.jobs" :key="job.id" class="strm-job-row">
+                  <div class="min-w-0"><div class="font-weight-medium text-truncate">{{ job.title || job.target_path }}</div><div class="text-caption text-medium-emphasis text-truncate">{{ job.target_path }}</div><div class="text-caption">{{ job.reason }} · 尝试 {{ job.attempts || 0 }} 次</div></div>
+                  <VChip size="small" :color="job.status === 'completed' ? 'success' : job.status === 'pending' || job.status === 'running' ? 'info' : 'warning'" variant="tonal">{{ job.status }}</VChip>
+                  <VBtn icon="mdi-replay" size="small" variant="text" :disabled="job.status === 'completed'" @click="retryStrmJob(job.id)" />
+                  <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="deleteStrmJob(job.id)" />
+                </div>
+              </VCardText>
+              <VCardText v-else class="text-center text-medium-emphasis">暂无推送任务</VCardText>
+            </VCard>
+          </VCardText>
+        </VCard>
       </div>
     </section>
 
@@ -959,6 +1099,17 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .overlay-preview-form { display: grid; gap: 14px; }
 .overlay-preview-actions { display: flex; align-items: center; min-height: 38px; }
 .probe-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.strm-sync-card { grid-column: 1 / -1; }
+.strm-summary-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; }
+.strm-summary-row > div:not(:first-child) { display: grid; gap: 2px; min-width: 64px; padding: 8px 12px; border-radius: 10px; background: rgba(var(--v-theme-secondary), .06); }
+.strm-summary-row span { color: rgba(var(--v-theme-on-surface), .58); font-size: .72rem; }
+.strm-summary-row strong { font-size: 1.05rem; }
+.strm-config-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.strm-config-grid > :first-child { grid-column: span 2; }
+.strm-mapping-list, .strm-job-list { display: grid; gap: 8px; }
+.strm-mapping-row { display: grid; grid-template-columns: minmax(150px, .65fr) minmax(180px, 1fr) auto minmax(180px, 1fr) auto; gap: 8px; align-items: center; }
+.strm-preview-row { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr) auto; gap: 10px; align-items: center; }
+.strm-job-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 9px 10px; border-radius: 9px; background: rgba(var(--v-theme-on-surface), .035); }
 .probe-config-body { display: grid; gap: 14px; }
 .probe-enable-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px; }
 .probe-panels { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }

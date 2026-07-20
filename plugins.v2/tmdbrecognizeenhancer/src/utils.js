@@ -57,6 +57,12 @@ export const DEFAULT_CONFIG = {
   customization_separator: '@',
   release_group_default_connector: '@',
   release_group_normalize_unknown_connectors: false,
+  strm_media_info_sync_enabled: false,
+  strm_media_info_sync_servers: [],
+  strm_media_info_sync_initial_delay_seconds: 20,
+  strm_media_info_sync_retry_seconds: 30,
+  strm_media_info_sync_max_wait_minutes: 30,
+  strm_media_info_sync_path_mappings: [],
 }
 
 export const UI_VERSION = __TMDB_ENHANCER_UI_VERSION__

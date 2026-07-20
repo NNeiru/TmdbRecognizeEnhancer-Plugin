@@ -271,6 +271,23 @@ def test_clear_cache_resets_entries():
     assert probe.capability()["cache_entries"] == 0
 
 
+def test_cached_result_survives_moved_source_file():
+    probe = _probe_class()()
+    probe._cache[("/downloads/episode.mkv", 1024, 7)] = {
+        "success": True,
+        "raw": {"streams": [], "format": {"duration": "24"}},
+        "source_size": 1024,
+    }
+
+    result = probe.cached_result("/downloads/episode.mkv")
+
+    assert result["success"] is True
+    assert result["cached"] is True
+    assert result["source_size"] == 1024
+    assert probe.capability()["cache_hits"] == 1
+    assert probe.cached_result("/downloads/missing.mkv") is None
+
+
 def test_composite_labels_match_atomic_rules_and_vice_versa():
     probe = _probe_class()
 

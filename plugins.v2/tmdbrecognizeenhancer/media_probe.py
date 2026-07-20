@@ -526,6 +526,23 @@ class MediaFileProbe:
             self._cache.clear()
             return cleared
 
+    def cached_result(self, source_path: Any) -> Optional[Dict[str, Any]]:
+        """按路径返回最近一次扫描结果，不要求文件仍然存在。
+
+        TransferComplete 发生时移动整理的源文件可能已经消失；命名阶段已完成的预扫
+        仍应可供神医联动复用，因此不能再次 stat 源文件才能命中缓存。
+        """
+        path = str(source_path or "").strip()
+        if not path:
+            return None
+        with self._lock:
+            key = next((item for item in reversed(self._cache) if item[0] == path), None)
+            if key is None:
+                return None
+            self._cache.move_to_end(key)
+            self._cache_hits += 1
+            return deepcopy({**self._cache[key], "cached": True})
+
     def probe(self, source_path: Any, timeout: int = 12, executable_path: Any = "",
               force: bool = False, iso_executable_path: Any = "") -> Dict[str, Any]:
         path = Path(str(source_path or ""))
@@ -562,7 +579,7 @@ class MediaFileProbe:
             completed = subprocess.run(
                 [
                     executable, "-v", "error", "-print_format", "json",
-                    "-show_streams", "-show_format", input_arg,
+                    "-show_streams", "-show_format", "-show_chapters", input_arg,
                 ],
                 capture_output=True,
                 text=True,
@@ -574,8 +591,13 @@ class MediaFileProbe:
             )
             if completed.returncode != 0:
                 raise RuntimeError((completed.stderr or "ffprobe 执行失败").strip()[-500:])
-            result = self.parse_payload(json.loads(completed.stdout or "{}"))
-            result.update({"source_path": str(path), "cached": False, "iso": is_iso})
+            raw_payload = json.loads(completed.stdout or "{}")
+            result = self.parse_payload(raw_payload)
+            # 保留原始 ffprobe 输出供神医联动等下游转换使用；文件大小供 Size 兜底
+            result.update({
+                "source_path": str(path), "cached": False, "iso": is_iso,
+                "raw": raw_payload, "source_size": int(stat.st_size),
+            })
             with self._lock:
                 self._scans += 1
                 self._last_error = ""
