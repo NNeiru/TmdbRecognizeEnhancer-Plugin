@@ -74,7 +74,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.7.0"
+    plugin_version = "0.7.1"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -2548,7 +2548,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         fileitem = self._event_get(data, "fileitem")
         source_path = str(self._event_get(fileitem, "path") or "").strip()
         probe_result = self._media_probe.cached_result(source_path)
-        if not probe_result:
+        # 神医需要完整的 ffprobe streams/format/chapters 原始结果。这里不读取
+        # media_probe_fields：那些选项只决定哪些值进入 MP/Jinja 命名上下文，
+        # 不能裁剪或关闭入库联动所需的媒体信息采集。
+        if not probe_result or not isinstance(probe_result.get("raw"), dict):
             candidates = [item for item in (source_path, target_path) if item]
             readable = next((item for item in candidates if Path(item).is_file()), "")
             if not readable:
@@ -6080,6 +6083,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "server": str(item.get("server") or "*").strip() or "*",
                 "source": source,
                 "target": target,
+                # 神医联动主要服务 STRM 媒体库。旧配置没有该字段时按
+                # STRM 处理，确保传给 SyncMediaInfo 的是 Emby 条目自身
+                # 的 .strm 路径，而不是 STRM 内容指向的真实媒体路径。
+                "target_kind": (
+                    str(item.get("target_kind") or "strm").strip().casefold()
+                    if str(item.get("target_kind") or "strm").strip().casefold() in {"strm", "media"}
+                    else "strm"
+                ),
             })
         merged["strm_media_info_sync_path_mappings"] = strm_mappings
         return merged
