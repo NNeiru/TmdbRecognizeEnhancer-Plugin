@@ -590,6 +590,33 @@ def test_legacy_strm_mapping_defaults_to_strm_item_paths(monkeypatch):
     assert config["strm_media_info_sync_path_mappings"][0]["target_kind"] == "strm"
 
 
+def test_strm_status_refresh_self_heals_worker(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._sync_strm_worker_state = Mock()
+    plugin._strm_sync_status_data = Mock(return_value={"worker_running": True})
+
+    response = plugin.get_strm_sync_api()
+
+    plugin._sync_strm_worker_state.assert_called_once_with()
+    plugin._strm_sync_status_data.assert_called_once_with(include_jobs=True)
+    assert response.data["worker_running"] is True
+
+
+def test_strm_worker_survives_queue_read_error(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._strm_sync_stop = SimpleNamespace(is_set=Mock(side_effect=[False, True]))
+    plugin._strm_sync_wakeup = SimpleNamespace(wait=Mock(), clear=Mock())
+    plugin._next_strm_sync_job = Mock(side_effect=RuntimeError("queue unavailable"))
+
+    plugin._strm_sync_worker()
+
+    assert plugin._strm_sync_worker_error == "queue unavailable"
+    plugin._strm_sync_wakeup.wait.assert_called_once_with(timeout=2.0)
+    plugin._strm_sync_wakeup.clear.assert_called_once_with()
+
+
 def test_current_quarter_catalog_prioritizes_mapped_anime_candidate(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

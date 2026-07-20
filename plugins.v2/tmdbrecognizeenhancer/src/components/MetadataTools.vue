@@ -35,7 +35,7 @@ const probeResult = ref(null)
 const probeForce = ref(true)
 const probeCacheNotice = ref('')
 const strmSync = ref({
-  available: false, enabled: false, active: false, worker_running: false,
+  available: false, enabled: false, active: false, worker_running: false, worker_error: '',
   servers: [], jobs: [], counts: { pending: 0, completed: 0, attention: 0 },
   config: { enabled: false, servers: [], initial_delay_seconds: 20, retry_seconds: 30, max_wait_minutes: 30, path_mappings: [] },
 })
@@ -136,10 +136,12 @@ const strmServerItems = computed(() => (strmSync.value.servers || []).map(item =
 })))
 const strmStatusText = computed(() => {
   if (!strmSync.value.available) return '当前 MoviePilot 不支持媒体服务器服务目录'
+  if (!config.value.enabled) return '等待启用插件总开关'
   if (!strmSync.value.config?.enabled) return '已停用'
   if (!config.value.media_probe_enabled) return '等待启用整理前媒体流扫描'
   if (!strmSync.value.servers?.length) return '未配置 Emby'
-  return strmSync.value.worker_running ? '正在监听整理入库' : '后台工作器未运行'
+  if (strmSync.value.worker_running) return '正在监听整理入库'
+  return strmSync.value.worker_error ? '后台工作器异常' : '后台工作器正在恢复'
 })
 const supplementFieldItems = [
   { key: 'resourceType', label: '资源类型', placeholder: 'WEB-DL' },
@@ -917,11 +919,12 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
           <VCardItem><template #prepend><VAvatar color="secondary" variant="tonal" size="38"><VIcon icon="mdi-flask-outline" size="20" /></VAvatar></template><VCardTitle class="text-subtitle-1">立即试推</VCardTitle><VCardSubtitle>使用已扫描的源文件，向 Emby 真实写入一次媒体信息。</VCardSubtitle></VCardItem>
           <VCardText class="strm-card-body">
             <div class="strm-preview-row">
-              <VTextField :model-value="probePath" label="MP 可读源文件" readonly hide-details prepend-inner-icon="mdi-file-video-outline" />
-              <VTextField v-model="strmTargetPath" label="MP 整理后目标路径" placeholder="/media/TV/Anime/Season 01/E01.mkv" hide-details prepend-inner-icon="mdi-folder-arrow-right-outline" />
+              <div class="strm-preview-path"><VTextField v-model="probePath" label="MP 可读源文件" placeholder="/downloads/Anime/E01.mkv" hide-details prepend-inner-icon="mdi-file-video-outline" /><MediaFilePicker v-model="probePath" :api="props.api" /></div>
+              <div class="strm-preview-path"><VTextField v-model="strmTargetPath" label="MP 整理后目标文件" placeholder="/media/TV/Anime/Season 01/E01.mkv" hide-details prepend-inner-icon="mdi-folder-arrow-right-outline" /><MediaFilePicker v-model="strmTargetPath" :api="props.api" /></div>
               <VBtn color="secondary" prepend-icon="mdi-send-check-outline" :loading="saving === 'strm-preview'" :disabled="!probePath || !strmTargetPath" @click="previewStrmSync">扫描并试推</VBtn>
             </div>
-            <VAlert v-if="!probePath" type="info" variant="tonal" density="compact">尚未选择源文件；切换到“媒体扫描”完成文件选择后再返回本页。</VAlert>
+            <VAlert v-if="!probePath" type="info" variant="tonal" density="compact">请输入或浏览选择 MP 容器内可读取的源文件。</VAlert>
+            <VAlert v-if="strmSync.worker_error" type="warning" variant="tonal" density="compact">后台工作器最近一次异常：{{ strmSync.worker_error }}。刷新状态会自动尝试恢复。</VAlert>
             <VAlert v-if="strmPreview" :type="strmPreview.retryable ? 'warning' : 'info'" variant="tonal" density="compact">
               <div v-for="(result, name) in strmPreview.results || {}" :key="name"><strong>{{ name }}</strong>：{{ result.status }} · {{ result.reason }}<span v-if="result.mapped_path">（{{ result.mapped_path }}）</span></div>
               <div v-if="!Object.keys(strmPreview.results || {}).length">{{ strmPreview.reason || '没有服务器结果' }}</div>
@@ -1208,7 +1211,8 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .strm-mapping-meta { min-width: 0; display: grid; grid-template-columns: minmax(120px, .7fr) minmax(210px, 1.3fr) auto; gap: 8px; align-items: center; }
 .strm-path-pair { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 7px; align-items: center; }
 .strm-save-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.strm-preview-row { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr) auto; gap: 10px; align-items: center; }
+.strm-preview-row { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr) auto; gap: 10px; align-items: center; }
+.strm-preview-path { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
 .strm-job-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 9px 10px; border-radius: 9px; background: rgba(var(--v-theme-on-surface), .035); }
 .strm-empty { min-height: 96px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: rgba(var(--v-theme-on-surface), .48); text-align: center; }
 .strm-empty.compact { min-height: 112px; border: 1px dashed rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
@@ -1309,6 +1313,7 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .strm-job-row { grid-template-columns: minmax(0, 1fr) auto; }
   .strm-job-row > .v-btn { grid-row: 2; }
   .strm-save-row { align-items: flex-start; flex-direction: column; }
+  .strm-preview-path { grid-template-columns: 1fr; }
   .probe-variable-row { grid-template-columns: 1fr; gap: 4px; padding: 9px 10px; }
   .probe-variable-row strong { text-align: left; }
   .probe-field-row { grid-template-columns: 1fr; gap: 7px; }

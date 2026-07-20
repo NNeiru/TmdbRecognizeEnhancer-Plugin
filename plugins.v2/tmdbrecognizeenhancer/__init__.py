@@ -74,7 +74,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.0"
+    plugin_version = "0.8.1"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -273,6 +273,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._strm_sync_stop = threading.Event()
         self._strm_sync_wakeup = threading.Event()
         self._strm_sync_thread: Optional[threading.Thread] = None
+        self._strm_sync_worker_error = ""
         self._strm_sync = StrmMediaInfoSynchronizer(self._get_emby_services)
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
@@ -1635,6 +1636,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def get_strm_sync_api(self) -> schemas.Response:
         """返回神医媒体信息推送设置、服务目录和持久任务。"""
+        # 页面刷新同时承担轻量健康检查：配置要求运行但线程意外退出时，
+        # 无需重启 MoviePilot 即可自动拉起工作器。
+        self._sync_strm_worker_state()
         return schemas.Response(success=True, data=self._strm_sync_status_data(include_jobs=True))
 
     def save_strm_sync_config_api(self, payload: dict = Body(...)) -> schemas.Response:
@@ -2916,12 +2920,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return
         self._strm_sync_stop = threading.Event()
         self._strm_sync_wakeup = threading.Event()
+        self._strm_sync_worker_error = ""
         self._strm_sync_thread = threading.Thread(
             target=self._strm_sync_worker,
             name="tmdb-enhancer-strm-media-info-sync",
             daemon=True,
         )
-        self._strm_sync_thread.start()
+        try:
+            self._strm_sync_thread.start()
+        except Exception as err:  # noqa: BLE001 - 状态接口需要呈现启动失败原因
+            self._strm_sync_worker_error = str(err)
+            self._strm_sync_thread = None
+            logger.error(f"[媒体整理增强] 神医媒体信息后台工作器启动失败：{err}")
 
     def _stop_strm_worker(self) -> None:
         self._strm_sync_stop.set()
@@ -2935,14 +2945,23 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _strm_sync_worker(self) -> None:
         """串行推送媒体信息，避免整理线程被 Emby 入库延迟阻塞。"""
         while not self._strm_sync_stop.is_set():
-            job = self._next_strm_sync_job()
+            try:
+                job = self._next_strm_sync_job()
+            except Exception as err:  # noqa: BLE001 - 数据读取异常不应永久杀死工作器
+                self._strm_sync_worker_error = str(err)
+                logger.error(f"[媒体整理增强] 神医媒体信息后台工作器读取队列失败：{err}")
+                self._strm_sync_wakeup.wait(timeout=2.0)
+                self._strm_sync_wakeup.clear()
+                continue
             if not job:
                 self._strm_sync_wakeup.wait(timeout=2.0)
                 self._strm_sync_wakeup.clear()
                 continue
             try:
                 self._process_strm_sync_job(job)
+                self._strm_sync_worker_error = ""
             except Exception as err:
+                self._strm_sync_worker_error = str(err)
                 logger.error(f"[媒体整理增强] 神医媒体信息推送任务异常：{err}")
                 self._mark_strm_job_error(str(job.get("id") or ""), str(err))
 
@@ -3072,6 +3091,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "enabled": bool(self._config.get("strm_media_info_sync_enabled")),
             "active": self._strm_sync_active(),
             "worker_running": bool(self._strm_sync_thread and self._strm_sync_thread.is_alive()),
+            "worker_error": str(self._strm_sync_worker_error or ""),
             "requires_media_probe": not bool(self._config.get("media_probe_enabled")),
             "servers": self._strm_sync.server_catalog(),
             "config": {
