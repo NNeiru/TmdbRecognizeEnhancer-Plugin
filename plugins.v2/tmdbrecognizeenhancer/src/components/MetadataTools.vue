@@ -124,8 +124,8 @@ const fieldPolicyItems = [
   { title: '追加到原值', value: 'append' },
 ]
 const strmTargetKindItems = [
-  { title: 'STRM 媒体库（自动改为 .strm）', value: 'strm' },
-  { title: '普通媒体库（保留原扩展名）', value: 'media' },
+  { title: 'STRM 条目路径（.strm）', value: 'strm' },
+  { title: '普通媒体条目路径（原扩展名）', value: 'media' },
 ]
 const selectedProbeFieldItems = computed(() => mediaProbeFieldItems.filter(item => probeFieldSelected(item.key)))
 const mediaProbeBackendSupported = computed(() => Object.prototype.hasOwnProperty.call(data.value || {}, 'media_probe') && Array.isArray(data.value.media_probe?.field_options))
@@ -816,11 +816,11 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
             </VExpansionPanel>
             <VExpansionPanel>
               <VExpansionPanelTitle><div><div class="font-weight-medium">ISO 原盘探测 <VChip size="x-small" :color="staticFfprobe.installed ? 'success' : config.media_probe_iso_enabled ? 'warning' : 'default'" variant="tonal" class="ms-1">{{ staticFfprobe.installed ? '已就绪' : staticFfprobe.installing ? '下载中' : config.media_probe_iso_enabled ? '未就绪' : '未启用' }}</VChip></div><div class="text-caption text-medium-emphasis">自动下载带蓝光支持的静态 ffprobe，仅接管 .iso 文件的媒体流提取</div></div></VExpansionPanelTitle>
-              <VExpansionPanelText><div class="subtitle-mapping-box">
+              <VExpansionPanelText><div class="subtitle-mapping-box iso-probe-box">
                 <VSwitch v-model="config.media_probe_iso_enabled" color="secondary" label="启用 ISO 原盘探测（保存设置后自动下载安装）" hide-details @update:model-value="value => value && installStaticFfprobe(true)" />
-                <VAlert type="info" variant="tonal" density="compact">容器自带的 ffprobe 没有 libbluray，读不出 ISO 原盘的播放列表。开启后插件从 <a href="https://github.com/sjtuross/StrmAssistant.Releases/tree/main/static-ffprobe" target="_blank" rel="noopener">StrmAssistant.Releases</a> 下载对应平台的静态构建（v{{ staticFfprobe.version || '8.1.2' }}）到插件数据目录，<strong>只用于 .iso 文件</strong>，普通视频仍走原 ffprobe；卸载插件删除数据目录即可清除。下载走 MP 的 GITHUB_PROXY 与代理设置。</VAlert>
-                <div v-if="config.media_probe_iso_enabled" class="d-flex align-center flex-wrap ga-3">
-                  <VChip size="small" :color="staticFfprobe.installed ? 'success' : staticFfprobe.installing ? 'info' : 'warning'" variant="tonal" :prepend-icon="staticFfprobe.installed ? 'mdi-check-circle-outline' : staticFfprobe.installing ? 'mdi-progress-download' : 'mdi-alert-circle-outline'">
+                <VAlert type="info" variant="tonal" density="compact" class="probe-help-alert">容器自带的 ffprobe 没有 libbluray，读不出 ISO 原盘的播放列表。开启后插件从 <a href="https://github.com/sjtuross/StrmAssistant.Releases/tree/main/static-ffprobe" target="_blank" rel="noopener">StrmAssistant.Releases</a> 下载对应平台的静态构建（v{{ staticFfprobe.version || '8.1.2' }}）到插件数据目录，<strong>只用于 .iso 文件</strong>，普通视频仍走原 ffprobe；卸载插件删除数据目录即可清除。下载走 MP 的 GITHUB_PROXY 与代理设置。</VAlert>
+                <div v-if="config.media_probe_iso_enabled" class="static-ffprobe-actions">
+                  <VChip size="small" :color="staticFfprobe.installed ? 'success' : staticFfprobe.installing ? 'info' : 'warning'" variant="tonal" :prepend-icon="staticFfprobe.installed ? 'mdi-check-circle-outline' : staticFfprobe.installing ? 'mdi-progress-download' : 'mdi-alert-circle-outline'" class="static-ffprobe-chip">
                     {{ staticFfprobe.installed ? `已安装：${staticFfprobe.path}` : staticFfprobe.installing ? '正在后台下载安装……' : staticFfprobe.last_error || '尚未安装' }}
                   </VChip>
                   <VBtn v-if="!staticFfprobe.installed" size="small" variant="tonal" prepend-icon="mdi-download" :loading="saving === 'static-ffprobe' || staticFfprobe.installing" @click="installStaticFfprobe(false)">{{ staticFfprobe.last_error ? '重试下载' : '立即下载' }}</VBtn>
@@ -899,12 +899,11 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
               </div>
               </section>
               <section class="strm-config-section">
-                <div class="strm-section-head"><div><VIcon icon="mdi-folder-swap-outline" size="19" color="secondary" /><div><strong>Emby 媒体路径映射</strong><span>填写目录前缀；右侧是 Emby“编辑元数据”里看到的媒体文件目录，不是 STRM 内容中的真实地址</span></div></div><VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="addStrmMapping">添加映射</VBtn></div>
+                <div class="strm-section-head"><div><VIcon icon="mdi-folder-swap-outline" size="19" color="secondary" /><div><strong>Emby 条目路径映射</strong><span>右侧填写 Emby 条目的路径前缀；STRM 库使用 .strm 文件所在目录，不填写 .strm 内记录的真实媒体地址</span></div></div><VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="addStrmMapping">添加映射</VBtn></div>
               <div v-if="strmSync.config.path_mappings?.length" class="strm-mapping-list">
                 <div v-for="(mapping, index) in strmSync.config.path_mappings" :key="index" class="strm-mapping-row">
-                  <div class="strm-mapping-meta"><VSelect v-model="mapping.server" :items="[{ title: '全部服务器', value: '*' }, ...strmServerItems]" label="服务器" density="compact" hide-details /><VSelect v-model="mapping.target_kind" :items="strmTargetKindItems" label="Emby 媒体类型" density="compact" hide-details /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="strmSync.config.path_mappings.splice(index, 1)" /></div>
-                  <div class="strm-path-pair"><VTextField v-model="mapping.source" label="MP 实际媒体目录前缀" placeholder="/pilipili" density="compact" hide-details /><VIcon icon="mdi-arrow-right" color="medium-emphasis" /><VTextField v-model="mapping.target" label="Emby 媒体文件目录前缀" placeholder="/mnt2/strm/pilipili2" density="compact" hide-details /></div>
-                  <div class="text-caption text-medium-emphasis">示例：<code>/pilipili/动画/A/E01.mkv</code> → <code>{{ (mapping.target || '/mnt2/strm/pilipili2').replace(/\/$/, '') }}/动画/A/E01{{ (mapping.target_kind || 'strm') === 'strm' ? '.strm' : '.mkv' }}</code></div>
+                  <div class="strm-mapping-meta"><VSelect v-model="mapping.server" :items="[{ title: '全部服务器', value: '*' }, ...strmServerItems]" label="服务器" density="compact" hide-details /><VSelect v-model="mapping.target_kind" :items="strmTargetKindItems" label="Emby 条目类型" density="compact" hide-details /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="strmSync.config.path_mappings.splice(index, 1)" /></div>
+                  <div class="strm-path-pair"><VTextField v-model="mapping.source" label="MP 真实媒体目录前缀" placeholder="/pilipili" density="compact" hide-details /><VIcon icon="mdi-arrow-right" color="medium-emphasis" /><VTextField v-model="mapping.target" label="Emby 条目目录前缀" placeholder="/mnt2/strm/pilipili2" density="compact" hide-details /></div>
                 </div>
               </div>
               <div v-else class="strm-empty compact"><VIcon icon="mdi-map-marker-path" size="26" /><span>MP 与 Emby 路径相同时无需配置</span></div>
@@ -1218,14 +1217,22 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .probe-selection-summary :deep(.v-chip__content) { gap: 6px; }
 .probe-chip-policy { padding-left: 6px; border-left: 1px solid currentColor; opacity: .65; font-size: .66rem; }
 .probe-selection-empty { display: flex; align-items: center; gap: 7px; color: rgba(var(--v-theme-on-surface), .48); font-size: .82rem; }
-.probe-panels { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
+.probe-panels { min-width: 0; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
+.probe-panels :deep(.v-expansion-panel-text__wrapper) { min-width: 0; }
 .probe-field-list { display: grid; overflow: hidden; container-type: inline-size; }
 .probe-field-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(166px, auto); gap: 12px; align-items: center; padding: 11px 4px; border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .probe-field-row:last-child { border-bottom: 0; }
 .probe-field-main { min-width: 0; }
 .probe-field-controls { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .probe-policy-select { flex: 0 1 148px; min-width: 116px; max-width: 148px; }
-.subtitle-mapping-box { display: grid; gap: 12px; padding: 14px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .05); }
+.subtitle-mapping-box { min-width: 0; display: grid; gap: 12px; padding: 14px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .05); }
+.iso-probe-box { overflow: hidden; }
+.probe-help-alert { min-width: 0; max-width: 100%; }
+.probe-help-alert :deep(.v-alert__content) { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.probe-help-alert :deep(a), .probe-help-alert :deep(code) { overflow-wrap: anywhere; word-break: break-word; }
+.static-ffprobe-actions { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.static-ffprobe-chip { min-width: 0; max-width: 100%; height: auto !important; }
+.static-ffprobe-chip :deep(.v-chip__content) { min-width: 0; padding-block: 4px; overflow-wrap: anywhere; white-space: normal; line-height: 1.35; }
 .probe-advanced-grid { display: grid; grid-template-columns: minmax(120px, .45fr) minmax(0, 1fr); gap: 12px; }
 .ffprobe-help { display: grid; gap: 6px; padding-left: 22px; }
 .probe-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 2px; }
