@@ -14,7 +14,7 @@ const config = computed({
 
 const weightTotal = computed(() => [
   'token_weight', 'similarity_weight', 'prefix_weight', 'rank_weight', 'query_confidence_weight', 'anchor_weight', 'year_weight', 'type_weight',
-  'release_group_type_weight', 'seasonal_evidence_weight', 'recognition_memory_weight',
+  'seasonal_evidence_weight', 'recognition_memory_weight',
 ].reduce((sum, key) => sum + Number(config.value[key] || 0), 0))
 
 const tmdbFirstMode = computed(() => config.value.recognition_mode === 'tmdb_first')
@@ -77,10 +77,7 @@ function applyBalancedPreset() {
         <VCardTitle>识别依据与搜索策略</VCardTitle>
         <VCardSubtitle>集中设置标题来源、降级搜索和辅助证据</VCardSubtitle>
       </VCardItem>
-      <VCardText>
-        <div class="strategy-section">
-          <div class="section-label"><VIcon icon="mdi-format-title" size="18" /><div><strong>标题与候选信息</strong><small>决定提交给 TMDB 的标题和候选核验范围</small></div></div>
-          <div class="toggle-grid">
+      <VCardText class="unified-settings-grid">
             <div class="toggle-item">
               <div><strong>优先使用 MP 解析标题</strong><small>复用识别词和解析器处理后的主体名称</small></div>
               <VSwitch v-model="config.prefer_parsed_title" color="primary" hide-details />
@@ -97,20 +94,13 @@ function applyBalancedPreset() {
               <div><strong>拉取别名与译名</strong><small>{{ tmdbFirstMode ? '用于展示和诊断，不改变首结果评分' : '用于标题、译名和罗马音交叉验证' }}</small></div>
               <VSwitch v-model="config.fetch_aliases" color="primary" hide-details />
             </div>
-          </div>
-        </div>
 
         <template v-if="!tmdbFirstMode">
-          <VDivider class="section-divider" />
-          <div class="strategy-section">
-            <div class="section-label"><VIcon icon="mdi-source-branch" size="18" color="warning" /><div><strong>标题降级与外部验证</strong><small>完整标题无结果时依次尝试，候选仍需通过原标题关联检查</small></div></div>
-            <div class="toggle-grid strategy-fallback-grid">
               <div class="toggle-item"><div><strong>主体名称降级</strong><small>例如 Mushoku Tensei: … → Mushoku Tensei</small></div><VSwitch v-model="config.main_title_fallback" color="primary" hide-details /></div>
               <div class="toggle-item"><div><strong>逐词缩短</strong><small>每次缩短仍须通过原标题锚点验证</small></div><VSwitch v-model="config.progressive_fallback" color="warning" hide-details /></div>
               <div class="toggle-item"><div><strong>搜索引擎交叉验证</strong><small>只接受指向具体 TMDB 条目的直链证据</small></div><VSwitch v-model="config.web_search_fallback" color="warning" hide-details /></div>
-            </div>
             <VExpandTransition>
-              <div v-if="config.web_search_fallback" class="web-fallback-box mt-3">
+              <div v-if="config.web_search_fallback" class="web-fallback-box grid-wide">
                 <VAlert type="warning" variant="tonal" density="compact" class="mb-3">自动模式固定使用 DuckDuckGo；只有 TMDB 直链与原标题或候选别名共现时才形成证据。</VAlert>
                 <VRow dense>
                   <VCol cols="12" md="4"><VSelect v-model="config.web_search_engine" :items="[
@@ -124,13 +114,8 @@ function applyBalancedPreset() {
                 </VRow>
               </div>
             </VExpandTransition>
-          </div>
         </template>
 
-        <VDivider class="section-divider" />
-        <div class="strategy-section">
-          <div class="section-label"><VIcon icon="mdi-compass-rose" size="18" color="secondary" /><div><strong>候选辅助证据</strong><small>只对搜索已经返回的候选提供偏好，不会凭空创建 TMDB 结果</small></div></div>
-        <div class="evidence-grid">
           <div class="evidence-box">
             <div class="evidence-head">
               <div><strong>近期季度动画</strong><small>兼顾当前季、跨季连载和上一季补整</small></div>
@@ -160,11 +145,8 @@ function applyBalancedPreset() {
               <div><strong>制作组辅助验证</strong><small>根据已分类字幕组判断动画或真人倾向</small></div>
               <VSwitch v-model="config.release_group_assist_enabled" color="success" hide-details />
             </div>
-            <div class="evidence-note">只作为候选偏好，不替代标题识别；制作组未分类时不参与。</div>
-            <div v-if="!tmdbFirstMode" class="compact-slider"><span>影响强度</span><VSlider v-model="config.release_group_type_weight" :min="0" :max="30" :step="1" color="success" hide-details :disabled="!config.release_group_assist_enabled" /><strong>{{ config.release_group_type_weight }}</strong></div>
+            <div class="constraint-note"><VIcon icon="mdi-filter-check-outline" size="18" color="success" /><span>已分类制作组作为硬约束，直接排除题材冲突候选；未分类时不参与。</span></div>
           </div>
-        </div>
-        </div>
       </VCardText>
     </VCard>
 
@@ -248,23 +230,16 @@ function applyBalancedPreset() {
 .main-strategy-card { overflow: hidden; }
 .module-switches { display: flex; flex-wrap: wrap; gap: 6px 28px; }
 .module-switches :deep(.v-input) { flex: 0 0 auto; }
-.strategy-section { min-width: 0; }
-.section-label { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.section-label > div { min-width: 0; }
-.section-label strong { display: block; font-size: .92rem; }
-.section-label small { display: block; margin-top: 2px; color: rgba(var(--v-theme-on-surface), .56); font-size: .75rem; line-height: 1.35; }
-.section-divider { margin: 18px 0; opacity: .68; }
-.toggle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.strategy-fallback-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.unified-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.grid-wide { grid-column: 1 / -1; }
 .toggle-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 72px; padding: 10px 14px; border-radius: 12px; background: rgba(var(--v-theme-on-surface), .035); }
 .toggle-item > div, .evidence-head > div { min-width: 0; }
 .toggle-item strong, .evidence-head strong { display: block; font-size: .9rem; }
 .toggle-item small, .evidence-head small, .panel-title small { display: block; margin-top: 3px; color: rgba(var(--v-theme-on-surface), .58); font-size: .75rem; line-height: 1.35; }
 .toggle-item :deep(.v-input), .evidence-head :deep(.v-input) { flex: 0 0 auto; }
-.evidence-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .evidence-box { padding: 15px; border: 1px solid rgba(var(--v-theme-primary), .1); border-radius: 13px; background: rgba(var(--v-theme-primary), .025); }
 .evidence-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; margin-bottom: 12px; }
-.evidence-note { min-height: 42px; color: rgba(var(--v-theme-on-surface), .58); font-size: .76rem; line-height: 1.45; }
+.constraint-note { display: flex; align-items: flex-start; gap: 7px; color: rgba(var(--v-theme-on-surface), .62); font-size: .76rem; line-height: 1.45; }
 .compact-slider { display: grid; grid-template-columns: 66px minmax(80px, 1fr) 30px; align-items: center; gap: 8px; margin-top: 12px; color: rgba(var(--v-theme-on-surface), .67); font-size: .78rem; }
 .compact-slider strong { color: rgb(var(--v-theme-primary)); text-align: right; font-variant-numeric: tabular-nums; }
 .advanced-panels { border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 14px; overflow: hidden; }
@@ -284,10 +259,10 @@ function applyBalancedPreset() {
   .strategy-hero { align-items: stretch; flex-direction: column; }
   .mode-toggle { width: 100%; }
   .mode-toggle :deep(.v-btn) { flex: 1 1 50%; }
-  .toggle-grid, .strategy-fallback-grid, .evidence-grid { grid-template-columns: 1fr; }
+  .unified-settings-grid { grid-template-columns: 1fr; }
   .panel-toolbar { align-items: flex-start; flex-direction: column; }
 }
 @media (min-width: 761px) and (max-width: 1180px) {
-  .strategy-fallback-grid, .evidence-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .unified-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>

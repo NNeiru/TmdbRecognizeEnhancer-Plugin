@@ -69,7 +69,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.7.0-beta.27"
+    plugin_version = "0.7.0-beta.28"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3833,7 +3833,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return parsed_name, self._enrich_release_group_hints(hints)
 
     def _enrich_release_group_hints(self, hints: Dict[str, Any]) -> Dict[str, Any]:
-        """把制作组分类转换为 TMDB 候选选择可用的轻量证据。"""
+        """把用户明确设置的制作组分类转换为 TMDB 题材硬约束。"""
         if not self._config.get("release_group_assist_enabled", True):
             return hints
         profile = self._release_group_registry.classify(hints.get("release_group"))
@@ -4103,6 +4103,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         candidates, type_constraint = self._filter_candidates_by_media_type(
             candidates, hints, type_constraint
         )
+        candidates, release_group_preference = self._prefer_candidates_by_release_group(
+            candidates, hints
+        )
         candidates, excluded_candidates, candidate_policy = self._apply_tmdb_candidate_policy(
             candidates,
         )
@@ -4153,6 +4156,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidates, type_constraint = self._filter_candidates_by_media_type(
                 candidates, hints, type_constraint
             )
+            candidates, release_group_preference = self._prefer_candidates_by_release_group(
+                candidates, hints
+            )
             candidates, excluded_candidates, candidate_policy = self._apply_tmdb_candidate_policy(
                 candidates,
             )
@@ -4199,6 +4205,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 reason = (
                     f"类型约束为{type_constraint['label']}，TMDB 返回的候选均为其他类型，已安全拒绝"
                 )
+            elif release_group_preference.get("active") and release_group_preference.get("removed_count"):
+                reason = (
+                    f"制作组标记为{release_group_preference['label']}，TMDB 返回的候选均与该题材冲突，已安全拒绝"
+                )
             else:
                 reason = "TMDB 与搜索引擎兜底均未返回可验证候选" if web_search.get("attempted") \
                     else "所有降级搜索词均未返回 TMDB 候选"
@@ -4236,6 +4246,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "candidate_policy": candidate_policy,
             "web_search": web_search,
             "type_constraint": type_constraint,
+            "release_group_preference": release_group_preference,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         if include_candidates:
@@ -4294,7 +4305,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     f"单次 TMDB Multi Search 已直接采用第一个{type_constraint.get('label') or '影视'}结果；"
                 )
                 + (
-                    f"制作组标记为{release_group_preference['label']}，已优先符合题材的候选；"
+                    f"制作组标记为{release_group_preference['label']}，已按题材约束筛选候选"
+                    + (
+                        f"并排除 {release_group_preference.get('removed_count', 0)} 个冲突项；"
+                        if release_group_preference.get("removed_count") else "；"
+                    )
                     if release_group_preference.get("applied") else ""
                 )
                 + (
@@ -4307,6 +4322,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     if candidate_policy.get("excluded_count") else
                     f"类型约束为{type_constraint['label']}，TMDB 未返回该类型候选"
                     if type_constraint.get("active") else
+                    f"制作组标记为{release_group_preference['label']}，TMDB 候选均与该题材冲突"
+                    if release_group_preference.get("active") and release_group_preference.get("removed_count") else
                     "单次 TMDB Multi Search 未返回电影或电视剧结果"
                 )
             ),
@@ -4328,7 +4345,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _prefer_candidates_by_release_group(
             self, candidates: List[Dict[str, Any]], hints: Dict[str, Any]
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        """首结果模式中稳定优先制作组题材一致候选，无一致项时保持 TMDB 顺序。"""
+        """把用户明确分类的制作组作为题材硬约束，未知题材候选保守保留。"""
         profile = hints.get("release_group_profile") or {}
         kind = str(profile.get("kind") or "unknown")
         summary = {
@@ -4339,8 +4356,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "真人电视剧" if kind == "live_action" else "未分类"
             ),
             "release_group": profile.get("release_group") or "",
+            "hard_constraint": True,
+            "matching_count": 0,
+            "unknown_count": 0,
+            "removed_count": 0,
         }
-        if not summary["active"] or len(candidates) < 2:
+        if not summary["active"] or not candidates:
             return candidates, summary
 
         preferred: List[Dict[str, Any]] = []
@@ -4358,12 +4379,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
             is_animation = 16 in genre_ids
             matched = (kind == "animation" and is_animation) or (kind == "live_action" and not is_animation)
             (preferred if matched else conflicting).append(candidate)
-        if not preferred:
-            return candidates, summary
-        reordered = [*preferred, *unknown, *conflicting]
-        summary["applied"] = reordered[0] is not candidates[0]
         summary["matching_count"] = len(preferred)
-        return reordered, summary
+        summary["unknown_count"] = len(unknown)
+        summary["removed_count"] = len(conflicting)
+        filtered = [*preferred, *unknown]
+        summary["applied"] = bool(conflicting) or bool(
+            filtered and filtered[0] is not candidates[0]
+        )
+        # 已知一致项始终排在缺少 genre 信息的候选之前；明确冲突项不再进入评分、
+        # 人工优先和分差计算。若 TMDB 尚未提供 genre，则保守保留，避免误杀。
+        return filtered, summary
 
     def _resolve_media_type_constraint(self, hints: Dict[str, Any]) -> Dict[str, Any]:
         """把明确类型或季集坐标转成候选硬约束，避免电视剧被电影候选截胡。"""

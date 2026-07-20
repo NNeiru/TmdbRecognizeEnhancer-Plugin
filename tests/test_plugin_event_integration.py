@@ -900,8 +900,34 @@ def test_scored_mode_adds_release_group_genre_component(monkeypatch):
 
     scores = {item["tmdb_id"]: item for item in result["candidates"]}
     assert scores[20]["components"]["release_group"] == 100.0
-    assert scores[10]["components"]["release_group"] == 0.0
-    assert scores[20]["score"] > scores[10]["score"]
+    assert 10 not in scores
+    assert result["release_group_preference"]["removed_count"] == 1
+    assert result["best"]["tmdb_id"] == 20
+
+
+def test_release_group_hard_constraint_rejects_only_conflicting_candidates(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "tmdb_first", "fetch_aliases": False,
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 10, "media_type": "tv", "name": "同名真人剧", "genre_ids": [18]},
+    ])
+
+    result = plugin._recognize_title(
+        "同名作品",
+        hints={"release_group_profile": {
+            "kind": "animation", "release_group": "AnimeGroup", "matches": [],
+        }},
+        recognition_mode="tmdb_first",
+        include_candidates=True,
+    )
+
+    assert result["accepted"] is False
+    assert result["best"] is None
+    assert result["release_group_preference"]["removed_count"] == 1
+    assert "题材冲突" in result["reason"]
 
 
 def test_scored_mode_hard_filters_candidates_to_explicit_tv_type(monkeypatch):
