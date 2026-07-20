@@ -77,45 +77,37 @@ function applyBalancedPreset() {
         <VCardTitle>识别依据与搜索策略</VCardTitle>
         <VCardSubtitle>集中设置标题来源、降级搜索和辅助证据</VCardSubtitle>
       </VCardItem>
-      <VCardText class="unified-settings-grid">
-            <div class="toggle-item">
-              <div><strong>优先使用 MP 解析标题</strong><small>复用识别词和解析器处理后的主体名称</small></div>
-              <VSwitch v-model="config.prefer_parsed_title" color="primary" hide-details />
-            </div>
-            <div class="toggle-item">
-              <div><strong>使用年份提示</strong><small>标题带年份时参与候选筛选与评分</small></div>
-              <VSwitch v-model="config.use_year_hint" color="primary" hide-details />
-            </div>
-            <div class="toggle-item">
-              <div><strong>原标题交叉验证</strong><small>确认降级结果仍与未缩减标题相关</small></div>
-              <VSwitch v-model="config.use_original_title_evidence" color="primary" hide-details />
-            </div>
-            <div class="toggle-item">
-              <div><strong>拉取别名与译名</strong><small>{{ tmdbFirstMode ? '用于展示和诊断，不改变首结果评分' : '用于标题、译名和罗马音交叉验证' }}</small></div>
-              <VSwitch v-model="config.fetch_aliases" color="primary" hide-details />
-            </div>
+      <VCardText>
+        <div class="quick-options-grid">
+          <div class="toggle-item"><div><strong>优先使用 MP 解析标题</strong><small>复用识别词和解析器处理后的主体名称</small></div><VSwitch v-model="config.prefer_parsed_title" color="primary" hide-details /></div>
+          <div class="toggle-item"><div><strong>使用年份提示</strong><small>标题带年份时参与候选筛选与评分</small></div><VSwitch v-model="config.use_year_hint" color="primary" hide-details /></div>
+          <div class="toggle-item"><div><strong>原标题交叉验证</strong><small>确认降级结果仍与未缩减标题相关</small></div><VSwitch v-model="config.use_original_title_evidence" color="primary" hide-details /></div>
+          <div class="toggle-item"><div><strong>拉取别名与译名</strong><small>{{ tmdbFirstMode ? '用于展示和诊断，不改变首结果评分' : '用于标题、译名和罗马音交叉验证' }}</small></div><VSwitch v-model="config.fetch_aliases" color="primary" hide-details /></div>
+          <template v-if="!tmdbFirstMode">
+            <div class="toggle-item"><div><strong>主体名称降级</strong><small>例如 Mushoku Tensei: … → Mushoku Tensei</small></div><VSwitch v-model="config.main_title_fallback" color="primary" hide-details /></div>
+            <div class="toggle-item"><div><strong>逐词缩短</strong><small>每次缩短仍须通过原标题锚点验证</small></div><VSwitch v-model="config.progressive_fallback" color="warning" hide-details /></div>
+            <div class="toggle-item"><div><strong>搜索引擎交叉验证</strong><small>只接受指向具体 TMDB 条目的直链证据</small></div><VSwitch v-model="config.web_search_fallback" color="warning" hide-details /></div>
+          </template>
+          <div class="toggle-item"><div><strong>制作组辅助验证</strong><small>已分类制作组直接排除动画或真人冲突候选；未分类时不参与</small></div><VSwitch v-model="config.release_group_assist_enabled" color="success" hide-details /></div>
+        </div>
 
-        <template v-if="!tmdbFirstMode">
-              <div class="toggle-item"><div><strong>主体名称降级</strong><small>例如 Mushoku Tensei: … → Mushoku Tensei</small></div><VSwitch v-model="config.main_title_fallback" color="primary" hide-details /></div>
-              <div class="toggle-item"><div><strong>逐词缩短</strong><small>每次缩短仍须通过原标题锚点验证</small></div><VSwitch v-model="config.progressive_fallback" color="warning" hide-details /></div>
-              <div class="toggle-item"><div><strong>搜索引擎交叉验证</strong><small>只接受指向具体 TMDB 条目的直链证据</small></div><VSwitch v-model="config.web_search_fallback" color="warning" hide-details /></div>
-            <VExpandTransition>
-              <div v-if="config.web_search_fallback" class="web-fallback-box grid-wide">
-                <VAlert type="warning" variant="tonal" density="compact" class="mb-3">自动模式固定使用 DuckDuckGo；只有 TMDB 直链与原标题或候选别名共现时才形成证据。</VAlert>
-                <VRow dense>
-                  <VCol cols="12" md="4"><VSelect v-model="config.web_search_engine" :items="[
-                    { title: '自动选择', value: 'auto' }, { title: 'DuckDuckGo', value: 'duckduckgo' },
-                    { title: 'Google', value: 'google' }, { title: 'Brave', value: 'brave' },
-                    { title: 'Yahoo', value: 'yahoo' }, { title: 'Yandex', value: 'yandex' }, { title: 'Mojeek', value: 'mojeek' },
-                  ]" density="compact" label="搜索引擎" hide-details /></VCol>
-                  <VCol cols="6" md="2"><VTextField v-model.number="config.web_search_max_results" density="compact" type="number" min="3" max="15" label="最多结果" hide-details /></VCol>
-                  <VCol cols="6" md="2"><VTextField v-model.number="config.web_search_timeout" density="compact" type="number" min="5" max="30" label="超时" suffix="秒" hide-details /></VCol>
-                  <VCol cols="12" md="4"><VTextField v-model.number="config.web_search_min_evidence" density="compact" type="number" min="50" max="100" label="最低证据分" hint="建议不低于 78" persistent-hint /></VCol>
-                </VRow>
-              </div>
-            </VExpandTransition>
-        </template>
+        <VExpandTransition>
+          <div v-if="!tmdbFirstMode && config.web_search_fallback" class="web-fallback-box mt-3">
+            <VAlert type="warning" variant="tonal" density="compact" class="mb-3">自动模式固定使用 DuckDuckGo；只有 TMDB 直链与原标题或候选别名共现时才形成证据。</VAlert>
+            <VRow dense>
+              <VCol cols="12" md="4"><VSelect v-model="config.web_search_engine" :items="[
+                { title: '自动选择', value: 'auto' }, { title: 'DuckDuckGo', value: 'duckduckgo' },
+                { title: 'Google', value: 'google' }, { title: 'Brave', value: 'brave' },
+                { title: 'Yahoo', value: 'yahoo' }, { title: 'Yandex', value: 'yandex' }, { title: 'Mojeek', value: 'mojeek' },
+              ]" density="compact" label="搜索引擎" hide-details /></VCol>
+              <VCol cols="6" md="2"><VTextField v-model.number="config.web_search_max_results" density="compact" type="number" min="3" max="15" label="最多结果" hide-details /></VCol>
+              <VCol cols="6" md="2"><VTextField v-model.number="config.web_search_timeout" density="compact" type="number" min="5" max="30" label="超时" suffix="秒" hide-details /></VCol>
+              <VCol cols="12" md="4"><VTextField v-model.number="config.web_search_min_evidence" density="compact" type="number" min="50" max="100" label="最低证据分" hint="建议不低于 78" persistent-hint /></VCol>
+            </VRow>
+          </div>
+        </VExpandTransition>
 
+        <div class="weighted-options-grid mt-3">
           <div class="evidence-box">
             <div class="evidence-head">
               <div><strong>近期季度动画</strong><small>兼顾当前季、跨季连载和上一季补整</small></div>
@@ -140,13 +132,7 @@ function applyBalancedPreset() {
               <VCol cols="6"><VTextField v-model.number="config.recognition_memory_ttl_days" density="compact" hide-details type="number" min="1" max="90" label="保存时间" suffix="天" :disabled="!config.recognition_memory_enabled" /></VCol>
             </VRow>
           </div>
-          <div class="evidence-box">
-            <div class="evidence-head">
-              <div><strong>制作组辅助验证</strong><small>根据已分类字幕组判断动画或真人倾向</small></div>
-              <VSwitch v-model="config.release_group_assist_enabled" color="success" hide-details />
-            </div>
-            <div class="constraint-note"><VIcon icon="mdi-filter-check-outline" size="18" color="success" /><span>已分类制作组作为硬约束，直接排除题材冲突候选；未分类时不参与。</span></div>
-          </div>
+        </div>
       </VCardText>
     </VCard>
 
@@ -230,8 +216,8 @@ function applyBalancedPreset() {
 .main-strategy-card { overflow: hidden; }
 .module-switches { display: flex; flex-wrap: wrap; gap: 6px 28px; }
 .module-switches :deep(.v-input) { flex: 0 0 auto; }
-.unified-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.grid-wide { grid-column: 1 / -1; }
+.quick-options-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.weighted-options-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .toggle-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 72px; padding: 10px 14px; border-radius: 12px; background: rgba(var(--v-theme-on-surface), .035); }
 .toggle-item > div, .evidence-head > div { min-width: 0; }
 .toggle-item strong, .evidence-head strong { display: block; font-size: .9rem; }
@@ -239,7 +225,6 @@ function applyBalancedPreset() {
 .toggle-item :deep(.v-input), .evidence-head :deep(.v-input) { flex: 0 0 auto; }
 .evidence-box { padding: 15px; border: 1px solid rgba(var(--v-theme-primary), .1); border-radius: 13px; background: rgba(var(--v-theme-primary), .025); }
 .evidence-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; margin-bottom: 12px; }
-.constraint-note { display: flex; align-items: flex-start; gap: 7px; color: rgba(var(--v-theme-on-surface), .62); font-size: .76rem; line-height: 1.45; }
 .compact-slider { display: grid; grid-template-columns: 66px minmax(80px, 1fr) 30px; align-items: center; gap: 8px; margin-top: 12px; color: rgba(var(--v-theme-on-surface), .67); font-size: .78rem; }
 .compact-slider strong { color: rgb(var(--v-theme-primary)); text-align: right; font-variant-numeric: tabular-nums; }
 .advanced-panels { border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 14px; overflow: hidden; }
@@ -259,10 +244,10 @@ function applyBalancedPreset() {
   .strategy-hero { align-items: stretch; flex-direction: column; }
   .mode-toggle { width: 100%; }
   .mode-toggle :deep(.v-btn) { flex: 1 1 50%; }
-  .unified-settings-grid { grid-template-columns: 1fr; }
+  .quick-options-grid, .weighted-options-grid { grid-template-columns: 1fr; }
   .panel-toolbar { align-items: flex-start; flex-direction: column; }
 }
 @media (min-width: 761px) and (max-width: 1180px) {
-  .unified-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .quick-options-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>
