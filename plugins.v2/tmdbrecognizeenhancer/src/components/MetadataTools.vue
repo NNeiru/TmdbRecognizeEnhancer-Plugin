@@ -278,6 +278,21 @@ async function saveStrmSync() {
   finally { saving.value = '' }
 }
 
+async function toggleStrmSyncEnabled(value) {
+  const previous = Boolean(strmSync.value.config.enabled)
+  strmSync.value.config.enabled = Boolean(value)
+  saving.value = 'strm-toggle'
+  error.value = ''
+  try {
+    strmSync.value = unwrapResponse(await props.api.post(
+      `${pluginBase.value}/metadata-tools/strm-sync/config`, strmSync.value.config,
+    )) || strmSync.value
+  } catch (err) {
+    strmSync.value.config.enabled = previous
+    error.value = explainError(err, '媒体信息推送开关保存失败')
+  } finally { saving.value = '' }
+}
+
 function addStrmMapping() {
   if (!Array.isArray(strmSync.value.config.path_mappings)) strmSync.value.config.path_mappings = []
   strmSync.value.config.path_mappings.push({ server: '*', source: '', target: '', target_kind: 'strm' })
@@ -877,7 +892,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
           </VCardItem>
           <VCardText class="strm-overview-body">
             <div class="strm-control-row">
-              <VSwitch v-model="strmSync.config.enabled" color="secondary" label="启用媒体信息推送" hide-details />
+              <VSwitch :model-value="strmSync.config.enabled" color="secondary" label="启用媒体信息推送" hide-details :loading="saving === 'strm-toggle'" :disabled="saving === 'strm-toggle'" @update:model-value="toggleStrmSyncEnabled" />
               <div class="strm-counters"><div><span>等待</span><strong>{{ strmSync.counts?.pending || 0 }}</strong></div><div><span>完成</span><strong>{{ strmSync.counts?.completed || 0 }}</strong></div><div><span>需处理</span><strong>{{ strmSync.counts?.attention || 0 }}</strong></div></div>
             </div>
             <VAlert :type="!config.media_probe_enabled ? 'warning' : 'info'" variant="tonal" density="compact">
