@@ -534,6 +534,62 @@ def test_media_probe_runs_even_when_other_naming_modules_are_disabled(monkeypatc
     plugin._media_probe.probe.assert_called_once()
 
 
+def test_strm_sync_uses_full_probe_cache_when_no_naming_fields_are_selected(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "media_probe_enabled": True,
+        "media_probe_fields": [],
+        "strm_media_info_sync_enabled": True,
+    })
+    raw = {
+        "streams": [{"codec_type": "video", "codec_name": "hevc"}],
+        "format": {"duration": "1200"},
+        "chapters": [],
+    }
+    plugin._strm_sync_active = Mock(return_value=True)
+    plugin._media_probe = SimpleNamespace(
+        cached_result=Mock(return_value={
+            "success": True,
+            "raw": raw,
+            "source_size": 1024,
+        }),
+        probe=Mock(),
+    )
+    plugin._enqueue_strm_sync_job = Mock()
+    data = {
+        "fileitem": SimpleNamespace(path="/downloads/Example.mkv"),
+        "mediainfo": SimpleNamespace(title="Example", year="2026"),
+        "transferinfo": SimpleNamespace(
+            target_item=SimpleNamespace(path="/pilipili/Example (2026)/Example.mkv"),
+        ),
+    }
+
+    plugin._maybe_enqueue_strm_sync(data)
+
+    plugin._media_probe.cached_result.assert_called_once_with("/downloads/Example.mkv")
+    plugin._media_probe.probe.assert_not_called()
+    queued_probe, queued_path, _ = plugin._enqueue_strm_sync_job.call_args.args
+    assert queued_probe["raw"] == raw
+    assert queued_path == "/pilipili/Example (2026)/Example.mkv"
+
+
+def test_legacy_strm_mapping_defaults_to_strm_item_paths(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+
+    config = plugin._normalize_config({
+        "strm_media_info_sync_path_mappings": [{
+            "server": "Genshin",
+            "source": "/pilipili",
+            "target": "/mnt2/strm/pilipili2",
+        }],
+    })
+
+    assert config["strm_media_info_sync_path_mappings"][0]["target_kind"] == "strm"
+
+
 def test_current_quarter_catalog_prioritizes_mapped_anime_candidate(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
