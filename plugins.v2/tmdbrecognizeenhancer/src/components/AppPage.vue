@@ -4,6 +4,7 @@ import StrategySettings from './StrategySettings.vue'
 import EpisodeNormalizer from './EpisodeNormalizer.vue'
 import MetadataTools from './MetadataTools.vue'
 import PerformanceDiagnostics from './PerformanceDiagnostics.vue'
+import ModuleHeader from './ModuleHeader.vue'
 import { cloneConfig, ensureUiVersion, mediaTypeText, scoreColor, UI_VERSION, unwrapResponse } from '../utils'
 
 const props = defineProps({
@@ -266,20 +267,18 @@ onMounted(loadStatus)
         <div class="workspace-panels">
           <section v-if="tab === 'status'" class="workspace-panel">
             <div class="tab-content">
-              <div class="d-flex align-center flex-wrap ga-3 mb-5">
-                <div><div class="text-h6">插件与模块状态</div><div class="text-body-2 text-medium-emphasis">总开关关闭时所有接管停止；模块开关可独立控制功能。</div></div>
-                <VSpacer />
-                <VTooltip text="调用 MoviePilot 插件热重载：更新插件版本或接口异常（404）时点击，让新后端代码立即生效，无需重启容器" location="bottom"><template #activator="{ props: tip }"><VBtn v-bind="tip" variant="tonal" prepend-icon="mdi-restart" :loading="reloadingBackend" @click="reloadBackend()">重载插件后端</VBtn></template></VTooltip>
-                <VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving" @click="saveConfig">保存并立即生效</VBtn>
-              </div>
-              <VCard variant="outlined" class="master-switch mb-4">
-                <VCardText class="d-flex align-center flex-wrap ga-4">
-                  <VAvatar color="primary" variant="tonal"><VIcon icon="mdi-power" /></VAvatar>
-                  <div class="flex-grow-1"><div class="font-weight-bold">插件总开关</div><div class="text-body-2 text-medium-emphasis">控制事件接管、运行时适配和全部模块</div></div>
+              <ModuleHeader icon="mdi-view-dashboard-outline" title="插件与模块状态" subtitle="总开关关闭时所有接管停止；模块开关可独立控制功能。">
+                <template #actions>
+                  <VTooltip text="调用 MoviePilot 插件热重载：更新插件版本或接口异常（404）时点击，让新后端代码立即生效，无需重启容器" location="bottom"><template #activator="{ props: tip }"><VBtn v-bind="tip" variant="tonal" prepend-icon="mdi-restart" :loading="reloadingBackend" @click="reloadBackend()">重载插件后端</VBtn></template></VTooltip>
+                  <VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving" @click="saveConfig">保存并立即生效</VBtn>
+                </template>
+                <template #controls>
+                  <div class="header-control-copy"><strong>插件总开关</strong><span>控制事件接管、运行时适配和全部模块</span></div>
+                  <VSpacer />
                   <VSwitch v-model="config.show_sidebar_nav" color="primary" hide-details label="显示侧栏工作台" />
                   <VSwitch v-model="config.enabled" color="success" hide-details :label="config.enabled ? '运行中' : '已关闭'" />
-                </VCardText>
-              </VCard>
+                </template>
+              </ModuleHeader>
               <div class="module-grid">
                 <VCard variant="outlined" class="module-card">
                   <VCardItem><template #prepend><VAvatar color="primary" variant="tonal"><VIcon icon="mdi-database-search-outline" /></VAvatar></template><VCardTitle>TMDB 搜索增强</VCardTitle><VCardSubtitle>{{ modules.recognizer?.status || '状态未知' }}</VCardSubtitle></VCardItem>
@@ -344,6 +343,7 @@ onMounted(loadStatus)
 
           <section v-if="tab === 'preview'" class="workspace-panel">
             <div class="tab-content">
+              <ModuleHeader icon="mdi-flask-outline" title="综合试跑" subtitle="串联检查标题解析、TMDB 候选、集数偏移、制作组编排和最终命名，不写入整理链。" color="secondary" />
               <VRow>
                 <VCol cols="12" md="5">
                   <VCard variant="outlined">
@@ -441,7 +441,13 @@ onMounted(loadStatus)
 
           <section v-if="tab === 'history'" class="workspace-panel">
             <div class="tab-content">
-              <div class="d-flex align-center flex-wrap ga-2 mb-4"><div class="flex-grow-1"><div class="text-h6">模块运行日志</div><div class="text-body-2 text-medium-emphasis">汇总识别决策、集数偏移、字段覆盖及命名处理结果，不保存完整响应</div></div><VSelect v-model="historyFilter" :items="historyFilterItems" item-title="title" item-value="value" density="compact" hide-details class="history-filter" /><VBtn variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" :disabled="!history.length" @click="clearHistory">清空</VBtn><VBtn icon="mdi-refresh" variant="text" :loading="loading" @click="loadStatus" /></div>
+              <ModuleHeader icon="mdi-text-box-search-outline" title="模块运行日志" subtitle="汇总识别决策、集数偏移、字段覆盖及命名处理结果，不保存完整响应。">
+                <template #actions>
+                  <VSelect v-model="historyFilter" :items="historyFilterItems" item-title="title" item-value="value" density="compact" hide-details class="history-filter" />
+                  <VBtn variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" :disabled="!history.length" @click="clearHistory">清空</VBtn>
+                  <VBtn icon="mdi-refresh" variant="text" :loading="loading" @click="loadStatus" />
+                </template>
+              </ModuleHeader>
               <div v-if="filteredHistory.length" class="history-list">
                 <div v-for="(item, historyIndex) in filteredHistory" :key="`${item.created_at}-${item.module}-${item.title}-${historyIndex}`" class="history-row">
                   <div class="history-marker" :class="`history-marker-${historyStatus(item).marker}`"><span /></div>
@@ -488,7 +494,9 @@ onMounted(loadStatus)
 .page-body { padding: 18px 16px 28px; }
 .metric-card, .workspace-card, .history-card, .future-card { border-color: rgba(var(--v-theme-on-surface), .1); border-radius: 14px; }
 .metric-card { height: 100%; background: linear-gradient(145deg, rgba(var(--v-theme-surface),1), rgba(var(--v-theme-primary),.035)); }
-.master-switch { border-radius: 14px; background: linear-gradient(120deg, rgba(var(--v-theme-primary),.055), rgba(var(--v-theme-surface),1)); }
+.header-control-copy { display: flex; flex-direction: column; min-width: 210px; }
+.header-control-copy strong { font-size: .9rem; }
+.header-control-copy span { color: rgba(var(--v-theme-on-surface), .6); font-size: .76rem; }
 .module-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .module-card { min-width: 0; height: 100%; border-radius: 14px; background: rgb(var(--v-theme-surface)); }
 .status-line { display: flex; justify-content: space-between; gap: 14px; margin-top: 12px; color: rgba(var(--v-theme-on-surface),.68); font-size: .86rem; }
@@ -541,5 +549,5 @@ onMounted(loadStatus)
 .history-marker-warning { color: rgb(var(--v-theme-warning)); }
 .history-card { min-width: 0; background: rgb(var(--v-theme-surface)); }
 .future-card { height: 100%; }
-@media (max-width: 720px) { .hero-content { align-items: flex-start; flex-wrap: wrap; padding: 22px; } .hero-content :deep(.v-spacer) { display: none; } .tab-content { padding: 18px; } .sticky-actions { margin: 18px -18px -18px; } .module-grid { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .hero-content { align-items: flex-start; flex-wrap: wrap; padding: 22px; } .hero-content :deep(.v-spacer) { display: none; } .tab-content { padding: 18px; } .sticky-actions { margin: 18px -18px -18px; } .module-grid { grid-template-columns: 1fr; } .header-control-copy { flex-basis: 100%; } }
 </style>

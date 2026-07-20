@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { unwrapResponse } from '../utils'
+import ModuleHeader from './ModuleHeader.vue'
 
 const props = defineProps({ api: { type: Object, default: () => ({}) }, pluginId: { type: String, default: 'TmdbRecognizeEnhancer' } })
 const loading = ref(false)
@@ -126,13 +127,14 @@ const findings = computed(() => {
 
 <template>
   <div>
+    <ModuleHeader icon="mdi-speedometer" title="性能与占用诊断" subtitle="区分 MoviePilot 后端负载、插件任务和当前浏览器页面卡顿；最多保留 30 个页面内采样点。" color="secondary">
+      <template #actions><VBtn color="primary" prepend-icon="mdi-refresh" :loading="loading" @click="sample">立即采样</VBtn></template>
+      <template #controls>
+        <VSwitch v-model="autoRefresh" color="success" label="实时刷新" hide-details />
+        <VSelect v-model="intervalSeconds" :items="intervalItems" item-title="title" item-value="value" density="compact" hide-details class="interval-select" :disabled="!autoRefresh" />
+      </template>
+    </ModuleHeader>
     <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
-    <div class="diagnostic-header mb-4">
-      <div class="flex-grow-1"><div class="text-h6">性能与占用诊断</div><div class="text-body-2 text-medium-emphasis">区分 MoviePilot 后端负载、插件任务和当前浏览器页面卡顿；最多保留 30 个页面内采样点。</div></div>
-      <VSwitch v-model="autoRefresh" color="success" label="实时刷新" hide-details />
-      <VSelect v-model="intervalSeconds" :items="intervalItems" item-title="title" item-value="value" density="compact" hide-details class="interval-select" :disabled="!autoRefresh" />
-      <VBtn color="primary" prepend-icon="mdi-refresh" :loading="loading" @click="sample">立即采样</VBtn>
-    </div>
     <VAlert type="info" variant="tonal" density="compact" class="mb-4">实时刷新只在本页打开时工作，离开页面即停止；推荐 3–5 秒间隔。进程 CPU 需至少两个采样点才有参考价值。</VAlert>
     <VAlert v-if="server?.errors?.length" type="info" variant="tonal" density="compact" class="mb-4">{{ server.errors.join('；') }}。已自动改用系统原生兼容采样，个别指标可能显示不可用。</VAlert>
 
@@ -156,7 +158,6 @@ const findings = computed(() => {
 </template>
 
 <style scoped>
-.diagnostic-header { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; min-height: 68px; padding: 12px 14px; border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 14px; background: rgba(var(--v-theme-on-surface), .018); }
 .interval-select { flex: 0 0 110px; }
 .live-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .live-metric { min-width: 0; padding: 14px 16px 9px; border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 14px; background: rgba(var(--v-theme-surface-variant), .16); }

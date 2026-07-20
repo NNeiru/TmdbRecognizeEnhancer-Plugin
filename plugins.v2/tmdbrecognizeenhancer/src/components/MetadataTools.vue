@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { unwrapResponse } from '../utils'
 import MediaFilePicker from './MediaFilePicker.vue'
+import ModuleHeader from './ModuleHeader.vue'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -11,6 +12,11 @@ const props = defineProps({
   mode: { type: String, default: 'metadata' },
 })
 const emit = defineEmits(['update:modelValue', 'save-config'])
+const headerInfo = computed(() => {
+  if (props.mode === 'naming') return { icon: 'mdi-rename-box-outline', title: '命名规则', subtitle: '统一管理连接符、制作组、自定义字段和最终文本映射，并按实际执行顺序排列。', color: 'orange' }
+  if (props.mode === 'probe') return { icon: 'mdi-waveform', title: '媒体信息识别', subtitle: '整理前读取真实媒体流，补齐技术参数并输出可用于命名的 Jinja2 变量。', color: 'purple' }
+  return { icon: 'mdi-code-braces-box', title: '字段与制作组', subtitle: '查看 MP 当前版本实际加载的识别规则，并为制作组提供候选类型证据。', color: 'primary' }
+})
 const loading = ref(false)
 const saving = ref('')
 const error = ref('')
@@ -657,24 +663,21 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
 
 <template>
   <div>
-    <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
-    <div class="d-flex align-center flex-wrap ga-3 mb-4">
-      <div v-if="props.mode === 'naming'"><div class="text-h6">命名规则</div><div class="text-body-2 text-medium-emphasis">统一管理连接符、制作组、自定义字段和最终文本映射，并按实际执行顺序排列。</div></div>
-      <div v-else-if="props.mode === 'probe'"><div class="text-h6">媒体信息识别</div><div class="text-body-2 text-medium-emphasis">整理前读取真实媒体流，补齐技术参数并输出可用于命名的 Jinja2 变量。</div></div>
-      <div v-else><div class="text-h6">字段与制作组</div><div class="text-body-2 text-medium-emphasis">查看 MP 当前版本实际加载的识别规则，并为制作组提供候选类型证据。</div></div>
-      <VSpacer /><VBtn variant="text" prepend-icon="mdi-refresh" :loading="loading" @click="load">{{ props.mode === 'probe' ? '刷新状态' : '重新读取 MP 规则' }}</VBtn>
-    </div>
-    <VCard variant="flat" border class="module-control-card mb-4"><VCardText class="module-control-row">
-      <template v-if="props.mode === 'probe'">
-        <VSwitch v-model="config.media_probe_enabled" color="secondary" label="整理前自动扫描" hide-details />
-        <div class="module-status-chips">
-          <VChip size="small" :color="data.media_probe?.available ? 'success' : 'warning'" variant="tonal" :prepend-icon="data.media_probe?.available ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'">{{ data.media_probe?.available ? 'ffprobe 可用' : 'ffprobe 待检查' }}</VChip>
-          <VChip size="small" color="secondary" variant="tonal">{{ selectedProbeFieldItems.length }} 个扫描项</VChip>
-          <VChip size="small" variant="tonal">缓存 {{ data.media_probe?.cache_entries || 0 }}</VChip>
-        </div>
+    <ModuleHeader :icon="headerInfo.icon" :title="headerInfo.title" :subtitle="headerInfo.subtitle" :color="headerInfo.color">
+      <template #actions>
+        <VBtn variant="text" prepend-icon="mdi-refresh" :loading="loading" @click="load">{{ props.mode === 'probe' ? '刷新状态' : '重新读取 MP 规则' }}</VBtn>
+        <VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">{{ props.mode === 'probe' ? '保存设置' : '保存模块开关' }}</VBtn>
       </template>
-      <template v-else>
-        <template v-if="props.mode === 'naming'">
+      <template #controls>
+        <template v-if="props.mode === 'probe'">
+          <VSwitch v-model="config.media_probe_enabled" color="purple" label="整理前自动扫描" hide-details />
+          <div class="module-status-chips">
+            <VChip size="small" :color="data.media_probe?.available ? 'success' : 'warning'" variant="tonal" :prepend-icon="data.media_probe?.available ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'">{{ data.media_probe?.available ? 'ffprobe 可用' : 'ffprobe 待检查' }}</VChip>
+            <VChip size="small" color="purple" variant="tonal">{{ selectedProbeFieldItems.length }} 个扫描项</VChip>
+            <VChip size="small" variant="tonal">缓存 {{ data.media_probe?.cache_entries || 0 }}</VChip>
+          </div>
+        </template>
+        <template v-else-if="props.mode === 'naming'">
           <VSwitch v-model="config.custom_rename_fields_enabled" color="secondary" label="启用自定义命名字段" hide-details />
           <VSwitch v-model="config.rename_mapping_enabled" color="orange" label="启用最终文本映射" hide-details />
         </template>
@@ -684,8 +687,8 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
           <VSwitch v-model="config.release_group_field_supplements_enabled" color="secondary" label="制作组补充命名字段" hide-details />
         </template>
       </template>
-      <VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">{{ props.mode === 'probe' ? '保存设置' : '保存模块开关' }}</VBtn>
-    </VCardText></VCard>
+    </ModuleHeader>
+    <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
     <VAlert type="info" variant="tonal" density="compact" class="mb-4">
       {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排（在「字段与制作组」页维护）和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : props.mode === 'probe' ? '扫描发生在命名渲染前，不修改源文件；标准字段可补空、覆盖或追加，probe_* 变量可直接用于命名模板。' : '这里展示当前 MP 实际加载的识别预设；插件覆盖不会修改 MP 或 Rust 文件。' }}
     </VAlert>
@@ -1177,9 +1180,7 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .member-trace { display: flex; flex-wrap: wrap; gap: 8px; }
 .overlay-preview-form { display: grid; gap: 14px; }
 .overlay-preview-actions { display: flex; align-items: center; min-height: 38px; }
-.module-control-card, .workspace-card { background: rgb(var(--v-theme-surface)); box-shadow: none !important; }
-.module-control-card { border-radius: 14px !important; }
-.module-control-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 22px; padding-block: 12px !important; }
+.workspace-card { background: rgb(var(--v-theme-surface)); box-shadow: none !important; }
 .module-status-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .workspace-card { border-radius: 14px !important; }
 .probe-workspace { display: grid; grid-template-columns: minmax(360px, .86fr) minmax(480px, 1.14fr); gap: 16px; align-items: start; }
@@ -1281,8 +1282,6 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .separator-scope { grid-column: auto; }
   .group-layout-grid, .group-preview-form { grid-template-columns: 1fr; }
   .probe-result-table, .supplement-field-grid, .strm-timing-grid { grid-template-columns: 1fr; }
-  .module-control-row { align-items: flex-start; }
-  .module-control-row > .v-spacer { display: none; }
   .module-status-chips { width: 100%; }
   .probe-path-row { grid-template-columns: 1fr; }
   .strm-mapping-row { grid-template-columns: 1fr auto; }

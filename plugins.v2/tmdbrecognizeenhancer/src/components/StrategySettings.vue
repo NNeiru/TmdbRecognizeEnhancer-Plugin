@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue'
+import ModuleHeader from './ModuleHeader.vue'
 
 const props = defineProps({
   modelValue: { type: Object, required: true },
@@ -44,19 +45,14 @@ function applyBalancedPreset() {
 
 <template>
   <div class="strategy-settings">
-    <section class="strategy-hero">
-      <div class="strategy-hero-copy">
-        <VAvatar color="primary" variant="tonal" size="44"><VIcon icon="mdi-database-search-outline" /></VAvatar>
-        <div>
-          <h3>候选选择策略</h3>
-          <p>先选择决策模式，再按需要展开安全阈值和高级参数。</p>
-        </div>
-      </div>
-      <VBtnToggle v-model="config.recognition_mode" mandatory color="primary" variant="outlined" density="comfortable" class="mode-toggle">
-        <VBtn value="tmdb_first" prepend-icon="mdi-numeric-1-circle-outline">首结果</VBtn>
-        <VBtn value="scored" prepend-icon="mdi-scale-balance">评分模式</VBtn>
-      </VBtnToggle>
-    </section>
+    <ModuleHeader icon="mdi-database-search-outline" title="候选选择策略" subtitle="先选择决策模式，再按需要展开安全阈值和高级参数。">
+      <template #actions>
+        <VBtnToggle v-model="config.recognition_mode" mandatory color="primary" variant="outlined" density="comfortable" class="mode-toggle">
+          <VBtn value="tmdb_first" prepend-icon="mdi-numeric-1-circle-outline">首结果</VBtn>
+          <VBtn value="scored" prepend-icon="mdi-scale-balance">评分模式</VBtn>
+        </VBtnToggle>
+      </template>
+    </ModuleHeader>
 
     <VAlert :type="tmdbFirstMode ? 'success' : 'info'" variant="tonal" density="compact" class="mode-summary">
       <template v-if="tmdbFirstMode">只搜索一次完整标题，通常采用 TMDB 首个影视结果；近期季度、识别记忆和人工优先名单可以在候选内调整顺序。</template>
@@ -207,10 +203,6 @@ function applyBalancedPreset() {
 
 <style scoped>
 .strategy-settings { display: flex; flex-direction: column; gap: 0; }
-.strategy-hero { display: flex; align-items: center; gap: 20px; justify-content: space-between; margin-bottom: 12px; padding: 18px 20px; border: 1px solid rgba(var(--v-theme-primary), .14); border-radius: 16px; background: linear-gradient(120deg, rgba(var(--v-theme-primary), .065), rgba(var(--v-theme-secondary), .025)); }
-.strategy-hero-copy { display: flex; align-items: center; gap: 14px; min-width: 0; }
-.strategy-hero h3 { margin: 0; font-size: 1.08rem; }
-.strategy-hero p { margin: 3px 0 0; color: rgba(var(--v-theme-on-surface), .62); font-size: .82rem; }
 .mode-toggle { flex: 0 0 auto; border-radius: 10px; overflow: hidden; }
 .mode-summary { margin-bottom: 16px; }
 .setting-card { border-color: rgba(var(--v-theme-on-surface), .1); border-radius: 14px; }
@@ -242,7 +234,6 @@ function applyBalancedPreset() {
 .weight-head { display: flex; align-items: center; gap: 8px; font-size: .82rem; }
 .weight-head strong { margin-left: auto; color: rgb(var(--v-theme-primary)); font-variant-numeric: tabular-nums; }
 @media (max-width: 760px) {
-  .strategy-hero { align-items: stretch; flex-direction: column; }
   .mode-toggle { width: 100%; }
   .mode-toggle :deep(.v-btn) { flex: 1 1 50%; }
   .quick-options-grid, .weighted-options-grid { grid-template-columns: 1fr; }

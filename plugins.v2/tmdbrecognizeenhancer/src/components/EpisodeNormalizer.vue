@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { unwrapResponse } from '../utils'
+import ModuleHeader from './ModuleHeader.vue'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -679,19 +680,25 @@ onMounted(async () => {
 
 <template>
   <div class="episode-normalizer">
+    <ModuleHeader icon="mdi-animation-outline" title="集数偏移" subtitle="将片源的季集坐标归一化到 TMDB 默认编集或指定剧集组，并可联动 Emby 元数据。" color="success">
+      <template #actions>
+        <VChip :color="runtimeStatus.runtime_compatible ? 'success' : 'warning'" variant="tonal" size="small" :prepend-icon="runtimeStatus.runtime_compatible ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'">
+          {{ runtimeStatus.runtime_compatible ? `${rules.length} 条维护规则` : '运行时不兼容' }}
+        </VChip>
+      </template>
+      <template #controls>
+        <VTabs v-model="subModule" color="primary" show-arrows class="module-header-tabs">
+          <VTab value="rules" prepend-icon="mdi-playlist-check">偏移规则维护</VTab>
+          <VTab value="catalog" prepend-icon="mdi-view-dashboard-outline">季度番剧看板</VTab>
+          <VTab value="emby" prepend-icon="mdi-server-network">Emby 剧集组联动</VTab>
+        </VTabs>
+      </template>
+    </ModuleHeader>
     <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
     <VAlert v-if="!runtimeStatus.runtime_compatible" type="warning" variant="tonal" class="mb-4">
       <div class="font-weight-bold">集数偏移暂不能接管实际整理</div>
       <div>{{ runtimeStatus.runtime_message }}</div>
     </VAlert>
-
-    <VCard variant="tonal" class="submodule-nav mb-4">
-      <VTabs v-model="subModule" color="primary" grow show-arrows>
-        <VTab value="rules" prepend-icon="mdi-playlist-check">偏移规则维护</VTab>
-        <VTab value="catalog" prepend-icon="mdi-view-dashboard-outline">季度番剧看板</VTab>
-        <VTab value="emby" prepend-icon="mdi-server-network">Emby 剧集组联动</VTab>
-      </VTabs>
-    </VCard>
 
     <VCard v-show="subModule === 'rules'" variant="outlined" class="normalizer-card mb-4">
       <VCardItem>
@@ -1165,8 +1172,8 @@ onMounted(async () => {
 
 <style scoped>
 .normalizer-card { border-color: rgba(var(--v-theme-on-surface), .1); border-radius: 14px; }
-.submodule-nav { border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 12px; overflow: hidden; background: rgba(var(--v-theme-on-surface), .018); }
-.submodule-nav :deep(.v-tab) { min-height: 52px; }
+.module-header-tabs { flex: 1 1 520px; min-width: 0; }
+.module-header-tabs :deep(.v-slide-group__content) { justify-content: flex-start; }
 .episode-normalizer :deep(.v-card-title),
 .episode-normalizer :deep(.v-card-subtitle),
 .episode-normalizer :deep(.v-field-label) { overflow-wrap: anywhere; }
