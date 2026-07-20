@@ -7,6 +7,7 @@ export const DEFAULT_CONFIG = {
   prefer_parsed_title: true,
   use_year_hint: true,
   use_original_title_evidence: true,
+  shared_recognition_enabled: true,
   web_search_fallback: false,
   web_search_engine: 'auto',
   web_search_max_results: 8,

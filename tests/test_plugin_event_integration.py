@@ -1238,6 +1238,168 @@ def test_parallel_single_season_entry_is_suppressed_when_parent_contains_target_
     assert standalone["shadow_of"] == 100
 
 
+def test_parallel_single_season_entry_is_suppressed_even_when_tmdb_ranks_it_first(monkeypatch):
+    """私人单季条目排在首位时，仍应采用已包含目标季的系列总条目。"""
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    standalone = {
+        "tmdb_id": 104, "year": "2026", "tmdb_rank": 0,
+        "season_numbers": [0, 1], "number_of_seasons": 1,
+        "title_season": 4, "franchise_base": "exampleanime",
+    }
+    parent = {
+        "tmdb_id": 100, "year": "2020", "tmdb_rank": 1,
+        "season_numbers": [0, 1, 2, 3, 4], "number_of_seasons": 4,
+        "title_season": None, "franchise_base": "exampleanime",
+    }
+
+    ranked, count = plugin._suppress_shadow_season_entries(
+        [standalone, parent], {"season": 4},
+    )
+
+    assert [item["tmdb_id"] for item in ranked] == [100]
+    assert count == 1
+
+
+def test_typed_tv_search_supplements_empty_multi_results(monkeypatch):
+    """Multi 无结果时，已知电视剧类型应由 TV Search 补回候选。"""
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "tmdb_first",
+        "fetch_aliases": False,
+        "shared_recognition_enabled": False,
+    })
+    plugin._tmdb_api = SimpleNamespace(
+        search_multiis=lambda query: [],
+        search=SimpleNamespace(tv_shows=lambda **kwargs: [{
+            "id": 223564,
+            "name": "The 100 Girlfriends Who Really Love You",
+            "first_air_date": "2023-10-08",
+        }]),
+    )
+
+    result = plugin._recognize_title(
+        "Kimi No Koto Ga Daidaidaidaidaisuki Na 100 Nin No Kanojo",
+        hints={"media_type": module.MediaType.TV, "season": 3, "year": "2026"},
+        include_candidates=True,
+    )
+
+    assert result["accepted"] is True
+    assert result["best"]["tmdb_id"] == 223564
+    assert result["candidate_sources"]["multi"]["candidate_count"] == 0
+    assert result["candidate_sources"]["typed"]["candidate_count"] == 1
+
+
+def test_shared_recognition_is_optional_last_resort(monkeypatch):
+    """TMDB 两路均无候选时，共享识别可按开关补回直接 ID。"""
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    module.settings.MEDIA_RECOGNIZE_SHARE = True
+
+    class SharedHelper:
+        @staticmethod
+        def query_recognize_share(meta, mtype=None, keyword_meta=None):
+            return {"tmdbid": 223564, "type": "tv", "season": 3}
+
+        @staticmethod
+        def to_recognize_params(item):
+            return {"tmdbid": item["tmdbid"], "mtype": module.MediaType.TV}
+
+    monkeypatch.setattr(module, "MoviePilotServerHelper", SharedHelper)
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "scored",
+        "fetch_aliases": False,
+        "shared_recognition_enabled": True,
+    })
+    plugin._tmdb_api = SimpleNamespace(
+        search_multiis=lambda query: [],
+        search=SimpleNamespace(tv_shows=lambda **kwargs: []),
+        get_info=lambda mtype, tmdbid: {
+            "id": tmdbid,
+            "name": "The 100 Girlfriends Who Really Love You",
+            "first_air_date": "2023-10-08",
+            "seasons": [{"season_number": 3}],
+        },
+    )
+
+    result = plugin._recognize_title(
+        "Kimi No Koto Ga Daidaidaidaidaisuki Na 100 Nin No Kanojo",
+        hints={"media_type": module.MediaType.TV, "season": 3, "year": "2026"},
+        include_candidates=True,
+    )
+
+    assert result["accepted"] is True
+    assert result["best"]["tmdb_id"] == 223564
+    assert result["best"]["shared_recognition"] is True
+    assert result["candidate_sources"]["shared"]["hit"] is True
+    assert result["decisive_evidence"]["kind"] == "moviepilot-shared-recognition"
+
+
+def test_shared_recognition_switch_prevents_central_query(monkeypatch):
+    """关闭插件共享识别开关后，即使 MP 全局开启也不得访问中央服务。"""
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    module.settings.MEDIA_RECOGNIZE_SHARE = True
+    shared_query = Mock(return_value={"tmdbid": 223564, "type": "tv"})
+    monkeypatch.setattr(module, "MoviePilotServerHelper", SimpleNamespace(
+        query_recognize_share=shared_query,
+        to_recognize_params=lambda item: item,
+    ))
+    plugin._config = plugin._normalize_config({
+        "recognition_mode": "tmdb_first",
+        "fetch_aliases": False,
+        "shared_recognition_enabled": False,
+    })
+    plugin._tmdb_api = SimpleNamespace(
+        search_multiis=lambda query: [],
+        search=SimpleNamespace(tv_shows=lambda **kwargs: []),
+    )
+
+    result = plugin._recognize_title(
+        "Missing Anime",
+        hints={"media_type": module.MediaType.TV, "season": 2},
+        include_candidates=True,
+    )
+
+    assert result["accepted"] is False
+    assert result["candidate_sources"]["shared"]["reason"] == "插件设置已关闭"
+    shared_query.assert_not_called()
+
+
+def test_later_tv_season_year_does_not_override_series_first_air_year(monkeypatch):
+    """S02+ 文件年份是播出上下文，不应强行选择同年新建的平行条目。"""
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({"fetch_aliases": False})
+    candidate = {
+        "id": 223564,
+        "media_type": module.MediaType.TV,
+        "name": "Example Anime",
+        "first_air_date": "2023-10-08",
+        "_query_hits": [{
+            "query": "Example Anime", "query_index": 0, "rank": 0,
+            "result_count": 1, "source": "tmdb_tv",
+        }],
+    }
+
+    scored = plugin._score_candidate(
+        "Example Anime", ["Example Anime"], candidate,
+        {"media_type": module.MediaType.TV, "season": 3, "year": "2026"},
+    )
+    ranked, decisive = plugin._apply_decisive_year_evidence([
+        {"tmdb_id": 223564, "year": "2023", "media_type": "电视剧", "score": 90,
+         "identity_names": ["example anime"], "tmdb_rank": 1},
+        {"tmdb_id": 999999, "year": "2026", "media_type": "电视剧", "score": 89,
+         "identity_names": ["example anime"], "tmdb_rank": 0},
+    ], {"media_type": module.MediaType.TV, "season": 3, "year": "2026"})
+
+    assert scored["components"]["year"] is None
+    assert scored["year_hint_role"] == "episode_air_year_ignored"
+    assert ranked[0]["tmdb_id"] == 223564
+    assert decisive is None
+
+
 def test_exact_year_can_decide_between_same_title_adaptations(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

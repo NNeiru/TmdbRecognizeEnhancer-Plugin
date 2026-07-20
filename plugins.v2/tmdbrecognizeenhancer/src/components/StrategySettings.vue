@@ -83,6 +83,7 @@ function applyBalancedPreset() {
           <div class="toggle-item"><div><strong>使用年份提示</strong><small>标题带年份时参与候选筛选与评分</small></div><VSwitch v-model="config.use_year_hint" color="primary" hide-details /></div>
           <div class="toggle-item"><div><strong>原标题交叉验证</strong><small>确认降级结果仍与未缩减标题相关</small></div><VSwitch v-model="config.use_original_title_evidence" color="primary" hide-details /></div>
           <div class="toggle-item"><div><strong>拉取别名与译名</strong><small>{{ tmdbFirstMode ? '用于展示和诊断，不改变首结果评分' : '用于标题、译名和罗马音交叉验证' }}</small></div><VSwitch v-model="config.fetch_aliases" color="primary" hide-details /></div>
+          <div class="toggle-item"><div><strong>使用 MP 共享识别</strong><small>TMDB 两路直搜均无候选时，查询 MoviePilot 中央共享结果</small></div><VSwitch v-model="config.shared_recognition_enabled" color="primary" hide-details /></div>
           <template v-if="!tmdbFirstMode">
             <div class="toggle-item"><div><strong>主体名称降级</strong><small>例如 Mushoku Tensei: … → Mushoku Tensei</small></div><VSwitch v-model="config.main_title_fallback" color="primary" hide-details /></div>
             <div class="toggle-item"><div><strong>逐词缩短</strong><small>每次缩短仍须通过原标题锚点验证</small></div><VSwitch v-model="config.progressive_fallback" color="warning" hide-details /></div>
@@ -142,7 +143,7 @@ function applyBalancedPreset() {
           <div class="panel-title"><VIcon icon="mdi-playlist-star" color="primary" /><div><strong>TMDB 人工候选规则</strong><small>排除 {{ config.tmdb_exclude_ids?.length || 0 }} 个 · 优先 {{ config.tmdb_prefer_ids?.length || 0 }} 个</small></div></div>
         </VExpansionPanelTitle>
         <VExpansionPanelText>
-          <VAlert type="info" variant="tonal" density="compact" class="mb-4">只作用于本次搜索实际返回的候选。排除先执行；优先名单命中后直接选择，多个优先 ID 按填写顺序。</VAlert>
+          <VAlert type="info" variant="tonal" density="compact" class="mb-4">只作用于本次搜索实际返回的候选。排除先执行；优先名单命中后直接选择，多个优先 ID 按填写顺序。MP 共享识别是中央只读服务，不能在插件内编辑；需要人工纠错时请使用这里的名单。</VAlert>
           <VRow dense>
             <VCol cols="12" md="6"><VCombobox v-model="config.tmdb_exclude_ids" multiple chips closable-chips clearable label="TMDB 排除名单" placeholder="输入 ID 后按回车" hint="在评分、排序和分差前移除；冲突时排除优先" persistent-hint /></VCol>
             <VCol cols="12" md="6"><VCombobox v-model="config.tmdb_prefer_ids" multiple chips closable-chips clearable label="TMDB 优先名单" placeholder="输入 ID 后按回车" hint="候选中出现指定 ID 时直接采用；越靠前越优先" persistent-hint /></VCol>
