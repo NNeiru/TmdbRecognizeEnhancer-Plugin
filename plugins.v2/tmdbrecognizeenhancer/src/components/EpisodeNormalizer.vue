@@ -680,13 +680,9 @@ onMounted(async () => {
 <template>
   <div class="episode-normalizer">
     <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
-    <VAlert
-      v-if="!runtimeStatus.runtime_compatible || !runtimeStatus.plugin_first"
-      type="warning" variant="tonal" class="mb-4"
-    >
+    <VAlert v-if="!runtimeStatus.runtime_compatible" type="warning" variant="tonal" class="mb-4">
       <div class="font-weight-bold">集数偏移暂不能接管实际整理</div>
-      <div v-if="!runtimeStatus.runtime_compatible">{{ runtimeStatus.runtime_message }}</div>
-      <div v-if="!runtimeStatus.plugin_first">请在 MoviePilot 中开启“识别插件优先”。</div>
+      <div>{{ runtimeStatus.runtime_message }}</div>
     </VAlert>
 
     <VCard variant="tonal" class="submodule-nav mb-4">

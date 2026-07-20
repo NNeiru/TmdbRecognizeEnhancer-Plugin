@@ -1204,6 +1204,149 @@ def test_recognizer_module_switch_does_not_disable_fixed_id_episode_stage(monkey
     assert (runtime_meta.begin_season, runtime_meta.begin_episode) == (2, 1)
 
 
+def test_episode_normalizer_no_longer_requires_plugin_first(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    runtime_meta = SimpleNamespace()
+    plugin = _plugin_with_runtime(module, runtime_meta)
+    plugin._config = plugin._normalize_config({
+        "enabled": True, "episode_normalizer_enabled": True,
+    })
+    plugin.save_data(plugin.DATA_KEY_EPISODE_RULES, [{
+        "tmdb_id": 123456,
+        "enabled": True,
+        "target_type": "default",
+        "episode_group_id": "",
+        "installments": [],
+    }])
+    plugin._episode_normalizer = SimpleNamespace(normalize=Mock(return_value={
+        "applied": True,
+        "season": 2,
+        "episode": 1,
+        "end_episode": None,
+        "episode_group": None,
+        "reason": "native result normalized",
+        "strategy": "test",
+    }))
+    module.settings.RECOGNIZE_PLUGIN_FIRST = False
+
+    result = plugin._normalize_best_episode(
+        best={"tmdb_id": 123456, "media_type": module.MediaType.TV},
+        hints={"season": 1, "episode": 13, "end_episode": None},
+        raw_title="Example S01E13.mkv",
+        parsed_name="Example",
+    )
+
+    assert result["applied"] is True
+    assert result["strategy"] != "plugin-first-required"
+
+
+def test_native_recognition_result_is_normalized_before_return(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    runtime_meta = SimpleNamespace(
+        name="Example", original_name="Example S01E13.mkv", year="2026",
+        type=module.MediaType.TV, begin_season=1, begin_episode=13,
+        end_episode=None, total_episode=1, episode_group=None, tmdbid=None,
+    )
+    plugin = _plugin_with_runtime(module, runtime_meta)
+    plugin._config = plugin._normalize_config({
+        "enabled": True, "episode_normalizer_enabled": True,
+    })
+    plugin._normalize_best_episode = Mock(return_value={
+        "applied": True,
+        "season": 2,
+        "episode": 1,
+        "end_episode": None,
+        "episode_group": "production",
+        "reason": "映射到目标编集",
+        "strategy": "test",
+    })
+    plugin._append_module_history = Mock()
+    mediainfo = SimpleNamespace(
+        tmdb_id=123456, type=module.MediaType.TV, title="Example",
+        year="2026", season=1, episode_group=None,
+    )
+
+    returned = plugin._apply_post_recognition_episode_normalization(
+        runtime_meta, mediainfo,
+    )
+
+    assert returned is mediainfo
+    assert (runtime_meta.begin_season, runtime_meta.begin_episode) == (2, 1)
+    assert runtime_meta.episode_group == "production"
+    assert mediainfo.season == 2
+    assert mediainfo.episode_group == "production"
+    plugin._append_module_history.assert_called_once()
+
+
+def test_target_coordinate_still_attaches_selected_episode_group(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    runtime_meta = SimpleNamespace(
+        name="Example", original_name="Example S02E01.mkv", year="2026",
+        type=module.MediaType.TV, begin_season=2, begin_episode=1,
+        end_episode=None, total_episode=1, episode_group=None, tmdbid=None,
+    )
+    plugin = _plugin_with_runtime(module, runtime_meta)
+    plugin._config = plugin._normalize_config({
+        "enabled": True, "episode_normalizer_enabled": True,
+    })
+    plugin._normalize_best_episode = Mock(return_value={
+        "applied": False,
+        "season": 2,
+        "episode": 1,
+        "end_episode": None,
+        "episode_group": "production",
+        "reason": "当前季集已经符合目标编集",
+        "strategy": "target-coordinate",
+    })
+    plugin._append_module_history = Mock()
+    mediainfo = SimpleNamespace(
+        tmdb_id=123456, type=module.MediaType.TV, title="Example",
+        year="2026", season=2, episode_group=None,
+    )
+
+    plugin._apply_post_recognition_episode_normalization(runtime_meta, mediainfo)
+
+    assert runtime_meta.episode_group == "production"
+    assert mediainfo.episode_group == "production"
+    plugin._append_module_history.assert_called_once()
+
+
+def test_transfer_fallback_refreshes_episode_data_after_normalization(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    meta = SimpleNamespace(
+        begin_season=1, begin_episode=13, end_episode=None, episode_group=None,
+    )
+    mediainfo = SimpleNamespace(
+        tmdb_id=123456, season=1, episode_group=None,
+    )
+
+    def normalize(current_meta, current_media):
+        current_meta.begin_season = 2
+        current_meta.begin_episode = 1
+        current_meta.episode_group = "production"
+        current_media.season = 2
+        current_media.episode_group = "production"
+        return current_media
+
+    plugin._apply_post_recognition_episode_normalization = Mock(side_effect=normalize)
+    tmdb_module = ModuleType("app.chain.tmdb")
+    tmdb_chain = Mock()
+    tmdb_chain.tmdb_episodes.return_value = ["S02E01"]
+    tmdb_module.TmdbChain = Mock(return_value=tmdb_chain)
+    monkeypatch.setitem(sys.modules, "app.chain", ModuleType("app.chain"))
+    monkeypatch.setitem(sys.modules, "app.chain.tmdb", tmdb_module)
+
+    result = plugin._apply_transfer_episode_normalization(
+        meta, mediainfo, ["S01E13"],
+    )
+
+    assert result == ["S02E01"]
+    tmdb_chain.tmdb_episodes.assert_called_once_with(
+        tmdbid=123456, season=2, episode_group="production",
+    )
+
+
 def test_anilist_quarter_import_reads_all_pages(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())

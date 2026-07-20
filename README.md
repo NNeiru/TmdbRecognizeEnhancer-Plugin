@@ -20,7 +20,7 @@
 ## 兼容要求
 
 - MoviePilot V2 `>= 2.13.0`
-- 使用集数偏移时，需要在 MoviePilot 中启用“识别插件优先”
+- 集数偏移通过运行时适配在最终识别成功后执行，兼容 MoviePilot 的“插件优先”和“原生优先”；希望 TMDB 搜索增强参与每次识别时才需要开启“识别插件优先”
 - Emby 剧集组联动是可选功能，需要：
   - MoviePilot 已配置可用的 Emby 媒体服务器
   - Emby 已安装支持 TMDB 剧集组的 StrmAssistant

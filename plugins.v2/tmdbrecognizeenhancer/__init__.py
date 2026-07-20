@@ -57,6 +57,7 @@ from .release_group_arranger import ReleaseGroupArrangementRegistry
 from .rename_mapping import RenameMappingRegistry
 from .runtime_adapter import (
     CustomizationSeparatorAdapter,
+    EpisodeNormalizationTransferAdapter,
     MoviePilotRuntimeAdapter,
     SubtitleRenameAdapter,
 )
@@ -68,7 +69,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.7.0-beta.23"
+    plugin_version = "0.7.0-beta.24"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -232,6 +233,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._tmdb_api: Optional[TmdbApi] = None
         self._episode_normalizer: Optional[EpisodeNormalizer] = None
         self._runtime_adapter = MoviePilotRuntimeAdapter()
+        self._episode_transfer_adapter = EpisodeNormalizationTransferAdapter()
         self._release_group_registry = ReleaseGroupRegistry()
         self._recognition_rules = RecognitionRuleRegistry()
         self._rename_fields = RenameFieldRegistry()
@@ -702,6 +704,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._stop_strm_worker()
         self._sync_event_handler_state(enabled=False)
         self._runtime_adapter.uninstall()
+        self._episode_transfer_adapter.uninstall()
         self._subtitle_rename_adapter.uninstall()
         self._customization_separator_adapter.uninstall()
         self._close_tmdb_client()
@@ -740,7 +743,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         "enabled": bool(self._config.get("episode_normalizer_enabled")),
                         "status": (
                             "运行中" if self.get_state() and self._config.get("episode_normalizer_enabled")
-                            and self._runtime_adapter.compatible else "等待运行时适配"
+                            and self._runtime_adapter.compatible
+                            and self._episode_transfer_adapter.compatible else "等待运行时适配"
                             if self.get_state() and self._config.get("episode_normalizer_enabled") else "已停用"
                         ),
                     },
@@ -799,8 +803,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         for value in self._read_season_catalog_cache().values()
                         if isinstance(value, dict)
                     ),
-                    "runtime_compatible": self._runtime_adapter.compatible,
-                    "runtime_message": self._runtime_adapter.message,
+                    "runtime_compatible": (
+                        self._runtime_adapter.compatible
+                        and self._episode_transfer_adapter.compatible
+                    ),
+                    "runtime_message": (
+                        f"{self._runtime_adapter.message}；"
+                        f"{self._episode_transfer_adapter.message}"
+                    ),
                     "plugin_first": bool(getattr(settings, "RECOGNIZE_PLUGIN_FIRST", False)),
                     "emby_sync": self._emby_sync_status_data(include_jobs=False),
                 },
@@ -3648,9 +3658,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _sync_runtime_adapter_state(self) -> None:
         """只在插件启用期间安装运行时适配器。"""
         if self.get_state():
-            self._runtime_adapter.install(self._apply_recognition_rule_overrides)
+            self._runtime_adapter.install(
+                self._apply_recognition_rule_overrides,
+                self._apply_post_recognition_episode_normalization,
+            )
+            self._episode_transfer_adapter.install(
+                self._apply_transfer_episode_normalization,
+            )
         else:
             self._runtime_adapter.uninstall()
+            self._episode_transfer_adapter.uninstall()
 
     def _sync_subtitle_adapter_state(self) -> None:
         """按模块开关安装或恢复 MP 字幕后缀后的最终命名点。"""
@@ -3822,10 +3839,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return hints
 
     def _apply_runtime_meta(
-            self, best: Dict[str, Any], adjustment: Optional[Dict[str, Any]]
+            self,
+            best: Dict[str, Any],
+            adjustment: Optional[Dict[str, Any]],
+            meta: Any = None,
     ) -> None:
         """直接写回本次识别 MetaBase，使原版 MP 能按 TMDBID 和目标编集继续处理。"""
-        meta = self._runtime_adapter.current_meta()
+        meta = meta or self._runtime_adapter.current_meta()
         if meta is None:
             return
         tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
@@ -3844,8 +3864,162 @@ class TmdbRecognizeEnhancer(_PluginBase):
             meta.end_episode = int(adjustment["end_episode"])
             if meta.begin_episode is not None:
                 meta.total_episode = max(0, meta.end_episode - meta.begin_episode + 1)
-        if adjustment.get("episode_group"):
-            meta.episode_group = str(adjustment["episode_group"])
+        if "episode_group" in adjustment:
+            meta.episode_group = (
+                str(adjustment["episode_group"])
+                if adjustment.get("episode_group") else None
+            )
+
+    def _apply_post_recognition_episode_normalization(
+            self, meta: Any, mediainfo: Any
+    ) -> Any:
+        """无论最终结果来自 MP 原生还是插件，都在识别成功后检查目标编集。"""
+        if (
+                not self.get_state()
+                or not self._config.get("episode_normalizer_enabled")
+                or meta is None
+                or mediainfo is None
+        ):
+            return mediainfo
+        try:
+            media_type = self._normalize_media_type(
+                self._event_get(mediainfo, "type") or getattr(meta, "type", None)
+            )
+            tmdb_id = self._safe_int(
+                self._event_get(mediainfo, "tmdb_id")
+                or self._event_get(mediainfo, "tmdbid")
+                or getattr(meta, "tmdbid", 0),
+                0,
+            )
+            if media_type != MediaType.TV or not tmdb_id:
+                return mediainfo
+
+            raw_title = self._clean_title(
+                getattr(meta, "original_name", "")
+                or getattr(meta, "org_string", "")
+                or getattr(meta, "name", "")
+            )
+            parsed_name = self._clean_title(
+                getattr(meta, "name", "") or getattr(meta, "title", "")
+            )
+            hints = {
+                "season": self._optional_int(getattr(meta, "begin_season", None)),
+                "episode": self._optional_int(getattr(meta, "begin_episode", None)),
+                "end_episode": self._optional_int(getattr(meta, "end_episode", None)),
+            }
+            adjustment = self._normalize_best_episode(
+                best={
+                    "tmdb_id": tmdb_id,
+                    "media_type": media_type,
+                    "name": self._event_get(mediainfo, "title") or parsed_name,
+                    "year": self._event_get(mediainfo, "year") or getattr(meta, "year", ""),
+                },
+                hints=hints,
+                raw_title=raw_title,
+                parsed_name=parsed_name,
+            )
+            if not adjustment or not (
+                    adjustment.get("applied")
+                    or adjustment.get("strategy") == "target-coordinate"
+            ):
+                return mediainfo
+
+            before = (
+                self._optional_int(getattr(meta, "begin_season", None)),
+                self._optional_int(getattr(meta, "begin_episode", None)),
+                self._optional_int(getattr(meta, "end_episode", None)),
+                str(getattr(meta, "episode_group", "") or ""),
+                self._optional_int(self._event_get(mediainfo, "season")),
+                str(self._event_get(mediainfo, "episode_group") or ""),
+            )
+            self._apply_runtime_meta(
+                {"tmdb_id": tmdb_id, "media_type": media_type},
+                adjustment,
+                meta=meta,
+            )
+            self._event_set(mediainfo, "season", adjustment.get("season"))
+            self._event_set(
+                mediainfo,
+                "episode_group",
+                adjustment.get("episode_group") or None,
+            )
+            after = (
+                self._optional_int(getattr(meta, "begin_season", None)),
+                self._optional_int(getattr(meta, "begin_episode", None)),
+                self._optional_int(getattr(meta, "end_episode", None)),
+                str(getattr(meta, "episode_group", "") or ""),
+                self._optional_int(self._event_get(mediainfo, "season")),
+                str(self._event_get(mediainfo, "episode_group") or ""),
+            )
+            if before == after:
+                return mediainfo
+            self._append_module_history(
+                module="集数偏移",
+                title=str(
+                    self._event_get(mediainfo, "title")
+                    or parsed_name
+                    or f"TMDB {tmdb_id}"
+                ),
+                reason=(
+                    f"最终识别结果 TMDB {tmdb_id}："
+                    f"S{hints.get('season')}E{hints.get('episode')} → "
+                    f"S{adjustment.get('season')}E{adjustment.get('episode')}；"
+                    f"{adjustment.get('reason') or adjustment.get('strategy')}"
+                ),
+                stages=["最终识别结果", "集数偏移"],
+            )
+        except Exception as err:
+            logger.warning(
+                f"[媒体整理增强] 最终识别后的集数归一化失败，保留 MP 原结果：{err}"
+            )
+        return mediainfo
+
+    def _apply_transfer_episode_normalization(
+            self, meta: Any, mediainfo: Any, episodes_info: Any
+    ) -> Any:
+        """兜底处理直接携带识别结果的整理任务，并刷新对应目标季集数据。"""
+        before = (
+            self._optional_int(getattr(meta, "begin_season", None)) if meta else None,
+            self._optional_int(getattr(meta, "begin_episode", None)) if meta else None,
+            self._optional_int(getattr(meta, "end_episode", None)) if meta else None,
+            str(getattr(meta, "episode_group", "") or "") if meta else "",
+            self._optional_int(self._event_get(mediainfo, "season")),
+            str(self._event_get(mediainfo, "episode_group") or ""),
+        )
+        self._apply_post_recognition_episode_normalization(meta, mediainfo)
+        after = (
+            self._optional_int(getattr(meta, "begin_season", None)) if meta else None,
+            self._optional_int(getattr(meta, "begin_episode", None)) if meta else None,
+            self._optional_int(getattr(meta, "end_episode", None)) if meta else None,
+            str(getattr(meta, "episode_group", "") or "") if meta else "",
+            self._optional_int(self._event_get(mediainfo, "season")),
+            str(self._event_get(mediainfo, "episode_group") or ""),
+        )
+        if before == after or mediainfo is None:
+            return episodes_info
+        try:
+            from app.chain.tmdb import TmdbChain
+
+            tmdb_id = self._safe_int(
+                self._event_get(mediainfo, "tmdb_id")
+                or self._event_get(mediainfo, "tmdbid"),
+                0,
+            )
+            season = self._optional_int(self._event_get(mediainfo, "season"))
+            if season is None and meta is not None:
+                season = self._optional_int(getattr(meta, "begin_season", None))
+            if not tmdb_id:
+                return episodes_info
+            return TmdbChain().tmdb_episodes(
+                tmdbid=tmdb_id,
+                season=1 if season is None else season,
+                episode_group=self._event_get(mediainfo, "episode_group") or None,
+            )
+        except Exception as err:
+            logger.warning(
+                f"[媒体整理增强] 集数偏移后刷新 TMDB 季集数据失败，沿用原数据：{err}"
+            )
+            return episodes_info
 
     def _normalize_best_episode(
             self,
@@ -3865,15 +4039,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "end_episode": hints.get("end_episode"),
                 "reason": self._runtime_adapter.message,
                 "strategy": "runtime-incompatible",
-            }
-        if not bool(getattr(settings, "RECOGNIZE_PLUGIN_FIRST", False)):
-            return {
-                "applied": False,
-                "season": hints.get("season"),
-                "episode": hints.get("episode"),
-                "end_episode": hints.get("end_episode"),
-                "reason": "请先在 MP 中开启识别插件优先，否则原生识别成功时插件不会运行",
-                "strategy": "plugin-first-required",
             }
         media_type = self._normalize_media_type(best.get("media_type"))
         if media_type != MediaType.TV:

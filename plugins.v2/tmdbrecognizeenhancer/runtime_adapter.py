@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from functools import wraps
+from inspect import signature
 from pathlib import Path
 from typing import Any, Optional
 
@@ -15,6 +16,7 @@ class MoviePilotRuntimeAdapter:
     _sync_marker = "_tmdb_enhancer_sync_wrapper"
     _async_marker = "_tmdb_enhancer_async_wrapper"
     _processor_attr = "_tmdb_enhancer_meta_processor"
+    _postprocessor_attr = "_tmdb_enhancer_meta_postprocessor"
     _processor_owner_attr = "_tmdb_enhancer_meta_processor_owner"
 
     def __init__(self):
@@ -22,7 +24,7 @@ class MoviePilotRuntimeAdapter:
         self.message = "尚未安装运行时适配器"
         self._owner_token = object()
 
-    def install(self, processor=None) -> bool:
+    def install(self, processor=None, postprocessor=None) -> bool:
         """安装轻量包装；MoviePilot 接口不兼容时安全返回 False。"""
         try:
             from app.chain.media import MediaChain
@@ -41,6 +43,7 @@ class MoviePilotRuntimeAdapter:
             context = ContextVar("tmdb_recognize_enhancer_meta", default=None)
             setattr(MediaChain, self._context_attr, context)
         setattr(MediaChain, self._processor_attr, processor)
+        setattr(MediaChain, self._postprocessor_attr, postprocessor)
         setattr(MediaChain, self._processor_owner_attr, self._owner_token)
 
         current_sync = getattr(MediaChain, sync_name)
@@ -54,7 +57,15 @@ class MoviePilotRuntimeAdapter:
                     active_processor(metainfo)
                 token = context.set(metainfo)
                 try:
-                    return original_sync(chain, metainfo, *args, **kwargs)
+                    result = original_sync(chain, metainfo, *args, **kwargs)
+                    active_postprocessor = getattr(
+                        MediaChain, self._postprocessor_attr, None
+                    )
+                    if callable(active_postprocessor):
+                        processed = active_postprocessor(metainfo, result)
+                        if processed is not None:
+                            result = processed
+                    return result
                 finally:
                     context.reset(token)
 
@@ -78,7 +89,15 @@ class MoviePilotRuntimeAdapter:
                     active_processor(metainfo)
                 token = context.set(metainfo)
                 try:
-                    return await original_async(chain, metainfo, *args, **kwargs)
+                    result = await original_async(chain, metainfo, *args, **kwargs)
+                    active_postprocessor = getattr(
+                        MediaChain, self._postprocessor_attr, None
+                    )
+                    if callable(active_postprocessor):
+                        processed = active_postprocessor(metainfo, result)
+                        if processed is not None:
+                            result = processed
+                    return result
                 finally:
                     context.reset(token)
 
@@ -90,7 +109,7 @@ class MoviePilotRuntimeAdapter:
             setattr(current_async, "_tmdb_enhancer_owner", self._owner_token)
 
         self.compatible = True
-        self.message = "已捕获 MP 识别词处理后的媒体元数据"
+        self.message = "已接入 MP 识别前字段覆盖与识别后集数归一化"
         return True
 
     def uninstall(self) -> None:
@@ -113,6 +132,7 @@ class MoviePilotRuntimeAdapter:
                 setattr(MediaChain, method_name, original)
         if getattr(MediaChain, self._processor_owner_attr, None) is self._owner_token:
             setattr(MediaChain, self._processor_attr, None)
+            setattr(MediaChain, self._postprocessor_attr, None)
             setattr(MediaChain, self._processor_owner_attr, None)
         self.compatible = False
         self.message = "运行时适配器已卸载"
@@ -126,6 +146,84 @@ class MoviePilotRuntimeAdapter:
             return None
         context = getattr(MediaChain, MoviePilotRuntimeAdapter._context_attr, None)
         return context.get() if isinstance(context, ContextVar) else None
+
+
+class EpisodeNormalizationTransferAdapter:
+    """在实际文件整理入口兜底归一化，覆盖已携带 MediaInfo 的任务。"""
+
+    _method_name = "transfer"
+    _marker = "_tmdb_enhancer_episode_transfer_wrapper"
+    _processor_attr = "_tmdb_enhancer_episode_transfer_processor"
+    _processor_owner_attr = "_tmdb_enhancer_episode_transfer_processor_owner"
+
+    def __init__(self) -> None:
+        self.compatible = False
+        self.message = "尚未接入实际整理前的集数归一化"
+        self._owner_token = object()
+
+    def install(self, processor=None) -> bool:
+        try:
+            from app.modules.filemanager import FileManagerModule
+        except Exception as err:
+            self.message = f"无法导入 MoviePilot FileManagerModule：{err}"
+            return False
+        current = getattr(FileManagerModule, self._method_name, None)
+        if not callable(current):
+            self.message = "当前 MoviePilot 缺少可兼容的文件整理入口"
+            return False
+
+        original = getattr(current, "_tmdb_enhancer_original", current)
+        parameter_names = set(signature(original).parameters)
+        required = {"meta", "mediainfo", "episodes_info"}
+        if not required.issubset(parameter_names):
+            self.message = "当前 MoviePilot 文件整理参数不兼容"
+            return False
+
+        setattr(FileManagerModule, self._processor_attr, processor)
+        setattr(FileManagerModule, self._processor_owner_attr, self._owner_token)
+        if not getattr(current, self._marker, False):
+            original_signature = signature(current)
+
+            @wraps(current)
+            def wrapper(handler, *args, **kwargs):
+                bound = original_signature.bind_partial(handler, *args, **kwargs)
+                active_processor = getattr(FileManagerModule, self._processor_attr, None)
+                if callable(active_processor):
+                    updated_episodes = active_processor(
+                        bound.arguments.get("meta"),
+                        bound.arguments.get("mediainfo"),
+                        bound.arguments.get("episodes_info"),
+                    )
+                    if updated_episodes is not None:
+                        bound.arguments["episodes_info"] = updated_episodes
+                return current(*bound.args, **bound.kwargs)
+
+            setattr(wrapper, self._marker, True)
+            setattr(wrapper, "_tmdb_enhancer_original", current)
+            setattr(wrapper, "_tmdb_enhancer_owner", self._owner_token)
+            setattr(FileManagerModule, self._method_name, wrapper)
+        else:
+            setattr(current, "_tmdb_enhancer_owner", self._owner_token)
+
+        self.compatible = True
+        self.message = "已接入最终识别后与实际整理前的集数归一化"
+        return True
+
+    def uninstall(self) -> None:
+        try:
+            from app.modules.filemanager import FileManagerModule
+        except Exception:
+            return
+        current = getattr(FileManagerModule, self._method_name, None)
+        original = getattr(current, "_tmdb_enhancer_original", None)
+        owner = getattr(current, "_tmdb_enhancer_owner", None)
+        if current and getattr(current, self._marker, False) and original and owner is self._owner_token:
+            setattr(FileManagerModule, self._method_name, original)
+        if getattr(FileManagerModule, self._processor_owner_attr, None) is self._owner_token:
+            setattr(FileManagerModule, self._processor_attr, None)
+            setattr(FileManagerModule, self._processor_owner_attr, None)
+        self.compatible = False
+        self.message = "实际整理前集数适配器已卸载"
 
 
 class SubtitleRenameAdapter:
