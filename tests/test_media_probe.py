@@ -1,6 +1,8 @@
 """整理前媒体流扫描的纯解析与字段写入测试。"""
 
 import importlib.util
+import io
+import zipfile
 from pathlib import Path
 
 
@@ -8,12 +10,16 @@ ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / "plugins.v2" / "tmdbrecognizeenhancer" / "media_probe.py"
 
 
-def _probe_class():
+def _load_module():
     spec = importlib.util.spec_from_file_location("media_probe_test", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(module)
-    return module.MediaFileProbe
+    return module
+
+
+def _probe_class():
+    return _load_module().MediaFileProbe
 
 
 def _sample_payload():
@@ -205,6 +211,55 @@ def test_subtitle_rules_support_contains_and_threshold_in_order():
     # 未命中任何规则时回退到自动组合（单语言用全称）
     assert probe.map_subtitles(result_for("英语"), rules) == "英语内封"
     assert probe.map_subtitles({"context": {}}, ">=1 => 有内封") == ""
+
+
+def test_iso_probe_requires_static_ffprobe(tmp_path):
+    probe = _probe_class()()
+    iso = tmp_path / "Movie.iso"
+    iso.write_bytes(b"fake")
+
+    result = probe.probe(str(iso), executable_path="", iso_executable_path="")
+
+    assert result["success"] is False
+    assert "静态 ffprobe" in result["reason"]
+
+
+def test_static_ffprobe_provisioner_downloads_and_installs(tmp_path):
+    module = _load_module()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("ffprobe", b"#!/bin/sh\necho ok\n")
+        bundle.writestr("readme.txt", "docs")
+    urls = []
+
+    def downloader(url):
+        urls.append(url)
+        return archive.getvalue()
+
+    provisioner = module.StaticFfprobeProvisioner(lambda: tmp_path, downloader)
+    assert provisioner.installed_path() == ""
+
+    provisioner.ensure_installed(background=False)
+
+    status = provisioner.status()
+    assert status["installed"] is True
+    assert status["last_error"] == ""
+    assert Path(status["path"]).read_bytes().startswith(b"#!/bin/sh")
+    assert provisioner.VERSION in urls[0] and "static-ffprobe" in urls[0]
+    # 已安装后再次调用是幂等的，不会重复下载
+    provisioner.ensure_installed(background=False)
+    assert len(urls) == 1
+
+
+def test_static_ffprobe_provisioner_records_download_failure(tmp_path):
+    module = _load_module()
+    provisioner = module.StaticFfprobeProvisioner(lambda: tmp_path, lambda url: None)
+
+    provisioner.ensure_installed(background=False)
+
+    status = provisioner.status()
+    assert status["installed"] is False
+    assert "下载失败" in status["last_error"]
 
 
 def test_clear_cache_resets_entries():

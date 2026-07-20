@@ -5,7 +5,7 @@
 ## 运行要求
 
 - MoviePilot V2 `>= 2.13.0`
-- 插件版本：`0.7.0-beta.15`
+- 插件版本：`0.7.0-beta.16`
 - 集数偏移需要 MoviePilot 开启“识别插件优先”
 - Emby 剧集组联动需要 MP 已配置 Emby，并在 Emby 安装支持 `TmdbEg` 的 StrmAssistant
 
@@ -92,6 +92,7 @@
 - 每类结果均可独立启停并设置补空、覆盖或追加策略。字幕组合写入 `customization`（`probe_subtitle_mapped`）：规则按行序首条命中，`简体+繁体 => 简繁内封` 精确匹配语言集合，`包含:简体+日语 => 简日内封` 为子集匹配，`>=4 => 多国字幕` 按语言数量（适合 CR/Netflix 多语种 WEB-DL）；未命中任何规则时自动回退为语言组合（如“简繁日内封”，超过 3 种语言归为“多国内封”），因此只需为想改名的组合写规则。
 - 字幕相关变量分工：`probe_subtitle_languages` 是轨道 language 标签对应的单一语言（标题只用于细分简体/繁体，“简日双语”轨记为简体）；`probe_subtitle_titles` 是轨道原始标题（简日双语、繁日雙語）；`probe_subtitle_track_labels` 是每轨归一后的简写（简日、繁日）。简繁判定覆盖“简日双语”“繁日雙語”“GB/BIG5/zh-Hans/zh-Hant”等常见标注写法，映射规则的“简体+繁体+日语”与“简日+繁日”写法可互相命中。
 - 文件试扫可通过 MoviePilot 容器目录树选择真实媒体文件，同时查看写入 MP 标准字段的结果和全部 `probe_*` Jinja2 变量。
+- ISO 原盘探测（可选）：官方镜像的 ffprobe 没有 libbluray，读不出 ISO 原盘播放列表。开启后插件从 [StrmAssistant.Releases](https://github.com/sjtuross/StrmAssistant.Releases/tree/main/static-ffprobe) 自动下载对应平台的静态 ffprobe（约 15MB）到插件数据目录并以 `bluray:` 协议探测，**只接管 `.iso` 文件**，普通视频仍使用原 ffprobe。下载遵循 MP 的 `GITHUB_PROXY` 与代理设置；默认关闭，不开启则完全不下载。
 - `probe_*` 可直接用于 MP 命名模板，但只有启用本模块且实际文件可读时才有值；无法从文件名推断的音轨或字幕信息保持为空。
 
 当前 MoviePilot 官方 Dockerfile 已将静态 `ffmpeg` 与 `ffprobe` 放在 `/usr/local/bin`。若扫描页显示不可用，应先确认运行的是当前官方镜像并重新创建容器；自定义镜像可持久挂载二进制并在插件中填写其容器内路径。插件不会在运行中自动执行包管理器或下载程序，因为插件通常没有 root 权限，容器重建也会丢失这类临时安装。

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { unwrapResponse } from '../utils'
 import MediaFilePicker from './MediaFilePicker.vue'
 
@@ -263,6 +263,32 @@ async function clearProbeCache() {
     probeCacheNotice.value = response?.data?.message || response?.message || '扫描缓存已清除'
   } catch (err) { error.value = explainError(err, '清除扫描缓存失败') }
   finally { saving.value = '' }
+}
+
+const staticFfprobe = computed(() => data.value.media_probe?.static_ffprobe || {})
+let staticFfprobePoll = null
+
+async function installStaticFfprobe(silent = false) {
+  saving.value = 'static-ffprobe'
+  if (!silent) error.value = ''
+  try {
+    const response = await props.api.post(`${pluginBase.value}/metadata-tools/media-probe/static-ffprobe/install`)
+    const status = unwrapResponse(response)
+    if (data.value?.media_probe && status) data.value.media_probe.static_ffprobe = status
+    scheduleStaticFfprobePoll()
+  } catch (err) { if (!silent) error.value = explainError(err, '静态 ffprobe 下载触发失败') }
+  finally { saving.value = '' }
+}
+
+function scheduleStaticFfprobePoll() {
+  // 下载在后端后台线程执行，前端轮询 metadata-tools 直到就绪或报错
+  if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll)
+  staticFfprobePoll = window.setTimeout(async () => {
+    staticFfprobePoll = null
+    try { await load() } catch (_) { /* 轮询失败静默 */ }
+    const status = staticFfprobe.value
+    if (status.installing) scheduleStaticFfprobePoll()
+  }, 3000)
 }
 
 async function reloadPlugin() {
@@ -532,6 +558,7 @@ async function previewGroupArrangement() {
 }
 
 onMounted(load)
+onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll) })
 </script>
 
 <template>
@@ -630,8 +657,21 @@ onMounted(load)
             <VExpansionPanel>
               <VExpansionPanelTitle><div><div class="font-weight-medium">高级设置与 ffprobe</div><div class="text-caption text-medium-emphasis">超时、自定义程序路径和安装诊断</div></div></VExpansionPanelTitle>
               <VExpansionPanelText><div class="probe-advanced-grid"><VTextField v-model.number="config.media_probe_timeout" type="number" min="3" max="30" label="单文件超时（秒）" hide-details /><VTextField v-model="config.media_probe_executable" label="自定义 ffprobe 路径（通常留空）" placeholder="/usr/local/bin/ffprobe" clearable hide-details /></div>
-                <div v-if="mediaProbeBackendSupported && !data.media_probe?.available" class="mt-3"><div class="text-body-2 mb-2">MoviePilot 当前官方 Dockerfile 已包含 <code>/usr/local/bin/ffprobe</code>。不可用通常表示旧镜像或自定义镜像遗漏。</div><ol class="ffprobe-help"><li>拉取当前 MoviePilot 镜像并重新创建容器。</li><li>自定义镜像可继承官方镜像，或持久挂载 ffprobe。</li><li>容器内执行 <code>ffprobe -version</code> 验证。</li></ol><VAlert type="warning" variant="tonal" density="compact" class="mt-3">插件不自动下载或安装可执行文件，避免权限、容器重建丢失和供应链风险。</VAlert></div>
+                <div v-if="mediaProbeBackendSupported && !data.media_probe?.available" class="mt-3"><div class="text-body-2 mb-2">MoviePilot 当前官方 Dockerfile 已包含 <code>/usr/local/bin/ffprobe</code>。不可用通常表示旧镜像或自定义镜像遗漏。</div><ol class="ffprobe-help"><li>拉取当前 MoviePilot 镜像并重新创建容器。</li><li>自定义镜像可继承官方镜像，或持久挂载 ffprobe。</li><li>容器内执行 <code>ffprobe -version</code> 验证。</li></ol><VAlert type="warning" variant="tonal" density="compact" class="mt-3">常规扫描不会自动下载可执行文件；只有下方「ISO 原盘探测」显式开启后才会下载专用静态 ffprobe。</VAlert></div>
               </VExpansionPanelText>
+            </VExpansionPanel>
+            <VExpansionPanel>
+              <VExpansionPanelTitle><div><div class="font-weight-medium">ISO 原盘探测 <VChip size="x-small" :color="staticFfprobe.installed ? 'success' : config.media_probe_iso_enabled ? 'warning' : 'default'" variant="tonal" class="ms-1">{{ staticFfprobe.installed ? '已就绪' : staticFfprobe.installing ? '下载中' : config.media_probe_iso_enabled ? '未就绪' : '未启用' }}</VChip></div><div class="text-caption text-medium-emphasis">自动下载带蓝光支持的静态 ffprobe，仅接管 .iso 文件的媒体流提取</div></div></VExpansionPanelTitle>
+              <VExpansionPanelText><div class="subtitle-mapping-box">
+                <VSwitch v-model="config.media_probe_iso_enabled" color="secondary" label="启用 ISO 原盘探测（保存设置后自动下载安装）" hide-details @update:model-value="value => value && installStaticFfprobe(true)" />
+                <VAlert type="info" variant="tonal" density="compact">容器自带的 ffprobe 没有 libbluray，读不出 ISO 原盘的播放列表。开启后插件从 <a href="https://github.com/sjtuross/StrmAssistant.Releases/tree/main/static-ffprobe" target="_blank" rel="noopener">StrmAssistant.Releases</a> 下载对应平台的静态构建（v{{ staticFfprobe.version || '8.1.2' }}）到插件数据目录，<strong>只用于 .iso 文件</strong>，普通视频仍走原 ffprobe；卸载插件删除数据目录即可清除。下载走 MP 的 GITHUB_PROXY 与代理设置。</VAlert>
+                <div v-if="config.media_probe_iso_enabled" class="d-flex align-center flex-wrap ga-3">
+                  <VChip size="small" :color="staticFfprobe.installed ? 'success' : staticFfprobe.installing ? 'info' : 'warning'" variant="tonal" :prepend-icon="staticFfprobe.installed ? 'mdi-check-circle-outline' : staticFfprobe.installing ? 'mdi-progress-download' : 'mdi-alert-circle-outline'">
+                    {{ staticFfprobe.installed ? `已安装：${staticFfprobe.path}` : staticFfprobe.installing ? '正在后台下载安装……' : staticFfprobe.last_error || '尚未安装' }}
+                  </VChip>
+                  <VBtn v-if="!staticFfprobe.installed" size="small" variant="tonal" prepend-icon="mdi-download" :loading="saving === 'static-ffprobe' || staticFfprobe.installing" @click="installStaticFfprobe(false)">{{ staticFfprobe.last_error ? '重试下载' : '立即下载' }}</VBtn>
+                </div>
+              </div></VExpansionPanelText>
             </VExpansionPanel>
           </VExpansionPanels>
           <div class="d-flex justify-end"><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存扫描设置</VBtn></div>

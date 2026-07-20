@@ -2,15 +2,147 @@
 
 from __future__ import annotations
 
+import io
 import json
+import platform as _platform
 import re
 import shutil
 import subprocess
 import threading
+import zipfile
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+
+
+class StaticFfprobeProvisioner:
+    """从 StrmAssistant.Releases 自动下载支持蓝光 ISO 的静态 ffprobe。
+
+    官方镜像自带的 ffprobe 通常没有 libbluray，无法读取 ISO 原盘的主播放列表；
+    该静态构建（sjtuross/StrmAssistant.Releases 的 static-ffprobe 目录）专为
+    此场景编译。下载安装到插件数据目录后仅用于 .iso 文件的探测。
+    """
+
+    VERSION = "8.1.2"
+    _REPO_RAW = "https://raw.githubusercontent.com/sjtuross/StrmAssistant.Releases/main"
+    _MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+
+    def __init__(self, data_dir_getter: Callable[[], Optional[Path]],
+                 downloader: Optional[Callable[[str], Optional[bytes]]] = None) -> None:
+        self._data_dir_getter = data_dir_getter
+        self._downloader = downloader
+        self._lock = threading.Lock()
+        self._installing = False
+        self._last_error = ""
+
+    @staticmethod
+    def _platform_slug() -> str:
+        system = _platform.system().lower()
+        machine = _platform.machine().lower()
+        arm = machine in {"aarch64", "arm64"}
+        if system == "linux":
+            return "linux_arm64" if arm else "linux_x64"
+        if system == "darwin":
+            return "osx_arm64" if arm else "osx_x64"
+        if system == "windows":
+            return "win_x64"
+        return ""
+
+    def _install_dir(self) -> Optional[Path]:
+        base = self._data_dir_getter()
+        if not base:
+            return None
+        return Path(base) / "static-ffprobe" / f"v{self.VERSION}"
+
+    def _binary_path(self) -> Optional[Path]:
+        folder = self._install_dir()
+        if not folder:
+            return None
+        name = "ffprobe.exe" if _platform.system().lower() == "windows" else "ffprobe"
+        return folder / name
+
+    def installed_path(self) -> str:
+        """已安装且可用时返回二进制路径，否则返回空串。"""
+        path = self._binary_path()
+        return str(path) if path and path.is_file() else ""
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            installing = self._installing
+            last_error = self._last_error
+        return {
+            "version": self.VERSION,
+            "platform": self._platform_slug() or "unsupported",
+            "installed": bool(self.installed_path()),
+            "path": self.installed_path(),
+            "installing": installing,
+            "last_error": last_error,
+            "source": f"{self._REPO_RAW}/static-ffprobe",
+        }
+
+    def download_url(self) -> str:
+        slug = self._platform_slug()
+        if not slug:
+            return ""
+        return f"{self._REPO_RAW}/static-ffprobe/{slug}/ffprobe_{self.VERSION}.zip"
+
+    def _fetch(self, url: str) -> Optional[bytes]:
+        if self._downloader:
+            return self._downloader(url)
+        return None
+
+    def ensure_installed(self, background: bool = True) -> Dict[str, Any]:
+        """确保静态 ffprobe 就绪；未安装时触发下载（默认后台执行）。"""
+        if self.installed_path():
+            return self.status()
+        with self._lock:
+            if self._installing:
+                return self.status()
+            self._installing = True
+        if background:
+            threading.Thread(target=self._install, name="static-ffprobe-install", daemon=True).start()
+        else:
+            self._install()
+        return self.status()
+
+    def _install(self) -> None:
+        error = ""
+        try:
+            url = self.download_url()
+            folder = self._install_dir()
+            binary = self._binary_path()
+            if not url:
+                error = f"当前平台不受支持：{_platform.system()} / {_platform.machine()}"
+            elif not folder or not binary:
+                error = "插件数据目录不可用，无法安装静态 ffprobe"
+            else:
+                payload = self._fetch(url)
+                if not payload:
+                    error = "下载失败：网络不可达或 GitHub 访问受限（可在 MP 设置中配置 GITHUB_PROXY）"
+                elif len(payload) > self._MAX_ARCHIVE_BYTES:
+                    error = "下载内容超出预期大小，已放弃安装"
+                else:
+                    folder.mkdir(parents=True, exist_ok=True)
+                    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                        member = next(
+                            (item for item in archive.namelist()
+                             if Path(item).name.lower() in {"ffprobe", "ffprobe.exe"}),
+                            None,
+                        )
+                        if not member:
+                            error = "压缩包中没有找到 ffprobe 可执行文件"
+                        else:
+                            temp_path = folder / (binary.name + ".part")
+                            with archive.open(member) as source, open(temp_path, "wb") as target:
+                                shutil.copyfileobj(source, target)
+                            temp_path.replace(binary)
+                            binary.chmod(0o755)
+        except Exception as err:  # noqa: BLE001 - 后台线程必须吞掉异常转为状态
+            error = str(err) or err.__class__.__name__
+        with self._lock:
+            self._installing = False
+            self._last_error = error
 
 
 class MediaFileProbe:
@@ -395,13 +527,29 @@ class MediaFileProbe:
             return cleared
 
     def probe(self, source_path: Any, timeout: int = 12, executable_path: Any = "",
-              force: bool = False) -> Dict[str, Any]:
-        executable = self._resolve_executable(executable_path)
-        if not executable:
-            return {"success": False, "reason": "容器中未找到 ffprobe", "fields": {}, "context": {}}
+              force: bool = False, iso_executable_path: Any = "") -> Dict[str, Any]:
         path = Path(str(source_path or ""))
         if not str(source_path or "").strip() or not path.is_file():
             return {"success": False, "reason": "源文件在 MoviePilot 容器内不可直接读取", "fields": {}, "context": {}}
+        is_iso = path.suffix.lower() == ".iso"
+        if is_iso:
+            # ISO 原盘只交给带 libbluray 的静态 ffprobe；普通 ffprobe 读不出播放列表
+            executable = str(iso_executable_path or "").strip()
+            if not executable or not Path(executable).is_file():
+                return {
+                    "success": False,
+                    "reason": "ISO 探测需要带蓝光支持的静态 ffprobe（未安装或正在后台下载）",
+                    "fields": {}, "context": {}, "source_path": str(path),
+                }
+            input_arg = f"bluray:{path}"
+            # 原盘要解析播放列表，给静态 ffprobe 更宽的时限
+            effective_timeout = max(10, min(120, int(timeout) * 4))
+        else:
+            executable = self._resolve_executable(executable_path)
+            if not executable:
+                return {"success": False, "reason": "容器中未找到 ffprobe", "fields": {}, "context": {}}
+            input_arg = str(path)
+            effective_timeout = max(3, min(30, int(timeout)))
         stat = path.stat()
         cache_key = (str(path), int(stat.st_size), int(stat.st_mtime_ns))
         with self._lock:
@@ -414,20 +562,20 @@ class MediaFileProbe:
             completed = subprocess.run(
                 [
                     executable, "-v", "error", "-print_format", "json",
-                    "-show_streams", "-show_format", str(path),
+                    "-show_streams", "-show_format", input_arg,
                 ],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=max(3, min(30, int(timeout))),
+                timeout=effective_timeout,
                 check=False,
                 shell=False,
             )
             if completed.returncode != 0:
                 raise RuntimeError((completed.stderr or "ffprobe 执行失败").strip()[-500:])
             result = self.parse_payload(json.loads(completed.stdout or "{}"))
-            result.update({"source_path": str(path), "cached": False})
+            result.update({"source_path": str(path), "cached": False, "iso": is_iso})
             with self._lock:
                 self._scans += 1
                 self._last_error = ""
@@ -437,7 +585,7 @@ class MediaFileProbe:
                     self._cache.popitem(last=False)
             return result
         except subprocess.TimeoutExpired:
-            reason = f"ffprobe 超过 {max(3, min(30, int(timeout)))} 秒未完成"
+            reason = f"ffprobe 超过 {effective_timeout} 秒未完成"
         except Exception as err:
             reason = str(err) or err.__class__.__name__
         with self._lock:
