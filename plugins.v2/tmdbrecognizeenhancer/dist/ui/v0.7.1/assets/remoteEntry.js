@@ -2,17 +2,17 @@ const currentImports = {};
       const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
       let moduleMap = {
 "./Page":()=>{
-      dynamicLoadingCss(["__federation_expose_Page-BkpyQJt2.css","__federation_expose_AppPage-B0veGzD8.css","StrategySettings-HLvT6mLw.css"], false, './Page');
-      return __federation_import('./__federation_expose_Page-DWLz0hvP.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      dynamicLoadingCss(["__federation_expose_Page-BkpyQJt2.css","__federation_expose_AppPage-DC-oHkm7.css","StrategySettings-HLvT6mLw.css"], false, './Page');
+      return __federation_import('./__federation_expose_Page-Df2IWhgL.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Config":()=>{
       dynamicLoadingCss(["StrategySettings-HLvT6mLw.css"], false, './Config');
-      return __federation_import('./__federation_expose_Config-C9uhGNcj.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      return __federation_import('./__federation_expose_Config-CDrrbcUc.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./Dashboard":()=>{
       dynamicLoadingCss(["__federation_expose_Dashboard-CEMlUm8S.css"], false, './Dashboard');
-      return __federation_import('./__federation_expose_Dashboard-COCCaFys.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+      return __federation_import('./__federation_expose_Dashboard-B9-bkOx1.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
 "./AppPage":()=>{
-      dynamicLoadingCss(["__federation_expose_AppPage-B0veGzD8.css","StrategySettings-HLvT6mLw.css"], false, './AppPage');
-      return __federation_import('./__federation_expose_AppPage-DNLquRQH.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
+      dynamicLoadingCss(["__federation_expose_AppPage-DC-oHkm7.css","StrategySettings-HLvT6mLw.css"], false, './AppPage');
+      return __federation_import('./__federation_expose_AppPage-Cngyct-6.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
       const seen = {};
       const dynamicLoadingCss = (cssFilePaths, dontAppendStylesToHead, exposeItemName) => {
         const metaUrl = import.meta.url;
