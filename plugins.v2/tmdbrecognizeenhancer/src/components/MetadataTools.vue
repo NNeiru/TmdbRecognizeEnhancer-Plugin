@@ -658,32 +658,22 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
 <template>
   <div>
     <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
-    <div v-if="props.mode === 'probe'" class="probe-hero mb-4">
-      <div class="probe-hero-main">
-        <VAvatar color="secondary" variant="tonal" size="46"><VIcon icon="mdi-waveform" size="25" /></VAvatar>
-        <div class="probe-hero-copy">
-          <div class="text-h6">媒体信息识别</div>
-          <div class="text-body-2 text-medium-emphasis">在命名渲染前读取真实媒体流，补齐技术参数并输出可直接使用的 Jinja2 变量。</div>
-        </div>
-      </div>
-      <div class="probe-hero-status">
-        <VChip size="small" :color="data.media_probe?.available ? 'success' : 'warning'" variant="tonal" :prepend-icon="data.media_probe?.available ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'">{{ data.media_probe?.available ? 'ffprobe 可用' : 'ffprobe 待检查' }}</VChip>
-        <VChip size="small" color="secondary" variant="tonal" prepend-icon="mdi-tune-variant">{{ selectedProbeFieldItems.length }} 个扫描项</VChip>
-        <VChip size="small" variant="tonal" prepend-icon="mdi-database-clock-outline">缓存 {{ data.media_probe?.cache_entries || 0 }}</VChip>
-      </div>
-      <div class="probe-hero-actions">
-        <VSwitch v-model="config.media_probe_enabled" color="success" label="整理前自动扫描" hide-details inset />
-        <VBtn variant="text" prepend-icon="mdi-refresh" :loading="loading" @click="load">刷新状态</VBtn>
-        <VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存设置</VBtn>
-      </div>
+    <div class="d-flex align-center flex-wrap ga-3 mb-4">
+      <div v-if="props.mode === 'naming'"><div class="text-h6">命名规则</div><div class="text-body-2 text-medium-emphasis">统一管理连接符、制作组、自定义字段和最终文本映射，并按实际执行顺序排列。</div></div>
+      <div v-else-if="props.mode === 'probe'"><div class="text-h6">媒体信息识别</div><div class="text-body-2 text-medium-emphasis">整理前读取真实媒体流，补齐技术参数并输出可用于命名的 Jinja2 变量。</div></div>
+      <div v-else><div class="text-h6">字段与制作组</div><div class="text-body-2 text-medium-emphasis">查看 MP 当前版本实际加载的识别规则，并为制作组提供候选类型证据。</div></div>
+      <VSpacer /><VBtn variant="text" prepend-icon="mdi-refresh" :loading="loading" @click="load">{{ props.mode === 'probe' ? '刷新状态' : '重新读取 MP 规则' }}</VBtn>
     </div>
-    <template v-else>
-      <div class="d-flex align-center flex-wrap ga-3 mb-4">
-        <div v-if="props.mode === 'naming'"><div class="text-h6">命名规则</div><div class="text-body-2 text-medium-emphasis">统一管理连接符、制作组、自定义字段和最终文本映射，并按实际执行顺序排列。</div></div>
-        <div v-else><div class="text-h6">字段与制作组</div><div class="text-body-2 text-medium-emphasis">查看 MP 当前版本实际加载的识别规则，并为制作组提供候选类型证据。</div></div>
-        <VSpacer /><VBtn variant="text" prepend-icon="mdi-refresh" :loading="loading" @click="load">重新读取 MP 规则</VBtn>
-      </div>
-      <VCard variant="outlined" class="mb-4"><VCardText class="d-flex align-center flex-wrap ga-6">
+    <VCard variant="flat" border class="module-control-card mb-4"><VCardText class="module-control-row">
+      <template v-if="props.mode === 'probe'">
+        <VSwitch v-model="config.media_probe_enabled" color="secondary" label="整理前自动扫描" hide-details />
+        <div class="module-status-chips">
+          <VChip size="small" :color="data.media_probe?.available ? 'success' : 'warning'" variant="tonal" :prepend-icon="data.media_probe?.available ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'">{{ data.media_probe?.available ? 'ffprobe 可用' : 'ffprobe 待检查' }}</VChip>
+          <VChip size="small" color="secondary" variant="tonal">{{ selectedProbeFieldItems.length }} 个扫描项</VChip>
+          <VChip size="small" variant="tonal">缓存 {{ data.media_probe?.cache_entries || 0 }}</VChip>
+        </div>
+      </template>
+      <template v-else>
         <template v-if="props.mode === 'naming'">
           <VSwitch v-model="config.custom_rename_fields_enabled" color="secondary" label="启用自定义命名字段" hide-details />
           <VSwitch v-model="config.rename_mapping_enabled" color="orange" label="启用最终文本映射" hide-details />
@@ -693,12 +683,12 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
           <VSwitch v-model="config.release_group_assist_enabled" color="success" label="制作组辅助 TMDB 判断" hide-details />
           <VSwitch v-model="config.release_group_field_supplements_enabled" color="secondary" label="制作组补充命名字段" hide-details />
         </template>
-        <VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存模块开关</VBtn>
-      </VCardText></VCard>
-      <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-        {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排（在「字段与制作组」页维护）和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : '这里展示当前 MP 实际加载的识别预设；插件覆盖不会修改 MP 或 Rust 文件。' }}
-      </VAlert>
-    </template>
+      </template>
+      <VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">{{ props.mode === 'probe' ? '保存设置' : '保存模块开关' }}</VBtn>
+    </VCardText></VCard>
+    <VAlert type="info" variant="tonal" density="compact" class="mb-4">
+      {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排（在「字段与制作组」页维护）和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : props.mode === 'probe' ? '扫描发生在命名渲染前，不修改源文件；标准字段可补空、覆盖或追加，probe_* 变量可直接用于命名模板。' : '这里展示当前 MP 实际加载的识别预设；插件覆盖不会修改 MP 或 Rust 文件。' }}
+    </VAlert>
     <VAlert v-if="data.recognition_rules?.errors?.length" type="warning" variant="tonal" density="compact" class="mb-4">
       部分规则读取失败：{{ data.recognition_rules.errors.join('；') }}
     </VAlert>
@@ -764,7 +754,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
     </section>
 
     <section v-else-if="props.mode === 'probe' && section === 'probe'">
-      <VTabs v-model="probeSection" color="secondary" class="probe-sub-tabs mb-4">
+      <VTabs v-model="probeSection" color="secondary" class="sub-tabs mb-4">
         <VTab value="scan" prepend-icon="mdi-waveform">媒体扫描</VTab>
         <VTab value="strm" prepend-icon="mdi-server-network">
           神医联动
@@ -774,7 +764,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
       </VTabs>
 
       <div v-if="probeSection === 'scan'" class="probe-workspace mb-4">
-        <VCard variant="outlined" class="probe-strategy-card">
+        <VCard variant="flat" border class="workspace-card probe-strategy-card">
           <VCardItem>
             <template #prepend><VAvatar color="primary" variant="tonal" size="38"><VIcon icon="mdi-tune-vertical" size="21" /></VAvatar></template>
             <VCardTitle class="text-subtitle-1">扫描与写入策略</VCardTitle>
@@ -835,7 +825,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
           <div class="probe-card-actions"><span class="text-caption text-medium-emphasis">设置只影响新进入整理流程的文件</span><VBtn color="primary" variant="tonal" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存策略</VBtn></div>
         </VCardText></VCard>
 
-        <VCard variant="outlined" class="probe-trial-card">
+        <VCard variant="flat" border class="workspace-card probe-trial-card">
           <VCardItem>
             <template #prepend><VAvatar color="secondary" variant="tonal" size="38"><VIcon icon="mdi-file-search-outline" size="21" /></VAvatar></template>
             <VCardTitle class="text-subtitle-1">文件试扫</VCardTitle>
@@ -870,41 +860,40 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
       </div>
 
       <div v-else class="strm-page mb-4">
-        <VCard variant="outlined" class="strm-overview-card">
+        <VCard variant="flat" border class="workspace-card strm-overview-card">
           <VCardItem>
-            <template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-server-network" /></VAvatar></template>
-            <VCardTitle>神医媒体信息联动 <VChip size="x-small" color="secondary" variant="tonal" class="ms-1">仅 Pro</VChip></VCardTitle>
+            <template #prepend><VAvatar color="secondary" variant="tonal" size="40"><VIcon icon="mdi-server-network" size="22" /></VAvatar></template>
+            <VCardTitle class="text-subtitle-1">神医媒体信息联动 <VChip size="x-small" color="secondary" variant="tonal" class="ms-1">仅 Pro</VChip></VCardTitle>
             <VCardSubtitle>复用 MP 传输前的 ffprobe 结果，由 StrmAssistant Pro 写入 Emby，避免网盘侧重复探测。</VCardSubtitle>
             <template #append><VChip size="small" :color="strmSync.active ? 'success' : 'default'" variant="tonal">{{ strmStatusText }}</VChip></template>
           </VCardItem>
           <VCardText class="strm-overview-body">
-            <div class="strm-summary-row">
+            <div class="strm-control-row">
               <VSwitch v-model="strmSync.config.enabled" color="secondary" label="启用媒体信息推送" hide-details />
-              <div><span>等待</span><strong>{{ strmSync.counts?.pending || 0 }}</strong></div>
-              <div><span>完成</span><strong>{{ strmSync.counts?.completed || 0 }}</strong></div>
-              <div><span>需处理</span><strong>{{ strmSync.counts?.attention || 0 }}</strong></div>
+              <div class="strm-counters"><div><span>等待</span><strong>{{ strmSync.counts?.pending || 0 }}</strong></div><div><span>完成</span><strong>{{ strmSync.counts?.completed || 0 }}</strong></div><div><span>需处理</span><strong>{{ strmSync.counts?.attention || 0 }}</strong></div></div>
             </div>
-            <VAlert type="warning" variant="tonal" density="compact">仅支持 StrmAssistant <strong>Pro</strong> 的 <code>POST /Items/SyncMediaInfo</code>；社区版试推会返回“不支持”。不生成 sidecar JSON，也不调用 ffmpeg。</VAlert>
-            <VAlert v-if="!config.media_probe_enabled" type="warning" variant="tonal" density="compact">请先切换到“媒体扫描”子页，开启并保存整理前媒体流扫描。</VAlert>
+            <VAlert :type="!config.media_probe_enabled ? 'warning' : 'info'" variant="tonal" density="compact">
+              <template v-if="!config.media_probe_enabled">请先在“媒体扫描”中启用整理前扫描，否则没有媒体信息可以推送。</template>
+              <template v-else>使用 StrmAssistant Pro 的 <code>POST /Items/SyncMediaInfo</code>；不生成 sidecar JSON，也不调用 ffmpeg。</template>
+            </VAlert>
           </VCardText>
         </VCard>
 
-        <div class="strm-workspace-grid">
-          <VCard variant="outlined">
-            <VCardItem><template #prepend><VIcon icon="mdi-tune-variant" color="secondary" /></template><VCardTitle class="text-subtitle-1">服务器与重试</VCardTitle><VCardSubtitle>留空目标服务器时推送到全部已连接 Emby</VCardSubtitle></VCardItem>
-            <VCardText class="strm-card-body">
+        <VCard variant="flat" border class="workspace-card">
+          <VCardItem><template #prepend><VAvatar color="primary" variant="tonal" size="38"><VIcon icon="mdi-tune-variant" size="20" /></VAvatar></template><VCardTitle class="text-subtitle-1">联动设置</VCardTitle><VCardSubtitle>选择服务器、设置重试节奏，并在 MP 与 Emby 路径不一致时添加映射。</VCardSubtitle></VCardItem>
+          <VCardText class="strm-card-body">
+            <div class="strm-config-grid">
+              <section class="strm-config-section">
+                <div class="strm-section-head"><div><VIcon icon="mdi-server-outline" size="19" color="secondary" /><div><strong>服务器与重试</strong><span>留空目标服务器时推送到全部已连接 Emby</span></div></div></div>
               <VSelect v-model="strmSync.config.servers" :items="strmServerItems" multiple chips clearable label="目标 Emby" hide-details />
               <div class="strm-timing-grid">
                 <VTextField v-model.number="strmSync.config.initial_delay_seconds" type="number" min="0" max="300" label="首次等待（秒）" hint="等待 Emby 发现文件" persistent-hint />
                 <VTextField v-model.number="strmSync.config.retry_seconds" type="number" min="10" max="600" label="重试间隔（秒）" hint="Path 未入库时重试" persistent-hint />
                 <VTextField v-model.number="strmSync.config.max_wait_minutes" type="number" min="1" max="1440" label="最长等待（分钟）" hint="超时后可手动重试" persistent-hint />
               </div>
-            </VCardText>
-          </VCard>
-
-          <VCard variant="outlined">
-            <VCardItem><template #prepend><VIcon icon="mdi-folder-swap-outline" color="secondary" /></template><VCardTitle class="text-subtitle-1">路径映射</VCardTitle><VCardSubtitle>把 MP 整理路径转换成 Emby 中看到的路径</VCardSubtitle><template #append><VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="addStrmMapping">添加</VBtn></template></VCardItem>
-            <VCardText class="strm-card-body">
+              </section>
+              <section class="strm-config-section">
+                <div class="strm-section-head"><div><VIcon icon="mdi-folder-swap-outline" size="19" color="secondary" /><div><strong>路径映射</strong><span>把 MP 整理路径转换成 Emby 中看到的路径</span></div></div><VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="addStrmMapping">添加映射</VBtn></div>
               <div v-if="strmSync.config.path_mappings?.length" class="strm-mapping-list">
                 <div v-for="(mapping, index) in strmSync.config.path_mappings" :key="index" class="strm-mapping-row">
                   <VSelect v-model="mapping.server" :items="[{ title: '全部服务器', value: '*' }, ...strmServerItems]" label="服务器" density="compact" hide-details />
@@ -912,15 +901,15 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
                   <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="strmSync.config.path_mappings.splice(index, 1)" />
                 </div>
               </div>
-              <div v-else class="strm-empty"><VIcon icon="mdi-map-marker-path" size="30" /><span>路径相同时无需配置映射</span></div>
-            </VCardText>
-          </VCard>
-        </div>
+              <div v-else class="strm-empty compact"><VIcon icon="mdi-map-marker-path" size="26" /><span>MP 与 Emby 路径相同时无需配置</span></div>
+              </section>
+            </div>
+            <div class="strm-save-row"><span class="text-caption text-medium-emphasis">启用状态、服务器、重试和路径映射会一起保存</span><VBtn color="secondary" prepend-icon="mdi-content-save" :loading="saving === 'strm-config'" @click="saveStrmSync">保存联动设置</VBtn></div>
+          </VCardText>
+        </VCard>
 
-        <div class="d-flex justify-end"><VBtn color="secondary" prepend-icon="mdi-content-save" :loading="saving === 'strm-config'" @click="saveStrmSync">保存神医联动设置</VBtn></div>
-
-        <VCard variant="outlined">
-          <VCardItem><template #prepend><VIcon icon="mdi-flask-outline" color="secondary" /></template><VCardTitle class="text-subtitle-1">立即试推</VCardTitle><VCardSubtitle>真实写入 Emby；源文件请先在“媒体扫描”子页选择</VCardSubtitle></VCardItem>
+        <VCard variant="flat" border class="workspace-card">
+          <VCardItem><template #prepend><VAvatar color="secondary" variant="tonal" size="38"><VIcon icon="mdi-flask-outline" size="20" /></VAvatar></template><VCardTitle class="text-subtitle-1">立即试推</VCardTitle><VCardSubtitle>使用已扫描的源文件，向 Emby 真实写入一次媒体信息。</VCardSubtitle></VCardItem>
           <VCardText class="strm-card-body">
             <div class="strm-preview-row">
               <VTextField :model-value="probePath" label="MP 可读源文件" readonly hide-details prepend-inner-icon="mdi-file-video-outline" />
@@ -935,8 +924,8 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
           </VCardText>
         </VCard>
 
-        <VCard variant="outlined">
-          <VCardItem><template #prepend><VIcon icon="mdi-format-list-checks" color="secondary" /></template><VCardTitle class="text-subtitle-1">推送任务</VCardTitle><VCardSubtitle>后台等待 Emby 入库，最多保留 80 条已结束记录</VCardSubtitle><template #append><div class="d-flex ga-1"><VBtn size="small" variant="text" prepend-icon="mdi-replay" @click="retryStrmJob()">重试未完成</VBtn><VBtn size="small" variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" @click="deleteStrmJob()">清理已结束</VBtn></div></template></VCardItem>
+        <VCard variant="flat" border class="workspace-card">
+          <VCardItem><template #prepend><VAvatar color="primary" variant="tonal" size="38"><VIcon icon="mdi-format-list-checks" size="20" /></VAvatar></template><VCardTitle class="text-subtitle-1">推送任务</VCardTitle><VCardSubtitle>后台等待 Emby 入库，最多保留 80 条已结束记录。</VCardSubtitle><template #append><div class="d-flex ga-1"><VBtn size="small" variant="text" prepend-icon="mdi-replay" @click="retryStrmJob()">重试未完成</VBtn><VBtn size="small" variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" @click="deleteStrmJob()">清理已结束</VBtn></div></template></VCardItem>
           <VCardText v-if="strmSync.jobs?.length" class="strm-job-list">
             <div v-for="job in strmSync.jobs" :key="job.id" class="strm-job-row">
               <div class="min-w-0"><div class="font-weight-medium text-truncate">{{ job.title || job.target_path }}</div><div class="text-caption text-medium-emphasis text-truncate">{{ job.target_path }}</div><div class="text-caption">{{ job.reason }} · 尝试 {{ job.attempts || 0 }} 次</div></div>
@@ -1188,29 +1177,37 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .member-trace { display: flex; flex-wrap: wrap; gap: 8px; }
 .overlay-preview-form { display: grid; gap: 14px; }
 .overlay-preview-actions { display: flex; align-items: center; min-height: 38px; }
-.probe-hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px 24px; padding: 18px 20px; border: 1px solid rgba(var(--v-theme-secondary), .18); border-radius: 16px; background: linear-gradient(120deg, rgba(var(--v-theme-secondary), .075), rgba(var(--v-theme-surface), 1) 48%, rgba(var(--v-theme-primary), .035)); }
-.probe-hero-main { min-width: 0; display: flex; align-items: center; gap: 13px; }
-.probe-hero-copy { min-width: 0; }
-.probe-hero-status { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; }
-.probe-hero-actions { grid-column: 1 / -1; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding-top: 12px; border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
-.probe-hero-actions > :nth-last-child(2) { margin-left: auto; }
+.module-control-card, .workspace-card { background: rgb(var(--v-theme-surface)); box-shadow: none !important; }
+.module-control-card { border-radius: 12px !important; }
+.module-control-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 22px; padding-block: 12px !important; }
+.module-status-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.workspace-card { border-radius: 12px !important; }
 .probe-workspace { display: grid; grid-template-columns: minmax(360px, .86fr) minmax(480px, 1.14fr); gap: 16px; align-items: start; }
-.probe-strategy-card, .probe-trial-card { min-width: 0; border-radius: 14px !important; }
-.probe-sub-tabs { padding: 4px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; background: rgba(var(--v-theme-secondary), .035); }
+.probe-strategy-card, .probe-trial-card { min-width: 0; }
 .strm-page { display: grid; gap: 14px; }
 .strm-overview-body, .strm-card-body { display: grid; gap: 12px; }
-.strm-summary-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 18px; }
-.strm-summary-row > div:not(:first-child) { display: grid; gap: 1px; min-width: 62px; padding: 7px 11px; border-radius: 9px; background: rgba(var(--v-theme-secondary), .06); }
-.strm-summary-row span { color: rgba(var(--v-theme-on-surface), .58); font-size: .7rem; }
-.strm-summary-row strong { font-size: 1rem; }
-.strm-workspace-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 14px; }
+.strm-control-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; }
+.strm-counters { display: flex; align-items: center; gap: 8px; }
+.strm-counters > div { display: grid; grid-template-columns: auto auto; gap: 7px; align-items: baseline; min-width: 72px; padding: 7px 10px; border-radius: 9px; background: rgba(var(--v-theme-on-surface), .035); }
+.strm-counters span { color: rgba(var(--v-theme-on-surface), .58); font-size: .7rem; }
+.strm-counters strong { font-size: .95rem; }
+.strm-config-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 0; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 11px; overflow: hidden; }
+.strm-config-section { min-width: 0; display: grid; align-content: start; gap: 13px; padding: 16px; }
+.strm-config-section + .strm-config-section { border-left: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.strm-section-head { min-height: 40px; display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.strm-section-head > div { min-width: 0; display: flex; align-items: flex-start; gap: 9px; }
+.strm-section-head > div > div { min-width: 0; display: grid; }
+.strm-section-head strong { font-size: .9rem; }
+.strm-section-head span { color: rgba(var(--v-theme-on-surface), .55); font-size: .72rem; line-height: 1.4; }
 .strm-timing-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .strm-mapping-list, .strm-job-list { display: grid; gap: 8px; }
 .strm-mapping-row { display: grid; grid-template-columns: minmax(125px, .42fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
 .strm-path-pair { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 7px; align-items: center; }
+.strm-save-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .strm-preview-row { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr) auto; gap: 10px; align-items: center; }
 .strm-job-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 9px 10px; border-radius: 9px; background: rgba(var(--v-theme-on-surface), .035); }
 .strm-empty { min-height: 96px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: rgba(var(--v-theme-on-surface), .48); text-align: center; }
+.strm-empty.compact { min-height: 112px; border: 1px dashed rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
 .probe-config-body { display: grid; gap: 14px; padding-top: 10px !important; }
 .probe-selection-summary { min-height: 34px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .probe-selection-summary :deep(.v-chip__content) { gap: 6px; }
@@ -1267,7 +1264,8 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .preset-table code { white-space: normal; overflow-wrap: anywhere; }
 .supplement-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (max-width: 1050px) {
-  .strm-workspace-grid, .probe-workspace { grid-template-columns: 1fr; }
+  .probe-workspace, .strm-config-grid { grid-template-columns: 1fr; }
+  .strm-config-section + .strm-config-section { border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-left: 0; }
 }
 @media (max-width: 900px) {
   .filter-row { grid-template-columns: 1fr 1fr; }
@@ -1283,16 +1281,15 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .separator-scope { grid-column: auto; }
   .group-layout-grid, .group-preview-form { grid-template-columns: 1fr; }
   .probe-result-table, .supplement-field-grid, .strm-timing-grid { grid-template-columns: 1fr; }
-  .probe-hero { grid-template-columns: 1fr; }
-  .probe-hero-status { justify-content: flex-start; }
-  .probe-hero-actions { grid-column: auto; }
-  .probe-hero-actions > :nth-last-child(2) { margin-left: 0; }
+  .module-control-row { align-items: flex-start; }
+  .module-control-row > .v-spacer { display: none; }
+  .module-status-chips { width: 100%; }
   .probe-path-row { grid-template-columns: 1fr; }
   .strm-mapping-row { grid-template-columns: 1fr auto; }
   .strm-path-pair { grid-column: 1 / -1; }
   .strm-job-row { grid-template-columns: minmax(0, 1fr) auto; }
   .strm-job-row > .v-btn { grid-row: 2; }
-  .probe-sub-tabs :deep(.v-btn__content) { font-size: .78rem; }
+  .strm-save-row { align-items: flex-start; flex-direction: column; }
   .probe-variable-row { grid-template-columns: 1fr; gap: 4px; padding: 9px 10px; }
   .probe-variable-row strong { text-align: left; }
   .probe-field-row { grid-template-columns: auto minmax(0, 1fr); }
