@@ -918,10 +918,19 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
         <VCard variant="flat" border class="workspace-card">
           <VCardItem><template #prepend><VAvatar color="secondary" variant="tonal" size="38"><VIcon icon="mdi-flask-outline" size="20" /></VAvatar></template><VCardTitle class="text-subtitle-1">立即试推</VCardTitle><VCardSubtitle>使用已扫描的源文件，向 Emby 真实写入一次媒体信息。</VCardSubtitle></VCardItem>
           <VCardText class="strm-card-body">
-            <div class="strm-preview-row">
-              <div class="strm-preview-path"><VTextField v-model="probePath" label="MP 可读源文件" placeholder="/downloads/Anime/E01.mkv" hide-details prepend-inner-icon="mdi-file-video-outline" /><MediaFilePicker v-model="probePath" :api="props.api" /></div>
-              <div class="strm-preview-path"><VTextField v-model="strmTargetPath" label="MP 整理后目标文件" placeholder="/media/TV/Anime/Season 01/E01.mkv" hide-details prepend-inner-icon="mdi-folder-arrow-right-outline" /><MediaFilePicker v-model="strmTargetPath" :api="props.api" /></div>
-              <VBtn color="secondary" prepend-icon="mdi-send-check-outline" :loading="saving === 'strm-preview'" :disabled="!probePath || !strmTargetPath" @click="previewStrmSync">扫描并试推</VBtn>
+            <div class="strm-preview-workbench">
+              <div class="strm-preview-files">
+                <div class="strm-preview-path-card">
+                  <div class="strm-preview-path-heading"><VIcon icon="mdi-file-video-outline" color="secondary" size="19" /><div><strong>源媒体文件</strong><span>MP 容器内可以直接读取的真实文件</span></div></div>
+                  <div class="strm-preview-path"><VTextField v-model="probePath" label="容器内文件路径" placeholder="/downloads/Anime/E01.mkv" density="comfortable" hide-details /><MediaFilePicker v-model="probePath" :api="props.api" compact button-label="浏览源文件" /></div>
+                </div>
+                <div class="strm-preview-arrow"><VIcon icon="mdi-arrow-right" size="20" /></div>
+                <div class="strm-preview-path-card">
+                  <div class="strm-preview-path-heading"><VIcon icon="mdi-folder-arrow-right-outline" color="primary" size="19" /><div><strong>整理后目标文件</strong><span>MP 实际生成、并用于映射 Emby 条目的路径</span></div></div>
+                  <div class="strm-preview-path"><VTextField v-model="strmTargetPath" label="整理后文件路径" placeholder="/media/TV/Anime/Season 01/E01.mkv" density="comfortable" hide-details /><MediaFilePicker v-model="strmTargetPath" :api="props.api" compact button-label="浏览目标文件" /></div>
+                </div>
+              </div>
+              <div class="strm-preview-actions"><span><VIcon icon="mdi-information-outline" size="16" /> 将重新扫描源文件，并向匹配到的 Emby 条目真实写入媒体信息</span><VBtn color="secondary" prepend-icon="mdi-send-check-outline" :loading="saving === 'strm-preview'" :disabled="!probePath || !strmTargetPath" @click="previewStrmSync">扫描并试推</VBtn></div>
             </div>
             <VAlert v-if="!probePath" type="info" variant="tonal" density="compact">请输入或浏览选择 MP 容器内可读取的源文件。</VAlert>
             <VAlert v-if="strmSync.worker_error" type="warning" variant="tonal" density="compact">后台工作器最近一次异常：{{ strmSync.worker_error }}。刷新状态会自动尝试恢复。</VAlert>
@@ -1211,8 +1220,17 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .strm-mapping-meta { min-width: 0; display: grid; grid-template-columns: minmax(120px, .7fr) minmax(210px, 1.3fr) auto; gap: 8px; align-items: center; }
 .strm-path-pair { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 7px; align-items: center; }
 .strm-save-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.strm-preview-row { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr) auto; gap: 10px; align-items: center; }
+.strm-preview-workbench { display: grid; gap: 12px; padding: 13px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; background: rgba(var(--v-theme-secondary), .025); }
+.strm-preview-files { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 10px; align-items: stretch; }
+.strm-preview-path-card { min-width: 0; display: grid; align-content: start; gap: 11px; padding: 13px; border-radius: 10px; background: rgb(var(--v-theme-surface)); box-shadow: 0 1px 0 rgba(var(--v-theme-on-surface), .04); }
+.strm-preview-path-heading { min-width: 0; display: flex; align-items: flex-start; gap: 9px; }
+.strm-preview-path-heading > div { min-width: 0; display: grid; gap: 1px; }
+.strm-preview-path-heading strong { font-size: .86rem; }
+.strm-preview-path-heading span { color: rgba(var(--v-theme-on-surface), .56); font-size: .72rem; line-height: 1.4; }
 .strm-preview-path { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.strm-preview-arrow { align-self: center; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: rgba(var(--v-theme-secondary), .09); color: rgb(var(--v-theme-secondary)); }
+.strm-preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 11px; border-top: 1px solid rgba(var(--v-border-color), calc(var(--v-border-opacity) * .75)); }
+.strm-preview-actions > span { min-width: 0; display: flex; align-items: center; gap: 6px; color: rgba(var(--v-theme-on-surface), .58); font-size: .73rem; }
 .strm-job-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 9px 10px; border-radius: 9px; background: rgba(var(--v-theme-on-surface), .035); }
 .strm-empty { min-height: 96px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: rgba(var(--v-theme-on-surface), .48); text-align: center; }
 .strm-empty.compact { min-height: 112px; border: 1px dashed rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
@@ -1292,7 +1310,8 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 @media (max-width: 900px) {
   .filter-row { grid-template-columns: 1fr 1fr; }
   .strm-timing-grid { grid-template-columns: 1fr 1fr; }
-  .strm-preview-row { grid-template-columns: 1fr; }
+  .strm-preview-files { grid-template-columns: 1fr; }
+  .strm-preview-arrow { transform: rotate(90deg); justify-self: center; }
 }
 @media (max-width: 600px) {
   .filter-row, .rename-preview-form { grid-template-columns: 1fr; }
@@ -1313,7 +1332,8 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .strm-job-row { grid-template-columns: minmax(0, 1fr) auto; }
   .strm-job-row > .v-btn { grid-row: 2; }
   .strm-save-row { align-items: flex-start; flex-direction: column; }
-  .strm-preview-path { grid-template-columns: 1fr; }
+  .strm-preview-actions { align-items: stretch; flex-direction: column; }
+  .strm-preview-actions > .v-btn { width: 100%; }
   .probe-variable-row { grid-template-columns: 1fr; gap: 4px; padding: 9px 10px; }
   .probe-variable-row strong { text-align: left; }
   .probe-field-row { grid-template-columns: 1fr; gap: 7px; }

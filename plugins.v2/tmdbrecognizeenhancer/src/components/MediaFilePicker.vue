@@ -5,6 +5,8 @@ import { unwrapResponse } from '../utils'
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
   modelValue: { type: String, default: '' },
+  compact: { type: Boolean, default: false },
+  buttonLabel: { type: String, default: '浏览文件' },
 })
 const emit = defineEmits(['update:modelValue'])
 
@@ -112,7 +114,10 @@ onMounted(loadStorages)
 </script>
 
 <template>
-  <VBtn variant="tonal" color="secondary" prepend-icon="mdi-folder-search-outline" @click="openPicker">浏览文件</VBtn>
+  <VTooltip v-if="compact" :text="buttonLabel" location="top">
+    <template #activator="{ props: tip }"><VBtn v-bind="tip" icon="mdi-folder-search-outline" variant="tonal" color="secondary" size="large" :aria-label="buttonLabel" @click="openPicker" /></template>
+  </VTooltip>
+  <VBtn v-else variant="tonal" color="secondary" prepend-icon="mdi-folder-search-outline" @click="openPicker">{{ buttonLabel }}</VBtn>
   <VDialog v-model="dialog" max-width="760">
     <VCard>
       <VCardItem>
