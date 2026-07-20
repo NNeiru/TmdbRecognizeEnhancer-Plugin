@@ -63,11 +63,45 @@ async function loadStatus() {
     uiVersionMismatch.value = ensureUiVersion(nextStatus.backend_version)
     status.value = nextStatus
     statusLoaded.value = true
+    maybeAutoReloadBackend()
   } catch (err) {
     error.value = err?.message || '状态加载失败'
   } finally {
     loading.value = false
   }
+}
+
+const reloadingBackend = ref(false)
+const autoReloadTried = ref(false)
+
+async function reloadBackend(silent = false) {
+  reloadingBackend.value = true
+  if (!silent) error.value = ''
+  try {
+    // MP 核心接口：热重载插件后端（清 Python 模块缓存并重新实例化），等效于插件页的“重载”
+    await props.api.get(`plugin/reload/${props.pluginId || 'TmdbRecognizeEnhancer'}`)
+    await loadStatus()
+    return true
+  } catch (err) {
+    if (!silent) error.value = err?.message || '插件后端重载失败，请在 MP 插件页手动重载或重启容器'
+    return false
+  } finally {
+    reloadingBackend.value = false
+  }
+}
+
+function maybeAutoReloadBackend() {
+  // 后端未上报版本号 = 旧实例仍在内存中（插件文件已更新但未重载）。
+  // 自动重载一次即可自愈；sessionStorage 守卫防止接口异常时反复触发。
+  if (status.value.backend_version || autoReloadTried.value || reloadingBackend.value) return
+  const guardKey = `tmdb-enhancer-backend-reload:${UI_VERSION}`
+  if (typeof window !== 'undefined' && window.sessionStorage?.getItem(guardKey) === 'done') {
+    autoReloadTried.value = true
+    return
+  }
+  window.sessionStorage?.setItem(guardKey, 'done')
+  autoReloadTried.value = true
+  reloadBackend(true)
 }
 
 async function saveConfig() {
@@ -167,7 +201,7 @@ function typeConstraintSourceText(source) {
   })[source] || '标题信息'
 }
 
-defineExpose({ loadStatus, saveConfig, loading, saving })
+defineExpose({ loadStatus, saveConfig, reloadBackend, loading, saving, reloadingBackend })
 onMounted(loadStatus)
 </script>
 
@@ -192,7 +226,8 @@ onMounted(loadStatus)
     <div class="page-body">
       <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
       <VAlert v-if="statusLoaded && !status.backend_version" type="warning" variant="tonal" density="compact" class="mb-4">
-        管理页已更新，但插件后端仍是旧实例。字段管理和性能诊断接口尚未注册，请重载插件；若 MP 没有重载入口，重启一次容器即可。
+        管理页已更新，但插件后端仍是旧实例{{ reloadingBackend ? '，正在自动重载插件后端……' : '，已尝试自动重载但仍未生效。' }}
+        <template v-if="!reloadingBackend" #append><VBtn size="small" color="warning" variant="flat" prepend-icon="mdi-restart" @click="reloadBackend()">再次重载</VBtn></template>
       </VAlert>
       <VAlert v-if="uiVersionMismatch" type="info" variant="tonal" density="compact" class="mb-4">
         检测到页面版本 {{ UI_VERSION }} 与插件后端 {{ status.backend_version }} 不一致，正在自动载入新版页面……
@@ -233,7 +268,9 @@ onMounted(loadStatus)
             <div class="tab-content">
               <div class="d-flex align-center flex-wrap ga-3 mb-5">
                 <div><div class="text-h6">插件与模块状态</div><div class="text-body-2 text-medium-emphasis">总开关关闭时所有接管停止；模块开关可独立控制功能。</div></div>
-                <VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving" @click="saveConfig">保存并立即生效</VBtn>
+                <VSpacer />
+                <VTooltip text="调用 MoviePilot 插件热重载：更新插件版本或接口异常（404）时点击，让新后端代码立即生效，无需重启容器" location="bottom"><template #activator="{ props: tip }"><VBtn v-bind="tip" variant="tonal" prepend-icon="mdi-restart" :loading="reloadingBackend" @click="reloadBackend()">重载插件后端</VBtn></template></VTooltip>
+                <VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving" @click="saveConfig">保存并立即生效</VBtn>
               </div>
               <VCard variant="outlined" class="master-switch mb-4">
                 <VCardText class="d-flex align-center flex-wrap ga-4">

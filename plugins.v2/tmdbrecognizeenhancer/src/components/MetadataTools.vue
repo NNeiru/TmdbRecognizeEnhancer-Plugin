@@ -638,12 +638,10 @@ onMounted(load)
         </VCardText></VCard>
         <VCard variant="outlined"><VCardItem><VCardTitle>文件试扫</VCardTitle><VCardSubtitle>请输入 MP 容器内部看到的真实媒体文件路径，不是宿主机映射前路径。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
           <div class="probe-path-row"><VTextField v-model="probePath" label="容器内文件路径" placeholder="/downloads/anime/Example.mkv" prepend-inner-icon="mdi-file-video-outline" hide-details /><MediaFilePicker v-model="probePath" :api="props.api" /></div>
-          <div class="d-flex align-center flex-wrap ga-2">
+          <div class="probe-scan-bar">
             <VBtn color="secondary" prepend-icon="mdi-waveform" :loading="saving === 'media-probe'" :disabled="!probePath" @click="previewMediaProbe">开始扫描</VBtn>
-            <VCheckbox v-model="probeForce" label="忽略缓存重新扫描" density="compact" color="secondary" hide-details />
-            <VSpacer />
-            <VBtn variant="tonal" size="small" prepend-icon="mdi-broom" :loading="saving === 'probe-cache'" @click="clearProbeCache">清除扫描缓存{{ typeof data.media_probe?.cache_entries === 'number' ? `（${data.media_probe.cache_entries} 条）` : '' }}</VBtn>
-            <VTooltip text="更新插件版本后新代码不会自动生效；此按钮调用 MP 的插件热重载，等效于插件页的“重载”" location="top"><template #activator="{ props: tip }"><VBtn v-bind="tip" variant="tonal" size="small" prepend-icon="mdi-restart" :loading="saving === 'plugin-reload'" @click="reloadPlugin">重载插件后端</VBtn></template></VTooltip>
+            <VSwitch v-model="probeForce" label="忽略缓存" density="compact" color="secondary" hide-details class="probe-force-switch" />
+            <VTooltip text="清空 ffprobe 扫描结果缓存；下次整理或试扫会重新读取文件" location="top"><template #activator="{ props: tip }"><VBtn v-bind="tip" variant="text" size="small" prepend-icon="mdi-broom" :loading="saving === 'probe-cache'" @click="clearProbeCache">清除缓存{{ data.media_probe?.cache_entries ? `（${data.media_probe.cache_entries}）` : '' }}</VBtn></template></VTooltip>
           </div>
           <VAlert v-if="probeCacheNotice" type="success" variant="tonal" density="compact" closable @click:close="probeCacheNotice = ''">{{ probeCacheNotice }}</VAlert>
           <template v-if="probeResult">
@@ -924,6 +922,9 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .probe-advanced-grid { display: grid; grid-template-columns: minmax(120px, .45fr) minmax(0, 1fr); gap: 12px; }
 .ffprobe-help { display: grid; gap: 6px; padding-left: 22px; }
 .probe-path-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.probe-scan-bar { display: flex; align-items: center; gap: 4px 14px; flex-wrap: wrap; padding: 8px 12px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; background: rgba(var(--v-theme-secondary), .04); }
+.probe-force-switch { flex: 0 0 auto; }
+.probe-scan-bar > :last-child { margin-left: auto; }
 .probe-result-table { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; }
 .probe-result-row { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; background: rgb(var(--v-theme-surface)); }
 .probe-summary-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; color: rgb(var(--v-theme-secondary)); background: rgba(var(--v-theme-secondary), .09); }
