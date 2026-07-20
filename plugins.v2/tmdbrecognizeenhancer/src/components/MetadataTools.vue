@@ -754,11 +754,11 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
     </section>
 
     <section v-else-if="props.mode === 'probe' && section === 'probe'">
-      <VTabs v-model="probeSection" color="secondary" class="sub-tabs mb-4">
+      <VTabs v-model="probeSection" color="primary" class="sub-tabs mb-4">
         <VTab value="scan" prepend-icon="mdi-waveform">媒体扫描</VTab>
         <VTab value="strm" prepend-icon="mdi-server-network">
           神医联动
-          <VChip size="x-small" color="secondary" variant="tonal" class="ms-2">Pro</VChip>
+          <VChip size="x-small" color="primary" variant="tonal" class="ms-2">Pro</VChip>
           <VBadge v-if="Number(strmSync.counts?.pending || 0)" :content="strmSync.counts.pending" color="warning" inline class="ms-2" />
         </VTab>
       </VTabs>
