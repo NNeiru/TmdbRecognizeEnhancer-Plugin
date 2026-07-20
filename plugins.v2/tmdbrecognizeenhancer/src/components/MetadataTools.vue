@@ -586,7 +586,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
       <VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存模块开关</VBtn>
     </VCardText></VCard>
     <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-      {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : props.mode === 'probe' ? '扫描发生在命名渲染前，不修改源文件。MP 标准字段可按补空、覆盖或追加写入；probe_* 变量也可直接用于命名模板。' : '这里展示当前 MP 实际加载的识别预设；插件覆盖不会修改 MP 或 Rust 文件。' }}
+      {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排（在「字段与制作组」页维护）和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : props.mode === 'probe' ? '扫描发生在命名渲染前，不修改源文件。MP 标准字段可按补空、覆盖或追加写入；probe_* 变量也可直接用于命名模板。' : '这里展示当前 MP 实际加载的识别预设；插件覆盖不会修改 MP 或 Rust 文件。' }}
     </VAlert>
     <VAlert v-if="data.recognition_rules?.errors?.length" type="warning" variant="tonal" density="compact" class="mb-4">
       部分规则读取失败：{{ data.recognition_rules.errors.join('；') }}
@@ -595,6 +595,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
     <VTabs v-if="props.mode === 'metadata'" v-model="section" color="primary" class="mb-4">
       <VTab value="rules" prepend-icon="mdi-text-box-search-outline">内置识别字段</VTab>
       <VTab value="groups" prepend-icon="mdi-account-group-outline">制作组类型与字段</VTab>
+      <VTab value="arrange" prepend-icon="mdi-account-multiple-check-outline">制作组编排</VTab>
       <VTab value="test" prepend-icon="mdi-flask-outline">覆盖试算</VTab>
     </VTabs>
 
@@ -624,6 +625,31 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
         <tr v-for="item in pagedGroups" :key="item.id"><td><div class="font-weight-medium">{{ item.display_name }}</div><div class="rule-pattern">{{ item.pattern }}</div></td><td><VChip size="small" variant="tonal">{{ item.source_label }} · {{ item.category }}</VChip></td><td><VSelect :model-value="item.kind" :items="kindItems" density="compact" hide-details :loading="saving === item.id" @update:model-value="value => saveGroup(item, value)"><template #selection><VChip size="small" :color="kindColor(item.kind)" variant="tonal">{{ kindLabel(item.kind) }}</VChip></template></VSelect></td><td><VBtn size="small" variant="tonal" prepend-icon="mdi-tune-variant" @click="openGroupProfile(item)">{{ Object.keys(item.field_values || {}).length + Object.keys(item.custom_field_values || {}).length ? `${Object.keys(item.field_values || {}).length + Object.keys(item.custom_field_values || {}).length} 项` : '设置' }}</VBtn></td></tr>
       </tbody></VTable>
       <VPagination v-if="groupPageCount > 1" v-model="page" :length="groupPageCount" :total-visible="7" class="mt-3" />
+    </section>
+
+    <section v-else-if="props.mode === 'metadata' && section === 'arrange'">
+      <div class="d-flex align-center flex-wrap ga-3 mb-4">
+        <VAlert type="info" variant="tonal" density="compact" class="flex-grow-1 mb-0">为每个制作组指定别名、最终名称、固定位置和它前面的连接符；未配置的组保持原名与相对顺序。属于「命名规则」模块，随其总开关生效；连接符默认值在命名规则 → 连接与分隔中设置。</VAlert>
+        <VBtn color="primary" prepend-icon="mdi-plus" @click="openGroupArrangement()">新增制作组规则</VBtn>
+      </div>
+      <VAlert v-if="data.release_group_arrangements?.errors?.length" type="warning" variant="tonal" density="compact" class="mb-4">{{ data.release_group_arrangements.errors.join('；') }}</VAlert>
+      <div v-if="groupArrangementRules.length" class="group-layout-grid">
+        <VCard v-for="item in groupArrangementRules" :key="item.id" variant="outlined" class="mapping-card">
+          <VCardText class="group-layout-card">
+            <div class="group-layout-main">
+              <div class="d-flex align-center flex-wrap ga-2"><span class="font-weight-bold">{{ item.label || item.output_name }}</span><VChip size="x-small" color="primary" variant="tonal">{{ groupPositionLabel(item.position) }}</VChip><VChip v-if="!item.enabled" size="x-small" variant="tonal">已停用</VChip></div>
+              <div class="mapping-expression"><code>{{ item.match_name }}</code><VIcon icon="mdi-arrow-right" size="16" /><code>{{ item.output_name }}</code></div>
+              <div class="text-caption text-medium-emphasis">别名 {{ item.aliases?.length ? item.aliases.join('、') : '无' }} · 前置连接符 <code>{{ item.connector === '__default__' ? `继承标题／默认（${config.release_group_default_connector === ' ' ? '空格' : config.release_group_default_connector || '@'}）` : item.connector === ' ' ? '空格' : item.connector || '无' }}</code> · 排序值 {{ item.order }}</div>
+            </div>
+            <div class="d-flex"><VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openGroupArrangement(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `group-arrangement-delete:${item.id}`" @click="deleteGroupArrangement(item)" /></div>
+          </VCardText>
+        </VCard>
+      </div>
+      <div v-else class="empty-fields"><VIcon icon="mdi-account-switch-outline" size="48" /><div class="mt-2">尚未设置制作组编排</div><div class="text-caption mt-1">例如让 VCB-Studio 固定最后并使用 &amp;，让 ADWeb 固定最后并使用 @</div></div>
+      <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>制作组编排试算</VCardTitle><VCardSubtitle>按 MP 的 releaseGroup 字段格式输入，支持 @、&amp;、+ 形式。</VCardSubtitle></VCardItem><VCardText>
+        <div class="group-preview-form"><VTextField v-model="groupArrangementPreviewInput" label="输入制作组" placeholder="ADWeb@A@VCB" hide-details /><VBtn color="secondary" prepend-icon="mdi-play" :loading="saving === 'group-arrangement-preview'" @click="previewGroupArrangement">开始试算</VBtn></div>
+        <VAlert v-if="groupArrangementPreview" :type="groupArrangementPreview.trace?.applied ? 'success' : 'info'" variant="tonal" class="mt-4"><div>输出：<code>{{ groupArrangementPreview.output }}</code></div><div class="text-caption mt-1">{{ groupArrangementPreview.trace?.reason }}</div><div v-if="groupArrangementPreview.trace?.members?.length" class="member-trace mt-3"><VChip v-for="(member, index) in groupArrangementPreview.trace.members" :key="`${member.output}-${index}`" size="small" variant="tonal"><span v-if="index">{{ member.connector === ' ' ? '空格' : member.connector }}</span>{{ member.output }} · {{ groupPositionLabel(member.position) }}</VChip></div></VAlert>
+      </VCardText></VCard>
     </section>
 
     <section v-else-if="props.mode === 'probe' && section === 'probe'">
@@ -697,7 +723,6 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
     <section v-else-if="props.mode === 'naming'">
       <VTabs v-model="renameRuleSection" color="secondary" class="sub-tabs mb-4">
         <VTab value="defaults" prepend-icon="mdi-tune-variant">连接与分隔</VTab>
-        <VTab value="groups" prepend-icon="mdi-account-multiple-check-outline">制作组编排</VTab>
         <VTab value="fields" prepend-icon="mdi-code-braces">自定义字段</VTab>
         <VTab value="text" prepend-icon="mdi-find-replace">文本映射</VTab>
       </VTabs>
@@ -763,31 +788,6 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
           <div class="separator-scope rule-enabled-box"><div><div class="font-weight-medium">默认连接符覆盖标题原连接符</div><div class="text-caption text-medium-emphasis">关闭：未设置专属连接符的组保留标题中的 @、&amp; 或 +；开启：统一改用上面的默认连接符。单组专属设置始终优先。</div></div><VSwitch v-model="config.release_group_normalize_unknown_connectors" color="success" hide-details /></div>
         </div>
       </VCardText><VDivider /><VCardActions><VSpacer /><VBtn color="primary" prepend-icon="mdi-content-save" :loading="savingConfig" @click="emit('save-config')">保存命名默认值</VBtn></VCardActions></VCard>
-
-      <div v-if="renameRuleSection === 'groups'">
-        <div class="d-flex align-center flex-wrap ga-3 mb-4">
-          <VAlert type="info" variant="tonal" density="compact" class="flex-grow-1 mb-0">为每个制作组指定别名、最终名称、固定位置和它前面的连接符；未配置的组保持原名与相对顺序。</VAlert>
-          <VBtn color="primary" prepend-icon="mdi-plus" @click="openGroupArrangement()">新增制作组规则</VBtn>
-        </div>
-        <VAlert v-if="data.release_group_arrangements?.errors?.length" type="warning" variant="tonal" density="compact" class="mb-4">{{ data.release_group_arrangements.errors.join('；') }}</VAlert>
-        <div v-if="groupArrangementRules.length" class="group-layout-grid">
-          <VCard v-for="item in groupArrangementRules" :key="item.id" variant="outlined" class="mapping-card">
-            <VCardText class="group-layout-card">
-              <div class="group-layout-main">
-                <div class="d-flex align-center flex-wrap ga-2"><span class="font-weight-bold">{{ item.label || item.output_name }}</span><VChip size="x-small" color="primary" variant="tonal">{{ groupPositionLabel(item.position) }}</VChip><VChip v-if="!item.enabled" size="x-small" variant="tonal">已停用</VChip></div>
-                <div class="mapping-expression"><code>{{ item.match_name }}</code><VIcon icon="mdi-arrow-right" size="16" /><code>{{ item.output_name }}</code></div>
-                <div class="text-caption text-medium-emphasis">别名 {{ item.aliases?.length ? item.aliases.join('、') : '无' }} · 前置连接符 <code>{{ item.connector === '__default__' ? `继承标题／默认（${config.release_group_default_connector === ' ' ? '空格' : config.release_group_default_connector || '@'}）` : item.connector === ' ' ? '空格' : item.connector || '无' }}</code> · 排序值 {{ item.order }}</div>
-              </div>
-              <div class="d-flex"><VBtn icon="mdi-pencil-outline" size="small" variant="text" @click="openGroupArrangement(item)" /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" :loading="saving === `group-arrangement-delete:${item.id}`" @click="deleteGroupArrangement(item)" /></div>
-            </VCardText>
-          </VCard>
-        </div>
-        <div v-else class="empty-fields"><VIcon icon="mdi-account-switch-outline" size="48" /><div class="mt-2">尚未设置制作组编排</div><div class="text-caption mt-1">例如让 VCB-Studio 固定最后并使用 &amp;，让 ADWeb 固定最后并使用 @</div></div>
-        <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>制作组编排试算</VCardTitle><VCardSubtitle>按 MP 的 releaseGroup 字段格式输入，支持 @、&amp;、+ 形式。</VCardSubtitle></VCardItem><VCardText>
-          <div class="group-preview-form"><VTextField v-model="groupArrangementPreviewInput" label="输入制作组" placeholder="ADWeb@A@VCB" hide-details /><VBtn color="secondary" prepend-icon="mdi-play" :loading="saving === 'group-arrangement-preview'" @click="previewGroupArrangement">开始试算</VBtn></div>
-          <VAlert v-if="groupArrangementPreview" :type="groupArrangementPreview.trace?.applied ? 'success' : 'info'" variant="tonal" class="mt-4"><div>输出：<code>{{ groupArrangementPreview.output }}</code></div><div class="text-caption mt-1">{{ groupArrangementPreview.trace?.reason }}</div><div v-if="groupArrangementPreview.trace?.members?.length" class="member-trace mt-3"><VChip v-for="(member, index) in groupArrangementPreview.trace.members" :key="`${member.output}-${index}`" size="small" variant="tonal"><span v-if="index">{{ member.connector === ' ' ? '空格' : member.connector }}</span>{{ member.output }} · {{ groupPositionLabel(member.position) }}</VChip></div></VAlert>
-        </VCardText></VCard>
-      </div>
 
       <div v-else-if="renameRuleSection === 'text'">
         <div class="d-flex align-center flex-wrap ga-3 mb-4">
