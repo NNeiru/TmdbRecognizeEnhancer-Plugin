@@ -76,7 +76,7 @@ const DEFAULT_CONFIG = {
   strm_media_info_sync_max_wait_minutes: 30,
   strm_media_info_sync_path_mappings: []
 };
-const UI_VERSION = "0.7.1";
+const UI_VERSION = "0.7.1-beta.1";
 function ensureUiVersion(backendVersion) {
   const backend = String(backendVersion || "").trim();
   if (!backend || backend === UI_VERSION || typeof window === "undefined") return false;
