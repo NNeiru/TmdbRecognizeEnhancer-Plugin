@@ -24,6 +24,7 @@ const groupKind = ref('all')
 const groupProfileDialog = ref(false)
 const groupProfileForm = ref({ id: '', display_name: '', kind: 'unknown', field_policy: 'fill_empty', field_values: {}, custom_field_values: {} })
 const probePath = ref('')
+const probeSection = ref('scan')
 const probeResult = ref(null)
 const probeForce = ref(true)
 const probeCacheNotice = ref('')
@@ -732,7 +733,16 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
     </section>
 
     <section v-else-if="props.mode === 'probe' && section === 'probe'">
-      <div class="probe-settings-grid mb-4">
+      <VTabs v-model="probeSection" color="secondary" class="probe-sub-tabs mb-4">
+        <VTab value="scan" prepend-icon="mdi-waveform">媒体扫描</VTab>
+        <VTab value="strm" prepend-icon="mdi-server-network">
+          神医联动
+          <VChip size="x-small" color="secondary" variant="tonal" class="ms-2">Pro</VChip>
+          <VBadge v-if="Number(strmSync.counts?.pending || 0)" :content="strmSync.counts.pending" color="warning" inline class="ms-2" />
+        </VTab>
+      </VTabs>
+
+      <div v-if="probeSection === 'scan'" class="probe-settings-grid mb-4">
         <VCard variant="outlined"><VCardItem><VCardTitle>自动扫描策略</VCardTitle><VCardSubtitle>只在实际整理且容器能直接读取源文件时运行；同一文件会按大小和修改时间缓存。</VCardSubtitle></VCardItem><VCardText class="probe-config-body">
           <VAlert v-if="!mediaProbeBackendSupported" type="error" variant="tonal" density="compact">
             新版页面已加载，但插件后端仍是旧实例，因此字段目录显示为空且能力会被误报为 unavailable。
@@ -796,66 +806,85 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
             <VExpansionPanels variant="accordion"><VExpansionPanel><VExpansionPanelTitle><div><div class="font-weight-medium">全部 Jinja2 扫描变量</div><div class="text-caption text-medium-emphasis">{{ probeContextPreviewItems.length }} 个字段；0 是有效结果，— 表示文件没有提供对应信息</div></div></VExpansionPanelTitle><VExpansionPanelText><div class="probe-variable-grid"><div v-for="item in probeContextPreviewItems" :key="item.key" class="probe-variable-cell" :title="item.description || item.label"><div class="probe-variable-meta"><span class="probe-variable-label">{{ item.label }}</span><code>{{ item.key }}</code></div><span class="probe-variable-value" :class="{ 'is-empty': item.value === '' || item.value == null }">{{ item.value === '' || item.value == null ? '—' : item.value }}</span></div></div></VExpansionPanelText></VExpansionPanel></VExpansionPanels>
           </template>
         </VCardText></VCard>
-        <VCard variant="outlined" class="strm-sync-card">
+      </div>
+
+      <div v-else class="strm-page mb-4">
+        <VCard variant="outlined" class="strm-overview-card">
           <VCardItem>
             <template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-server-network" /></VAvatar></template>
             <VCardTitle>神医媒体信息联动 <VChip size="x-small" color="secondary" variant="tonal" class="ms-1">仅 Pro</VChip></VCardTitle>
-            <VCardSubtitle>把 MP 在传输前扫好的媒体流直接推送给 StrmAssistant Pro，由神医写入 Emby，避免网盘侧重复 ffprobe。</VCardSubtitle>
+            <VCardSubtitle>复用 MP 传输前的 ffprobe 结果，由 StrmAssistant Pro 写入 Emby，避免网盘侧重复探测。</VCardSubtitle>
             <template #append><VChip size="small" :color="strmSync.active ? 'success' : 'default'" variant="tonal">{{ strmStatusText }}</VChip></template>
           </VCardItem>
-          <VCardText class="probe-config-body">
-            <VAlert type="warning" variant="tonal" density="compact">
-              此功能依赖神医助手（StrmAssistant）<strong>Pro</strong> 注册的 <code>POST /Items/SyncMediaInfo</code> 接口；社区版没有该接口，试推会显示“不支持”。不会生成或依赖 <code>-mediainfo.json</code> 文件，也不调用 ffmpeg。
-            </VAlert>
-            <VAlert v-if="!config.media_probe_enabled" type="warning" variant="tonal" density="compact">请先开启上方“整理前扫描实际媒体流”并保存；联动直接复用传输前的 ffprobe 原始结果。</VAlert>
+          <VCardText class="strm-overview-body">
             <div class="strm-summary-row">
-              <VSwitch v-model="strmSync.config.enabled" color="secondary" label="启用神医 Pro 媒体信息推送" hide-details />
+              <VSwitch v-model="strmSync.config.enabled" color="secondary" label="启用媒体信息推送" hide-details />
               <div><span>等待</span><strong>{{ strmSync.counts?.pending || 0 }}</strong></div>
               <div><span>完成</span><strong>{{ strmSync.counts?.completed || 0 }}</strong></div>
               <div><span>需处理</span><strong>{{ strmSync.counts?.attention || 0 }}</strong></div>
             </div>
-            <div class="strm-config-grid">
-              <VSelect v-model="strmSync.config.servers" :items="strmServerItems" multiple chips clearable label="目标 Emby（留空表示全部）" hide-details />
-              <VTextField v-model.number="strmSync.config.initial_delay_seconds" type="number" min="0" max="300" label="首次等待（秒）" hint="给 Emby 留出发现新文件的时间" persistent-hint />
-              <VTextField v-model.number="strmSync.config.retry_seconds" type="number" min="10" max="600" label="重试间隔（秒）" hint="Path 尚未入库时后台重试" persistent-hint />
-              <VTextField v-model.number="strmSync.config.max_wait_minutes" type="number" min="1" max="1440" label="最长等待（分钟）" hint="超时后保留任务供手动重试" persistent-hint />
-            </div>
-            <div class="d-flex align-center flex-wrap ga-2"><div class="font-weight-medium">MP → Emby 路径映射</div><VSpacer /><VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="addStrmMapping">添加映射</VBtn></div>
-            <div v-if="strmSync.config.path_mappings?.length" class="strm-mapping-list">
-              <div v-for="(mapping, index) in strmSync.config.path_mappings" :key="index" class="strm-mapping-row">
-                <VSelect v-model="mapping.server" :items="[{ title: '全部服务器', value: '*' }, ...strmServerItems]" label="服务器" density="compact" hide-details />
-                <VTextField v-model="mapping.source" label="MP 目标路径前缀" placeholder="/media" density="compact" hide-details />
-                <VIcon icon="mdi-arrow-right" color="medium-emphasis" />
-                <VTextField v-model="mapping.target" label="Emby 路径前缀" placeholder="/mnt/media" density="compact" hide-details />
-                <VBtn icon="mdi-delete-outline" color="error" variant="text" @click="strmSync.config.path_mappings.splice(index, 1)" />
+            <VAlert type="warning" variant="tonal" density="compact">仅支持 StrmAssistant <strong>Pro</strong> 的 <code>POST /Items/SyncMediaInfo</code>；社区版试推会返回“不支持”。不生成 sidecar JSON，也不调用 ffmpeg。</VAlert>
+            <VAlert v-if="!config.media_probe_enabled" type="warning" variant="tonal" density="compact">请先切换到“媒体扫描”子页，开启并保存整理前媒体流扫描。</VAlert>
+          </VCardText>
+        </VCard>
+
+        <div class="strm-workspace-grid">
+          <VCard variant="outlined">
+            <VCardItem><template #prepend><VIcon icon="mdi-tune-variant" color="secondary" /></template><VCardTitle class="text-subtitle-1">服务器与重试</VCardTitle><VCardSubtitle>留空目标服务器时推送到全部已连接 Emby</VCardSubtitle></VCardItem>
+            <VCardText class="strm-card-body">
+              <VSelect v-model="strmSync.config.servers" :items="strmServerItems" multiple chips clearable label="目标 Emby" hide-details />
+              <div class="strm-timing-grid">
+                <VTextField v-model.number="strmSync.config.initial_delay_seconds" type="number" min="0" max="300" label="首次等待（秒）" hint="等待 Emby 发现文件" persistent-hint />
+                <VTextField v-model.number="strmSync.config.retry_seconds" type="number" min="10" max="600" label="重试间隔（秒）" hint="Path 未入库时重试" persistent-hint />
+                <VTextField v-model.number="strmSync.config.max_wait_minutes" type="number" min="1" max="1440" label="最长等待（分钟）" hint="超时后可手动重试" persistent-hint />
               </div>
-            </div>
-            <div class="d-flex justify-end"><VBtn color="secondary" prepend-icon="mdi-content-save" :loading="saving === 'strm-config'" @click="saveStrmSync">保存神医联动设置</VBtn></div>
-            <VDivider />
-            <div class="text-subtitle-2">立即试推（会真实写入 Emby）</div>
-            <div class="text-caption text-medium-emphasis">复用上方“文件试扫”的容器内源路径；目标路径必须填写成 MP 整理后的路径，路径映射后用于神医在 Emby 中定位条目。</div>
+            </VCardText>
+          </VCard>
+
+          <VCard variant="outlined">
+            <VCardItem><template #prepend><VIcon icon="mdi-folder-swap-outline" color="secondary" /></template><VCardTitle class="text-subtitle-1">路径映射</VCardTitle><VCardSubtitle>把 MP 整理路径转换成 Emby 中看到的路径</VCardSubtitle><template #append><VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="addStrmMapping">添加</VBtn></template></VCardItem>
+            <VCardText class="strm-card-body">
+              <div v-if="strmSync.config.path_mappings?.length" class="strm-mapping-list">
+                <div v-for="(mapping, index) in strmSync.config.path_mappings" :key="index" class="strm-mapping-row">
+                  <VSelect v-model="mapping.server" :items="[{ title: '全部服务器', value: '*' }, ...strmServerItems]" label="服务器" density="compact" hide-details />
+                  <div class="strm-path-pair"><VTextField v-model="mapping.source" label="MP 前缀" placeholder="/media" density="compact" hide-details /><VIcon icon="mdi-arrow-right" color="medium-emphasis" /><VTextField v-model="mapping.target" label="Emby 前缀" placeholder="/mnt/media" density="compact" hide-details /></div>
+                  <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="strmSync.config.path_mappings.splice(index, 1)" />
+                </div>
+              </div>
+              <div v-else class="strm-empty"><VIcon icon="mdi-map-marker-path" size="30" /><span>路径相同时无需配置映射</span></div>
+            </VCardText>
+          </VCard>
+        </div>
+
+        <div class="d-flex justify-end"><VBtn color="secondary" prepend-icon="mdi-content-save" :loading="saving === 'strm-config'" @click="saveStrmSync">保存神医联动设置</VBtn></div>
+
+        <VCard variant="outlined">
+          <VCardItem><template #prepend><VIcon icon="mdi-flask-outline" color="secondary" /></template><VCardTitle class="text-subtitle-1">立即试推</VCardTitle><VCardSubtitle>真实写入 Emby；源文件请先在“媒体扫描”子页选择</VCardSubtitle></VCardItem>
+          <VCardText class="strm-card-body">
             <div class="strm-preview-row">
-              <VTextField :model-value="probePath" label="MP 可读源文件" readonly hide-details />
-              <VTextField v-model="strmTargetPath" label="MP 整理后目标路径" placeholder="/media/TV/Anime/Season 01/E01.mkv" hide-details />
+              <VTextField :model-value="probePath" label="MP 可读源文件" readonly hide-details prepend-inner-icon="mdi-file-video-outline" />
+              <VTextField v-model="strmTargetPath" label="MP 整理后目标路径" placeholder="/media/TV/Anime/Season 01/E01.mkv" hide-details prepend-inner-icon="mdi-folder-arrow-right-outline" />
               <VBtn color="secondary" prepend-icon="mdi-send-check-outline" :loading="saving === 'strm-preview'" :disabled="!probePath || !strmTargetPath" @click="previewStrmSync">扫描并试推</VBtn>
             </div>
+            <VAlert v-if="!probePath" type="info" variant="tonal" density="compact">尚未选择源文件；切换到“媒体扫描”完成文件选择后再返回本页。</VAlert>
             <VAlert v-if="strmPreview" :type="strmPreview.retryable ? 'warning' : 'info'" variant="tonal" density="compact">
               <div v-for="(result, name) in strmPreview.results || {}" :key="name"><strong>{{ name }}</strong>：{{ result.status }} · {{ result.reason }}<span v-if="result.mapped_path">（{{ result.mapped_path }}）</span></div>
               <div v-if="!Object.keys(strmPreview.results || {}).length">{{ strmPreview.reason || '没有服务器结果' }}</div>
             </VAlert>
-            <VCard variant="tonal">
-              <VCardItem><VCardTitle class="text-subtitle-1">推送任务</VCardTitle><VCardSubtitle>最多保留 80 条已结束记录</VCardSubtitle><template #append><div class="d-flex ga-1"><VBtn size="small" variant="text" prepend-icon="mdi-replay" @click="retryStrmJob()">重试未完成</VBtn><VBtn size="small" variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" @click="deleteStrmJob()">清理已结束</VBtn></div></template></VCardItem>
-              <VCardText v-if="strmSync.jobs?.length" class="strm-job-list">
-                <div v-for="job in strmSync.jobs" :key="job.id" class="strm-job-row">
-                  <div class="min-w-0"><div class="font-weight-medium text-truncate">{{ job.title || job.target_path }}</div><div class="text-caption text-medium-emphasis text-truncate">{{ job.target_path }}</div><div class="text-caption">{{ job.reason }} · 尝试 {{ job.attempts || 0 }} 次</div></div>
-                  <VChip size="small" :color="job.status === 'completed' ? 'success' : job.status === 'pending' || job.status === 'running' ? 'info' : 'warning'" variant="tonal">{{ job.status }}</VChip>
-                  <VBtn icon="mdi-replay" size="small" variant="text" :disabled="job.status === 'completed'" @click="retryStrmJob(job.id)" />
-                  <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="deleteStrmJob(job.id)" />
-                </div>
-              </VCardText>
-              <VCardText v-else class="text-center text-medium-emphasis">暂无推送任务</VCardText>
-            </VCard>
           </VCardText>
+        </VCard>
+
+        <VCard variant="outlined">
+          <VCardItem><template #prepend><VIcon icon="mdi-format-list-checks" color="secondary" /></template><VCardTitle class="text-subtitle-1">推送任务</VCardTitle><VCardSubtitle>后台等待 Emby 入库，最多保留 80 条已结束记录</VCardSubtitle><template #append><div class="d-flex ga-1"><VBtn size="small" variant="text" prepend-icon="mdi-replay" @click="retryStrmJob()">重试未完成</VBtn><VBtn size="small" variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" @click="deleteStrmJob()">清理已结束</VBtn></div></template></VCardItem>
+          <VCardText v-if="strmSync.jobs?.length" class="strm-job-list">
+            <div v-for="job in strmSync.jobs" :key="job.id" class="strm-job-row">
+              <div class="min-w-0"><div class="font-weight-medium text-truncate">{{ job.title || job.target_path }}</div><div class="text-caption text-medium-emphasis text-truncate">{{ job.target_path }}</div><div class="text-caption">{{ job.reason }} · 尝试 {{ job.attempts || 0 }} 次</div></div>
+              <VChip size="small" :color="job.status === 'completed' ? 'success' : job.status === 'pending' || job.status === 'running' ? 'info' : 'warning'" variant="tonal">{{ job.status }}</VChip>
+              <VBtn icon="mdi-replay" size="small" variant="text" :disabled="job.status === 'completed'" @click="retryStrmJob(job.id)" />
+              <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="deleteStrmJob(job.id)" />
+            </div>
+          </VCardText>
+          <VCardText v-else class="strm-empty"><VIcon icon="mdi-inbox-outline" size="34" /><span>暂无推送任务</span></VCardText>
         </VCard>
       </div>
     </section>
@@ -1099,17 +1128,21 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .overlay-preview-form { display: grid; gap: 14px; }
 .overlay-preview-actions { display: flex; align-items: center; min-height: 38px; }
 .probe-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.strm-sync-card { grid-column: 1 / -1; }
-.strm-summary-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 24px; }
-.strm-summary-row > div:not(:first-child) { display: grid; gap: 2px; min-width: 64px; padding: 8px 12px; border-radius: 10px; background: rgba(var(--v-theme-secondary), .06); }
-.strm-summary-row span { color: rgba(var(--v-theme-on-surface), .58); font-size: .72rem; }
-.strm-summary-row strong { font-size: 1.05rem; }
-.strm-config-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-.strm-config-grid > :first-child { grid-column: span 2; }
+.probe-sub-tabs { padding: 4px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; background: rgba(var(--v-theme-secondary), .035); }
+.strm-page { display: grid; gap: 14px; }
+.strm-overview-body, .strm-card-body { display: grid; gap: 12px; }
+.strm-summary-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 18px; }
+.strm-summary-row > div:not(:first-child) { display: grid; gap: 1px; min-width: 62px; padding: 7px 11px; border-radius: 9px; background: rgba(var(--v-theme-secondary), .06); }
+.strm-summary-row span { color: rgba(var(--v-theme-on-surface), .58); font-size: .7rem; }
+.strm-summary-row strong { font-size: 1rem; }
+.strm-workspace-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 14px; }
+.strm-timing-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .strm-mapping-list, .strm-job-list { display: grid; gap: 8px; }
-.strm-mapping-row { display: grid; grid-template-columns: minmax(150px, .65fr) minmax(180px, 1fr) auto minmax(180px, 1fr) auto; gap: 8px; align-items: center; }
+.strm-mapping-row { display: grid; grid-template-columns: minmax(125px, .42fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
+.strm-path-pair { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 7px; align-items: center; }
 .strm-preview-row { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr) auto; gap: 10px; align-items: center; }
 .strm-job-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 9px 10px; border-radius: 9px; background: rgba(var(--v-theme-on-surface), .035); }
+.strm-empty { min-height: 96px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: rgba(var(--v-theme-on-surface), .48); text-align: center; }
 .probe-config-body { display: grid; gap: 14px; }
 .probe-enable-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px; }
 .probe-panels { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
@@ -1142,7 +1175,14 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .preset-table thead { position: sticky; top: 0; z-index: 1; background: rgb(var(--v-theme-surface)); }
 .preset-table code { white-space: normal; overflow-wrap: anywhere; }
 .supplement-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-@media (max-width: 900px) { .filter-row { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 1050px) {
+  .strm-workspace-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 900px) {
+  .filter-row { grid-template-columns: 1fr 1fr; }
+  .strm-timing-grid { grid-template-columns: 1fr 1fr; }
+  .strm-preview-row { grid-template-columns: 1fr; }
+}
 @media (max-width: 600px) {
   .filter-row, .rename-preview-form { grid-template-columns: 1fr; }
   .preview-original, .preview-wide { grid-column: auto; }
@@ -1151,8 +1191,13 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .naming-default-grid { grid-template-columns: 1fr; }
   .separator-scope { grid-column: auto; }
   .group-layout-grid, .group-preview-form { grid-template-columns: 1fr; }
-  .probe-settings-grid, .probe-result-table, .supplement-field-grid { grid-template-columns: 1fr; }
+  .probe-settings-grid, .probe-result-table, .supplement-field-grid, .strm-timing-grid { grid-template-columns: 1fr; }
   .probe-path-row { grid-template-columns: 1fr; }
+  .strm-mapping-row { grid-template-columns: 1fr auto; }
+  .strm-path-pair { grid-column: 1 / -1; }
+  .strm-job-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .strm-job-row > .v-btn { grid-row: 2; }
+  .probe-sub-tabs :deep(.v-btn__content) { font-size: .78rem; }
   .probe-variable-head, .probe-variable-row { grid-template-columns: minmax(0, 1fr) minmax(100px, .42fr); gap: 8px; padding: 9px 10px; }
   .probe-field-row { grid-template-columns: auto minmax(0, 1fr); }
   .probe-policy-select { grid-column: 2; width: 100%; }
