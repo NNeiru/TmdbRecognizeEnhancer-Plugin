@@ -19,12 +19,6 @@ const weightTotal = computed(() => [
 
 const tmdbFirstMode = computed(() => config.value.recognition_mode === 'tmdb_first')
 
-function applyTmdbFirstPreset() {
-  Object.assign(config.value, {
-    recognition_mode: 'tmdb_first',
-  })
-}
-
 function applyBalancedPreset() {
   Object.assign(config.value, {
     recognition_mode: 'scored',
@@ -50,206 +44,232 @@ function applyBalancedPreset() {
 
 <template>
   <div class="strategy-settings">
-    <VAlert type="info" variant="tonal" density="comfortable" class="mb-5" icon="mdi-database-search-outline">
-      首结果模式完全按 TMDB 一次搜索的顺序选择；评分模式才使用标题、原标题、年份、类型、查询来源和双阈值。
+    <section class="strategy-hero">
+      <div class="strategy-hero-copy">
+        <VAvatar color="primary" variant="tonal" size="44"><VIcon icon="mdi-database-search-outline" /></VAvatar>
+        <div>
+          <h3>候选选择策略</h3>
+          <p>先选择决策模式，再按需要展开安全阈值和高级参数。</p>
+        </div>
+      </div>
+      <VBtnToggle v-model="config.recognition_mode" mandatory color="primary" variant="outlined" density="comfortable" class="mode-toggle">
+        <VBtn value="tmdb_first" prepend-icon="mdi-numeric-1-circle-outline">首结果</VBtn>
+        <VBtn value="scored" prepend-icon="mdi-scale-balance">评分模式</VBtn>
+      </VBtnToggle>
+    </section>
+
+    <VAlert :type="tmdbFirstMode ? 'success' : 'info'" variant="tonal" density="compact" class="mode-summary">
+      <template v-if="tmdbFirstMode">只搜索一次完整标题，通常采用 TMDB 首个影视结果；近期季度、识别记忆和人工优先名单可以在候选内调整顺序。</template>
+      <template v-else>综合标题、别名、年份、类型和上下文评分，并通过最低分与领先分差控制是否接管。</template>
     </VAlert>
 
-    <VRow>
-      <VCol cols="12" :md="compact || tmdbFirstMode ? 12 : 5">
-        <VCard variant="outlined" class="setting-card h-100">
-          <VCardItem>
-            <template #prepend><VIcon icon="mdi-tune-variant" color="primary" /></template>
-            <VCardTitle>运行方式</VCardTitle>
-            <VCardSubtitle>控制接管范围与搜索成本</VCardSubtitle>
-          </VCardItem>
-          <VCardText>
-            <template v-if="showModuleSwitches">
-              <VSwitch v-model="config.enabled" color="primary" label="插件总开关" hide-details />
-              <VSwitch v-model="config.recognizer_enabled" color="primary" label="启用 TMDB 搜索增强" hide-details />
-              <VSwitch v-model="config.episode_normalizer_enabled" color="success" label="启用集数偏移" hide-details />
-            </template>
-            <VSelect v-model="config.recognition_mode" :items="[
-              {title:'TMDB 单次首结果（默认）',value:'tmdb_first'},
-              {title:'可解释评分模式',value:'scored'},
-            ]" label="候选选择模式" class="mt-3" />
-            <VSwitch v-model="config.prefer_parsed_title" color="primary" label="优先使用 MP 解析标题" hint="原标题进入事件后，复用识别词与 Rust 解析结果作为搜索标题" persistent-hint />
-            <VSwitch v-model="config.use_year_hint" color="primary" label="使用 MP 年份提示" hint="MP MetaBase 已包含识别词处理后的年份；仅在存在年份时参与评分" persistent-hint />
-            <VSwitch v-model="config.use_original_title_evidence" color="primary" label="使用原标题交叉验证" hint="将 MP 未应用识别词时的名称作为锚点，验证降级候选仍与原片相关" persistent-hint />
-            <VSwitch v-model="config.fetch_aliases" color="primary" label="拉取候选别名与译名" :hint="tmdbFirstMode ? '首结果模式中不影响选择，只用于展示和诊断' : '用于标题、原标题和罗马音交叉验证'" persistent-hint />
-            <template v-if="!tmdbFirstMode">
-              <VSwitch v-model="config.main_title_fallback" color="primary" label="启用主体名称降级" hint="例如 Mushoku Tensei: ... → Mushoku Tensei" persistent-hint />
-              <VSwitch v-model="config.progressive_fallback" color="warning" label="启用逐词缩短（实验性）" hint="每次降级均须通过未缩减标题锚点验证" persistent-hint />
-              <VSwitch v-model="config.web_search_fallback" color="warning" label="启用搜索引擎交叉验证" hint="仅接受指向具体 TMDB 条目的直链，并缓存同一查询结果" persistent-hint />
-            </template>
-            <VExpandTransition>
-              <div v-if="!tmdbFirstMode && config.web_search_fallback" class="web-fallback-box mt-3">
-                <VAlert type="warning" variant="tonal" density="compact" class="mb-3">自动模式固定使用 DuckDuckGo，避免聚合多引擎造成结果漂移；外部结果只有 TMDB 直链与原标题/候选别名共现时才形成证据。</VAlert>
-                <VSelect v-model="config.web_search_engine" :items="[
-                  { title: '自动选择', value: 'auto' },
-                  { title: 'DuckDuckGo', value: 'duckduckgo' },
-                  { title: 'Google', value: 'google' },
-                  { title: 'Brave', value: 'brave' },
-                  { title: 'Yahoo', value: 'yahoo' },
-                  { title: 'Yandex', value: 'yandex' },
-                  { title: 'Mojeek', value: 'mojeek' },
-                ]" label="搜索引擎" density="comfortable" />
-                <VRow dense>
-                  <VCol cols="6"><VTextField v-model.number="config.web_search_max_results" type="number" min="3" max="15" label="最多结果" /></VCol>
-                  <VCol cols="6"><VTextField v-model.number="config.web_search_timeout" type="number" min="5" max="30" label="超时" suffix="秒" /></VCol>
-                  <VCol cols="12"><VTextField v-model.number="config.web_search_min_evidence" type="number" min="50" max="100" label="外部证据最低分" hint="建议不低于 78；仅有一个 TMDB 链接而没有别名共现时最高 60 分" persistent-hint /></VCol>
-                </VRow>
-              </div>
-            </VExpandTransition>
-            <VSwitch v-model="config.debug" color="primary" label="输出详细调试日志" hide-details />
-          </VCardText>
-        </VCard>
-      </VCol>
+    <VCard v-if="showModuleSwitches" variant="outlined" class="setting-card mb-4">
+      <VCardText class="module-switches">
+        <VSwitch v-model="config.enabled" color="primary" label="插件总开关" hide-details />
+        <VSwitch v-model="config.recognizer_enabled" color="primary" label="TMDB 搜索增强" hide-details />
+        <VSwitch v-model="config.episode_normalizer_enabled" color="success" label="集数偏移" hide-details />
+      </VCardText>
+    </VCard>
 
-      <VCol v-if="!tmdbFirstMode" cols="12" :md="compact ? 12 : 7">
-        <VCard variant="outlined" class="setting-card h-100">
-          <VCardItem>
-            <template #prepend><VIcon icon="mdi-shield-star-outline" color="success" /></template>
-            <VCardTitle>接纳门槛</VCardTitle>
-            <VCardSubtitle>宁可拒绝，也不把资源整理到错误作品</VCardSubtitle>
-          </VCardItem>
-          <VCardText>
-            <div class="slider-label"><span>最低得分</span><strong>{{ config.minimum_score }}</strong></div>
-            <VSlider v-model="config.minimum_score" :min="40" :max="95" :step="1" color="primary" thumb-label />
-            <div class="slider-label"><span>第一名领先分差</span><strong>{{ config.minimum_margin }}</strong></div>
-            <VSlider v-model="config.minimum_margin" :min="0" :max="30" :step="1" color="primary" thumb-label />
-            <VRow dense>
-              <VCol cols="6"><VTextField v-model.number="config.max_queries" type="number" min="1" max="8" label="最多搜索词" /></VCol>
-              <VCol cols="6"><VTextField v-model.number="config.minimum_query_length" type="number" min="2" max="20" label="降级词最短字符" /></VCol>
-              <VCol cols="6"><VTextField v-model.number="config.candidate_limit" type="number" min="1" max="20" label="每词候选上限" /></VCol>
-              <VCol cols="6"><VTextField v-model.number="config.detail_limit" type="number" min="0" max="15" label="拉取详情上限" /></VCol>
-            </VRow>
-          </VCardText>
-        </VCard>
-      </VCol>
-    </VRow>
-
-    <VAlert v-if="tmdbFirstMode" type="success" variant="tonal" class="mt-4">
-      当前只提交一次完整解析标题。通常采用 TMDB 第一个影视结果；若近期季度目录、识别记忆或人工优先名单明确指向本次候选之一，会在保留搜索顺序的基础上优先该候选。评分与分差不参与选择。
-    </VAlert>
-
-    <VCard variant="outlined" class="setting-card mt-4">
+    <VCard variant="outlined" class="setting-card mb-4">
       <VCardItem>
-        <template #prepend><VIcon icon="mdi-compass-rose" color="primary" /></template>
+        <template #prepend><VIcon icon="mdi-text-search" color="primary" /></template>
+        <VCardTitle>标题与候选信息</VCardTitle>
+        <VCardSubtitle>决定提交给 TMDB 的标题以及用于核验候选的信息</VCardSubtitle>
+      </VCardItem>
+      <VCardText class="toggle-grid">
+        <div class="toggle-item">
+          <div><strong>优先使用 MP 解析标题</strong><small>复用识别词和解析器处理后的主体名称</small></div>
+          <VSwitch v-model="config.prefer_parsed_title" color="primary" hide-details />
+        </div>
+        <div class="toggle-item">
+          <div><strong>使用年份提示</strong><small>标题带年份时参与候选筛选与评分</small></div>
+          <VSwitch v-model="config.use_year_hint" color="primary" hide-details />
+        </div>
+        <div class="toggle-item">
+          <div><strong>原标题交叉验证</strong><small>确认降级结果仍与未缩减标题相关</small></div>
+          <VSwitch v-model="config.use_original_title_evidence" color="primary" hide-details />
+        </div>
+        <div class="toggle-item">
+          <div><strong>拉取别名与译名</strong><small>{{ tmdbFirstMode ? '用于展示和诊断，不改变首结果评分' : '用于标题、译名和罗马音交叉验证' }}</small></div>
+          <VSwitch v-model="config.fetch_aliases" color="primary" hide-details />
+        </div>
+      </VCardText>
+    </VCard>
+
+    <VCard variant="outlined" class="setting-card mb-4">
+      <VCardItem>
+        <template #prepend><VIcon icon="mdi-compass-rose" color="secondary" /></template>
         <VCardTitle>上下文辅助</VCardTitle>
-        <VCardSubtitle>两类证据互相独立；关闭后完全不参与候选选择</VCardSubtitle>
+        <VCardSubtitle>只在搜索已经返回对应候选时形成额外证据</VCardSubtitle>
       </VCardItem>
       <VCardText>
-        <VRow>
-          <VCol cols="12" md="6">
-            <div class="context-box">
-              <VSwitch v-model="config.seasonal_evidence_enabled" color="primary" label="使用近期季度动画目录" hide-details />
-              <div class="text-body-2 text-medium-emphasis mb-3">AniList 的单季查询不会自动带入上季开播的跨季番；插件会读取已缓存的当前及此前季度看板，兼顾跨季连载和上一季资源补整，识别时不访问外部网站。</div>
-              <VSelect v-model.number="config.seasonal_evidence_quarters" :items="[
-                { title: '仅当前季度', value: 1 },
-                { title: '当前 + 上一季度（推荐）', value: 2 },
-                { title: '最近三个季度', value: 3 },
-                { title: '最近四个季度', value: 4 },
-              ]" label="季度证据窗口" density="comfortable" :disabled="!config.seasonal_evidence_enabled" />
-              <VSlider v-model="config.seasonal_evidence_weight" :min="0" :max="40" :step="1" color="primary" :disabled="!config.seasonal_evidence_enabled" thumb-label>
-                <template #prepend><span class="evidence-label">影响强度</span></template>
-                <template #append><strong>{{ config.seasonal_evidence_weight }}</strong></template>
-              </VSlider>
+        <div class="evidence-grid">
+          <div class="evidence-box">
+            <div class="evidence-head">
+              <div><strong>近期季度动画</strong><small>兼顾当前季、跨季连载和上一季补整</small></div>
+              <VSwitch v-model="config.seasonal_evidence_enabled" color="primary" hide-details />
             </div>
-          </VCol>
-          <VCol cols="12" md="6">
-            <div class="context-box">
-              <VSwitch v-model="config.recognition_memory_enabled" color="secondary" label="使用近期重复命中" hide-details />
-              <div class="text-body-2 text-medium-emphasis mb-3">只累计正式整理链中不同文件对同一完整解析标题的命中；综合试跑和同一文件重复运行不会刷高频次。</div>
+            <VSelect v-model.number="config.seasonal_evidence_quarters" :items="[
+              { title: '仅当前季度', value: 1 },
+              { title: '当前 + 上一季度（推荐）', value: 2 },
+              { title: '最近三个季度', value: 3 },
+              { title: '最近四个季度', value: 4 },
+            ]" label="证据窗口" density="compact" hide-details :disabled="!config.seasonal_evidence_enabled" />
+            <div class="compact-slider"><span>影响强度</span><VSlider v-model="config.seasonal_evidence_weight" :min="0" :max="40" :step="1" color="primary" hide-details :disabled="!config.seasonal_evidence_enabled" /><strong>{{ config.seasonal_evidence_weight }}</strong></div>
+          </div>
+          <div class="evidence-box">
+            <div class="evidence-head">
+              <div><strong>近期重复命中</strong><small>只统计正式整理中的不同文件</small></div>
+              <VSwitch v-model="config.recognition_memory_enabled" color="secondary" hide-details />
+            </div>
+            <div class="compact-slider"><span>影响强度</span><VSlider v-model="config.recognition_memory_weight" :min="0" :max="40" :step="1" color="secondary" hide-details :disabled="!config.recognition_memory_enabled" /><strong>{{ config.recognition_memory_weight }}</strong></div>
+            <VRow dense class="mt-1">
+              <VCol cols="6"><VTextField v-model.number="config.recognition_memory_min_hits" density="compact" hide-details type="number" min="2" max="10" label="生效文件数" suffix="个" :disabled="!config.recognition_memory_enabled" /></VCol>
+              <VCol cols="6"><VTextField v-model.number="config.recognition_memory_ttl_days" density="compact" hide-details type="number" min="1" max="90" label="保存时间" suffix="天" :disabled="!config.recognition_memory_enabled" /></VCol>
+            </VRow>
+          </div>
+        </div>
+      </VCardText>
+    </VCard>
+
+    <VExpansionPanels multiple variant="accordion" class="advanced-panels">
+      <VExpansionPanel value="candidate-policy">
+        <VExpansionPanelTitle>
+          <div class="panel-title"><VIcon icon="mdi-playlist-star" color="primary" /><div><strong>TMDB 人工候选规则</strong><small>排除 {{ config.tmdb_exclude_ids?.length || 0 }} 个 · 优先 {{ config.tmdb_prefer_ids?.length || 0 }} 个</small></div></div>
+        </VExpansionPanelTitle>
+        <VExpansionPanelText>
+          <VAlert type="info" variant="tonal" density="compact" class="mb-4">只作用于本次搜索实际返回的候选。排除先执行；优先名单命中后直接选择，多个优先 ID 按填写顺序。</VAlert>
+          <VRow dense>
+            <VCol cols="12" md="6"><VCombobox v-model="config.tmdb_exclude_ids" multiple chips closable-chips clearable label="TMDB 排除名单" placeholder="输入 ID 后按回车" hint="在评分、排序和分差前移除；冲突时排除优先" persistent-hint /></VCol>
+            <VCol cols="12" md="6"><VCombobox v-model="config.tmdb_prefer_ids" multiple chips closable-chips clearable label="TMDB 优先名单" placeholder="输入 ID 后按回车" hint="候选中出现指定 ID 时直接采用；越靠前越优先" persistent-hint /></VCol>
+          </VRow>
+        </VExpansionPanelText>
+      </VExpansionPanel>
+
+      <VExpansionPanel v-if="!tmdbFirstMode" value="thresholds">
+        <VExpansionPanelTitle>
+          <div class="panel-title"><VIcon icon="mdi-shield-star-outline" color="success" /><div><strong>接纳门槛与搜索规模</strong><small>最低 {{ config.minimum_score }} 分 · 领先 {{ config.minimum_margin }} 分 · 最多 {{ config.max_queries }} 个搜索词</small></div></div>
+        </VExpansionPanelTitle>
+        <VExpansionPanelText>
+          <VRow>
+            <VCol cols="12" md="6"><div class="slider-label"><span>最低得分</span><strong>{{ config.minimum_score }}</strong></div><VSlider v-model="config.minimum_score" :min="40" :max="95" :step="1" color="primary" thumb-label /></VCol>
+            <VCol cols="12" md="6"><div class="slider-label"><span>第一名领先分差</span><strong>{{ config.minimum_margin }}</strong></div><VSlider v-model="config.minimum_margin" :min="0" :max="30" :step="1" color="primary" thumb-label /></VCol>
+          </VRow>
+          <VRow dense>
+            <VCol cols="6" md="3"><VTextField v-model.number="config.max_queries" density="compact" type="number" min="1" max="8" label="最多搜索词" /></VCol>
+            <VCol cols="6" md="3"><VTextField v-model.number="config.minimum_query_length" density="compact" type="number" min="2" max="20" label="降级词最短字符" /></VCol>
+            <VCol cols="6" md="3"><VTextField v-model.number="config.candidate_limit" density="compact" type="number" min="1" max="20" label="每词候选上限" /></VCol>
+            <VCol cols="6" md="3"><VTextField v-model.number="config.detail_limit" density="compact" type="number" min="0" max="15" label="详情拉取上限" /></VCol>
+          </VRow>
+        </VExpansionPanelText>
+      </VExpansionPanel>
+
+      <VExpansionPanel v-if="!tmdbFirstMode" value="fallback">
+        <VExpansionPanelTitle>
+          <div class="panel-title"><VIcon icon="mdi-source-branch" color="warning" /><div><strong>标题降级与外部验证</strong><small>主体降级、逐词缩短和搜索引擎兜底</small></div></div>
+        </VExpansionPanelTitle>
+        <VExpansionPanelText>
+          <div class="toggle-grid compact-toggles">
+            <div class="toggle-item"><div><strong>主体名称降级</strong><small>例如 Mushoku Tensei: … → Mushoku Tensei</small></div><VSwitch v-model="config.main_title_fallback" color="primary" hide-details /></div>
+            <div class="toggle-item"><div><strong>逐词缩短</strong><small>实验性；每次缩短仍须通过原标题锚点</small></div><VSwitch v-model="config.progressive_fallback" color="warning" hide-details /></div>
+            <div class="toggle-item"><div><strong>搜索引擎交叉验证</strong><small>只接受指向具体 TMDB 条目的直链证据</small></div><VSwitch v-model="config.web_search_fallback" color="warning" hide-details /></div>
+          </div>
+          <VExpandTransition>
+            <div v-if="config.web_search_fallback" class="web-fallback-box mt-4">
+              <VAlert type="warning" variant="tonal" density="compact" class="mb-3">自动模式固定使用 DuckDuckGo；只有 TMDB 直链与原标题或候选别名共现时才形成证据。</VAlert>
               <VRow dense>
-                <VCol cols="12"><VSlider v-model="config.recognition_memory_weight" :min="0" :max="40" :step="1" color="secondary" :disabled="!config.recognition_memory_enabled" thumb-label><template #prepend><span class="evidence-label">影响强度</span></template><template #append><strong>{{ config.recognition_memory_weight }}</strong></template></VSlider></VCol>
-                <VCol cols="6"><VTextField v-model.number="config.recognition_memory_min_hits" type="number" min="2" max="10" label="生效所需文件数" suffix="个" :disabled="!config.recognition_memory_enabled" /></VCol>
-                <VCol cols="6"><VTextField v-model.number="config.recognition_memory_ttl_days" type="number" min="1" max="90" label="记忆保存时间" suffix="天" :disabled="!config.recognition_memory_enabled" /></VCol>
+                <VCol cols="12" md="4"><VSelect v-model="config.web_search_engine" :items="[
+                  { title: '自动选择', value: 'auto' }, { title: 'DuckDuckGo', value: 'duckduckgo' },
+                  { title: 'Google', value: 'google' }, { title: 'Brave', value: 'brave' },
+                  { title: 'Yahoo', value: 'yahoo' }, { title: 'Yandex', value: 'yandex' }, { title: 'Mojeek', value: 'mojeek' },
+                ]" density="compact" label="搜索引擎" /></VCol>
+                <VCol cols="6" md="2"><VTextField v-model.number="config.web_search_max_results" density="compact" type="number" min="3" max="15" label="最多结果" /></VCol>
+                <VCol cols="6" md="2"><VTextField v-model.number="config.web_search_timeout" density="compact" type="number" min="5" max="30" label="超时" suffix="秒" /></VCol>
+                <VCol cols="12" md="4"><VTextField v-model.number="config.web_search_min_evidence" density="compact" type="number" min="50" max="100" label="最低证据分" hint="建议不低于 78" persistent-hint /></VCol>
               </VRow>
             </div>
-          </VCol>
-        </VRow>
-        <VDivider class="my-5" />
-        <div class="d-flex align-center ga-2 mb-1">
-          <VIcon icon="mdi-playlist-star" color="primary" />
-          <strong>TMDB 候选人工规则</strong>
-        </div>
-        <div class="text-body-2 text-medium-emphasis mb-4">只处理本次搜索实际返回的候选，不会凭 ID 强行创建结果。排除先执行；优先名单命中后直接选择，多个优先 ID 同时出现时按填写顺序。</div>
-        <VRow dense>
-          <VCol cols="12" md="6">
-            <VCombobox
-              v-model="config.tmdb_exclude_ids" multiple chips closable-chips clearable
-              label="TMDB 排除名单" placeholder="输入 ID 后按回车"
-              hint="命中的候选会在评分和分差计算前移除；与优先名单冲突时排除优先"
-              persistent-hint
-            />
-          </VCol>
-          <VCol cols="12" md="6">
-            <VCombobox
-              v-model="config.tmdb_prefer_ids" multiple chips closable-chips clearable
-              label="TMDB 优先名单" placeholder="输入 ID 后按回车"
-              hint="本轮候选出现其中一个 ID 时直接选择；越靠前优先级越高"
-              persistent-hint
-            />
-          </VCol>
-        </VRow>
-      </VCardText>
-    </VCard>
+          </VExpandTransition>
+        </VExpansionPanelText>
+      </VExpansionPanel>
 
-    <VCard v-if="!tmdbFirstMode" variant="outlined" class="setting-card mt-4">
-      <VCardItem>
-        <template #prepend><VIcon icon="mdi-scale-balance" color="secondary" /></template>
-        <VCardTitle>评分权重</VCardTitle>
-        <VCardSubtitle>权重会自动按总和归一化 · 当前合计 {{ weightTotal }}</VCardSubtitle>
-      </VCardItem>
-      <VCardText>
-        <VAlert type="info" variant="tonal" density="comfortable" class="mb-4">
-          <div class="d-flex flex-wrap align-center ga-2">
-            <div class="flex-grow-1">评分模式会验证降级候选与未缩减标题、MP 原标题之间的关联；关联不足会额外扣分。</div>
-            <VBtn size="small" color="primary" variant="tonal" prepend-icon="mdi-numeric-1-circle" @click="applyTmdbFirstPreset">切换单次首结果</VBtn>
-            <VBtn size="small" variant="text" prepend-icon="mdi-restore" @click="applyBalancedPreset">恢复均衡预设</VBtn>
-          </div>
-        </VAlert>
-        <VRow dense>
-          <VCol v-for="item in [
-            ['token_weight', 'Token 覆盖', 'mdi-format-list-bulleted'],
-            ['similarity_weight', '字符相似', 'mdi-approximately-equal'],
-            ['prefix_weight', '主体前缀', 'mdi-format-align-left'],
-            ['rank_weight', '搜索排名', 'mdi-sort-numeric-ascending'],
-            ['query_confidence_weight', '查询来源', 'mdi-source-branch-check'],
-            ['anchor_weight', '原标题锚点', 'mdi-link-variant'],
-            ['year_weight', '年份匹配', 'mdi-calendar-check'],
-            ['type_weight', '类型匹配', 'mdi-movie-filter-outline'],
-          ]" :key="item[0]" cols="12" sm="6" md="4">
-            <div class="weight-box">
-              <div class="d-flex align-center ga-2 mb-2">
-                <VIcon :icon="item[2]" size="18" color="primary" />
-                <span class="text-body-2">{{ item[1] }}</span>
-                <VSpacer /><strong>{{ config[item[0]] }}</strong>
-              </div>
-              <VSlider v-model="config[item[0]]" :min="0" :max="60" :step="1" hide-details color="primary" />
-            </div>
-          </VCol>
-          <VCol cols="12" sm="6">
-            <VTextField v-model.number="config.season_missing_penalty" type="number" min="0" max="100" label="候选缺少目标季时扣分" prefix="-" suffix="分" />
-          </VCol>
-          <VCol cols="12" sm="6">
-            <VTextField v-model.number="config.fallback_anchor_min" type="number" min="0" max="100" label="降级候选最低锚点关联" suffix="分" />
-          </VCol>
-          <VCol cols="12" sm="6">
-            <VTextField v-model.number="config.history_limit" type="number" min="5" max="100" label="保留模块日志" suffix="条" />
-          </VCol>
-        </VRow>
-      </VCardText>
-    </VCard>
+      <VExpansionPanel v-if="!tmdbFirstMode" value="weights">
+        <VExpansionPanelTitle>
+          <div class="panel-title"><VIcon icon="mdi-tune-vertical" color="secondary" /><div><strong>评分权重</strong><small>自动归一化 · 当前合计 {{ weightTotal }}</small></div></div>
+        </VExpansionPanelTitle>
+        <VExpansionPanelText>
+          <div class="panel-toolbar"><span>高级参数通常保持默认即可。</span><VBtn size="small" variant="tonal" prepend-icon="mdi-restore" @click.stop="applyBalancedPreset">恢复均衡预设</VBtn></div>
+          <VRow dense>
+            <VCol v-for="item in [
+              ['token_weight', 'Token 覆盖', 'mdi-format-list-bulleted'], ['similarity_weight', '字符相似', 'mdi-approximately-equal'],
+              ['prefix_weight', '主体前缀', 'mdi-format-align-left'], ['rank_weight', '搜索排名', 'mdi-sort-numeric-ascending'],
+              ['query_confidence_weight', '查询来源', 'mdi-source-branch-check'], ['anchor_weight', '原标题锚点', 'mdi-link-variant'],
+              ['year_weight', '年份匹配', 'mdi-calendar-check'], ['type_weight', '类型匹配', 'mdi-movie-filter-outline'],
+            ]" :key="item[0]" cols="12" sm="6" md="4">
+              <div class="weight-box"><div class="weight-head"><VIcon :icon="item[2]" size="18" color="primary" /><span>{{ item[1] }}</span><strong>{{ config[item[0]] }}</strong></div><VSlider v-model="config[item[0]]" :min="0" :max="60" :step="1" hide-details color="primary" /></div>
+            </VCol>
+            <VCol cols="12" sm="6"><VTextField v-model.number="config.season_missing_penalty" density="compact" type="number" min="0" max="100" label="候选缺少目标季时扣分" prefix="-" suffix="分" /></VCol>
+            <VCol cols="12" sm="6"><VTextField v-model.number="config.fallback_anchor_min" density="compact" type="number" min="0" max="100" label="降级候选最低锚点关联" suffix="分" /></VCol>
+          </VRow>
+        </VExpansionPanelText>
+      </VExpansionPanel>
+
+      <VExpansionPanel value="diagnostics">
+        <VExpansionPanelTitle>
+          <div class="panel-title"><VIcon icon="mdi-bug-outline" /><div><strong>日志与诊断</strong><small>保留 {{ config.history_limit }} 条模块日志 · 调试日志{{ config.debug ? '已开启' : '已关闭' }}</small></div></div>
+        </VExpansionPanelTitle>
+        <VExpansionPanelText>
+          <VRow dense align="center">
+            <VCol cols="12" sm="6"><VTextField v-model.number="config.history_limit" density="compact" hide-details type="number" min="5" max="100" label="保留模块日志" suffix="条" /></VCol>
+            <VCol cols="12" sm="6"><VSwitch v-model="config.debug" color="primary" label="输出详细调试日志" hint="仅排查问题时开启，会增加日志量" persistent-hint /></VCol>
+          </VRow>
+        </VExpansionPanelText>
+      </VExpansionPanel>
+    </VExpansionPanels>
   </div>
 </template>
 
 <style scoped>
-.setting-card { border-color: rgba(var(--v-theme-on-surface), .1); }
+.strategy-settings { display: flex; flex-direction: column; gap: 0; }
+.strategy-hero { display: flex; align-items: center; gap: 20px; justify-content: space-between; margin-bottom: 12px; padding: 18px 20px; border: 1px solid rgba(var(--v-theme-primary), .14); border-radius: 16px; background: linear-gradient(120deg, rgba(var(--v-theme-primary), .065), rgba(var(--v-theme-secondary), .025)); }
+.strategy-hero-copy { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.strategy-hero h3 { margin: 0; font-size: 1.08rem; }
+.strategy-hero p { margin: 3px 0 0; color: rgba(var(--v-theme-on-surface), .62); font-size: .82rem; }
+.mode-toggle { flex: 0 0 auto; border-radius: 10px; overflow: hidden; }
+.mode-summary { margin-bottom: 16px; }
+.setting-card { border-color: rgba(var(--v-theme-on-surface), .1); border-radius: 14px; }
+.module-switches { display: flex; flex-wrap: wrap; gap: 6px 28px; }
+.module-switches :deep(.v-input) { flex: 0 0 auto; }
+.toggle-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.toggle-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 72px; padding: 10px 14px; border-radius: 12px; background: rgba(var(--v-theme-on-surface), .035); }
+.toggle-item > div, .evidence-head > div { min-width: 0; }
+.toggle-item strong, .evidence-head strong { display: block; font-size: .9rem; }
+.toggle-item small, .evidence-head small, .panel-title small { display: block; margin-top: 3px; color: rgba(var(--v-theme-on-surface), .58); font-size: .75rem; line-height: 1.35; }
+.toggle-item :deep(.v-input), .evidence-head :deep(.v-input) { flex: 0 0 auto; }
+.evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.evidence-box { padding: 15px; border: 1px solid rgba(var(--v-theme-primary), .1); border-radius: 13px; background: rgba(var(--v-theme-primary), .025); }
+.evidence-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; margin-bottom: 12px; }
+.compact-slider { display: grid; grid-template-columns: 66px minmax(80px, 1fr) 30px; align-items: center; gap: 8px; margin-top: 12px; color: rgba(var(--v-theme-on-surface), .67); font-size: .78rem; }
+.compact-slider strong { color: rgb(var(--v-theme-primary)); text-align: right; font-variant-numeric: tabular-nums; }
+.advanced-panels { border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 14px; overflow: hidden; }
+.advanced-panels :deep(.v-expansion-panel) { border-radius: 0 !important; }
+.advanced-panels :deep(.v-expansion-panel-title) { min-height: 66px; padding: 12px 18px; }
+.panel-title { display: flex; align-items: center; gap: 13px; }
+.panel-title > div { min-width: 0; }
+.panel-title strong { display: block; font-size: .92rem; }
 .slider-label { display: flex; justify-content: space-between; margin-bottom: -6px; color: rgba(var(--v-theme-on-surface), .72); }
 .slider-label strong { color: rgb(var(--v-theme-primary)); font-variant-numeric: tabular-nums; }
-.weight-box { padding: 12px 14px; border-radius: 12px; background: rgba(var(--v-theme-primary), .045); }
-.web-fallback-box { padding: 14px; border: 1px solid rgba(var(--v-theme-warning), .22); border-radius: 14px; background: rgba(var(--v-theme-warning), .045); }
-.context-box { height: 100%; padding: 16px 18px; border: 1px solid rgba(var(--v-theme-primary), .12); border-radius: 14px; background: rgba(var(--v-theme-primary), .035); }
-.evidence-label { min-width: 64px; font-size: .8rem; color: rgba(var(--v-theme-on-surface), .68); }
+.compact-toggles { margin-bottom: 2px; }
+.web-fallback-box { padding: 14px; border: 1px solid rgba(var(--v-theme-warning), .22); border-radius: 13px; background: rgba(var(--v-theme-warning), .04); }
+.panel-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; color: rgba(var(--v-theme-on-surface), .62); font-size: .82rem; }
+.weight-box { padding: 10px 12px; border-radius: 11px; background: rgba(var(--v-theme-primary), .04); }
+.weight-head { display: flex; align-items: center; gap: 8px; font-size: .82rem; }
+.weight-head strong { margin-left: auto; color: rgb(var(--v-theme-primary)); font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) {
+  .strategy-hero { align-items: stretch; flex-direction: column; }
+  .mode-toggle { width: 100%; }
+  .mode-toggle :deep(.v-btn) { flex: 1 1 50%; }
+  .toggle-grid, .evidence-grid { grid-template-columns: 1fr; }
+  .panel-toolbar { align-items: flex-start; flex-direction: column; }
+}
 </style>
