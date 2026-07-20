@@ -730,17 +730,21 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
         </VCardText></VCard>
 
         <VCard variant="outlined" class="mt-4"><VCardItem><VCardTitle>可用于文件命名的 Jinja2 输入字段</VCardTitle><VCardSubtitle>统一展示 MoviePilot 原生字段、插件上下文字段与 ffprobe 扫描字段；可复制变量或查看取值详情。</VCardSubtitle></VCardItem><VCardText>
-          <VAlert type="info" variant="tonal" density="compact" class="mb-4">目标目录相关字段是在 MP 首次渲染之后、实际复制/移动/链接之前取得的。插件会据此重渲染一次，所以它们仍能影响最终命名，并不是整理完成后的结果。</VAlert>
+          <VAlert type="info" variant="tonal" density="compact" class="mb-4">每张卡片底部标注了用法：<span class="text-success font-weight-bold">绿色 = 可直接写入 MP 命名模板</span>；<span class="text-warning font-weight-bold">黄色（虚线卡片）= 间接使用</span>——这些目标目录字段在 MP 首次渲染后才产生，不能直接进模板，请先在自定义字段的表达式里引用它们，再把自定义字段写进模板（插件会安全重渲染一次）。彩色小标签仅表示字段来源。</VAlert>
           <VTextField v-model="renameFieldSearch" label="搜索字段名称、变量或用途" prepend-inner-icon="mdi-magnify" clearable hide-details class="mb-4" />
           <VExpansionPanels v-model="openRenameFieldGroups" multiple variant="accordion" class="field-panels">
             <VExpansionPanel v-for="group in renameFieldGroups" :key="group.category" :value="group.category">
               <VExpansionPanelTitle><div class="d-flex align-center ga-3"><span class="font-weight-medium">{{ group.category }}</span><VChip size="x-small" variant="tonal">{{ group.items.length }} 项</VChip></div></VExpansionPanelTitle>
               <VExpansionPanelText><div class="field-description-grid">
-                <div v-for="item in group.items" :key="item.key" class="field-description-card">
+                <div v-for="item in group.items" :key="item.key" class="field-description-card" :class="{ 'field-card-indirect': item.template_usage === 'custom_dependency' }">
                   <div class="field-description-head"><code>{{ item.key }}</code><VChip size="x-small" variant="tonal" :color="fieldSourceColor(item.source)">{{ item.source_label || '命名字段' }}</VChip></div>
                   <div class="field-description-label">{{ item.label }}</div>
                   <div class="field-description-text">{{ item.description }}</div>
                   <div class="field-value-summary"><span>{{ item.type || '文本' }}</span><span class="text-truncate">{{ item.values || '按上下文决定' }}</span></div>
+                  <div class="field-usage-line" :class="item.template_usage === 'custom_dependency' ? 'usage-indirect' : 'usage-direct'">
+                    <VIcon :icon="item.template_usage === 'custom_dependency' ? 'mdi-function-variant' : 'mdi-check-circle-outline'" size="14" />
+                    <span>{{ item.template_usage === 'custom_dependency' ? '间接使用：仅作自定义字段依赖' : '可直接写入命名模板' }}</span>
+                  </div>
                   <div class="field-card-actions"><VBtn size="small" variant="text" :prepend-icon="copiedVariable === item.key ? 'mdi-check' : 'mdi-content-copy'" @click="copyVariable(item.key)">{{ copiedVariable === item.key ? '已复制' : '复制变量' }}</VBtn><VBtn size="small" variant="tonal" prepend-icon="mdi-information-outline" @click="openFieldDetail(item)">取值详情</VBtn></div>
                 </div>
               </div></VExpansionPanelText>
@@ -929,6 +933,11 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .field-value-summary { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; margin-top: 9px; color: rgba(var(--v-theme-on-surface), .58); font-size: .75rem; }
 .field-value-summary > span:first-child { padding: 1px 7px; border-radius: 8px; background: rgba(var(--v-theme-secondary), .08); color: rgb(var(--v-theme-secondary)); }
 .field-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 9px -6px -6px; }
+.field-card-indirect { border-style: dashed; border-color: rgba(var(--v-theme-warning), .5); background: rgba(var(--v-theme-warning), .03); }
+.field-card-indirect:hover { border-color: rgba(var(--v-theme-warning), .8); background: rgba(var(--v-theme-warning), .06); }
+.field-usage-line { display: flex; align-items: center; gap: 5px; margin-top: 8px; font-size: .72rem; font-weight: 600; }
+.usage-direct { color: rgb(var(--v-theme-success)); }
+.usage-indirect { color: rgb(var(--v-theme-warning)); }
 .field-detail-body { display: grid; gap: 16px; padding: 22px 24px !important; }
 .field-detail-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .field-detail-section { display: grid; gap: 6px; padding: 12px 14px; border-radius: 10px; background: rgba(var(--v-theme-secondary), .045); line-height: 1.6; overflow-wrap: anywhere; }
