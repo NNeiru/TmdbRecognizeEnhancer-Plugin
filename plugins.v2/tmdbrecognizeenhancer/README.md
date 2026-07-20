@@ -5,7 +5,7 @@
 ## 运行要求
 
 - MoviePilot V2 `>= 2.13.0`
-- 插件版本：`0.7.0`
+- 插件版本：`0.7.1`
 - 集数偏移在最终媒体识别成功后执行，兼容 MoviePilot 的“插件优先”和“原生优先”
 - Emby 剧集组联动需要 MP 已配置 Emby，并在 Emby 安装支持 `TmdbEg` 的 StrmAssistant
 
@@ -93,10 +93,10 @@ TMDB 排除名单会在评分、排序和分差前剔除指定候选；优先名
 ### 媒体信息识别
 
 - 整理前通过容器内 `ffprobe` 读取实际分辨率、编码、位深、帧率、HDR/杜比视界及音轨、内封字幕语言；扫描结果在 MP 命名模板渲染前注入并按文件修改时间缓存。
-- 每类结果均可独立启停并设置补空、覆盖或追加策略。字幕组合写入 `customization`（`probe_subtitle_mapped`）：规则按行序首条命中，`简体+繁体 => 简繁内封` 精确匹配语言集合，`包含:简体+日语 => 简日内封` 为子集匹配，`>=4 => 多国字幕` 按语言数量（适合 CR/Netflix 多语种 WEB-DL）；未命中任何规则时自动回退为语言组合（如“简繁日内封”，超过 3 种语言归为“多国内封”），因此只需为想改名的组合写规则。
+- ffprobe 始终读取完整的 streams、format 和 chapters；每类开关只决定哪些结果进入 MP/Jinja 命名上下文，并设置补空、覆盖或追加策略，不会裁剪神医联动使用的原始扫描数据。字幕组合写入 `customization`（`probe_subtitle_mapped`）：规则按行序首条命中，`简体+繁体 => 简繁内封` 精确匹配语言集合，`包含:简体+日语 => 简日内封` 为子集匹配，`>=4 => 多国字幕` 按语言数量（适合 CR/Netflix 多语种 WEB-DL）；未命中任何规则时自动回退为语言组合（如“简繁日内封”，超过 3 种语言归为“多国内封”），因此只需为想改名的组合写规则。
 - 字幕相关变量分工：`probe_subtitle_languages` 是轨道 language 标签对应的单一语言（标题只用于细分简体/繁体，“简日双语”轨记为简体）；`probe_subtitle_titles` 是轨道原始标题（简日双语、繁日雙語）；`probe_subtitle_track_labels` 是每轨归一后的简写（简日、繁日）。简繁判定覆盖“简日双语”“繁日雙語”“GB/BIG5/zh-Hans/zh-Hant”等常见标注写法，映射规则的“简体+繁体+日语”与“简日+繁日”写法可互相命中。
 - 文件试扫可通过 MoviePilot 容器目录树选择真实媒体文件，同时查看写入 MP 标准字段的结果和全部 `probe_*` Jinja2 变量。
-- 可选的「神医媒体信息联动」仅适配 StrmAssistant **Pro**：整理前 ffprobe 的原始结果在 `TransferComplete` 后转换为 Emby `MediaSourceInfo`，通过 Pro 注册的 `POST /Items/SyncMediaInfo` 接口推送；复用 MP 已配置的 Emby 凭据，支持按服务器路径映射、后台等待/重试、任务持久化和单文件真实试推。它不生成 `-mediainfo.json`、不依赖神医的媒体信息持久化开关，也不调用 ffmpeg；社区版未提供该接口，因此不受支持。
+- 可选的「神医媒体信息联动」仅适配 StrmAssistant **Pro**：整理前 ffprobe 的完整原始结果在 `TransferComplete` 后转换为 Emby `MediaSourceInfo`，通过 Pro 注册的 `POST /Items/SyncMediaInfo` 接口推送；复用 MP 已配置的 Emby 凭据，支持按服务器路径映射、后台等待/重试、任务持久化和单文件真实试推。路径映射左侧填写 MP 整理后真实媒体文件的目录前缀，右侧填写 Emby 条目自身媒体文件的目录前缀；STRM 库填写 `.strm` 文件所在目录（不是 `.strm` 内容中的真实媒体地址），插件会自动把目标扩展名换成 `.strm`。它不生成 `-mediainfo.json`、不依赖神医的媒体信息持久化开关，也不调用 ffmpeg；社区版未提供该接口，因此不受支持。
 - ISO 原盘探测（可选）：官方镜像的 ffprobe 没有 libbluray，读不出 ISO 原盘播放列表。开启后插件从 [StrmAssistant.Releases](https://github.com/sjtuross/StrmAssistant.Releases/tree/main/static-ffprobe) 自动下载对应平台的静态 ffprobe（约 15MB）到插件数据目录并以 `bluray:` 协议探测，**只接管 `.iso` 文件**，普通视频仍使用原 ffprobe。下载遵循 MP 的 `GITHUB_PROXY` 与代理设置；默认关闭，不开启则完全不下载。
 - `probe_*` 可直接用于 MP 命名模板，但只有启用本模块且实际文件可读时才有值；无法从文件名推断的音轨或字幕信息保持为空。
 

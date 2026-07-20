@@ -123,6 +123,10 @@ const fieldPolicyItems = [
   { title: '覆盖原值', value: 'overwrite' },
   { title: '追加到原值', value: 'append' },
 ]
+const strmTargetKindItems = [
+  { title: 'STRM 媒体库（自动改为 .strm）', value: 'strm' },
+  { title: '普通媒体库（保留原扩展名）', value: 'media' },
+]
 const selectedProbeFieldItems = computed(() => mediaProbeFieldItems.filter(item => probeFieldSelected(item.key)))
 const mediaProbeBackendSupported = computed(() => Object.prototype.hasOwnProperty.call(data.value || {}, 'media_probe') && Array.isArray(data.value.media_probe?.field_options))
 const strmServerItems = computed(() => (strmSync.value.servers || []).map(item => ({
@@ -274,7 +278,7 @@ async function saveStrmSync() {
 
 function addStrmMapping() {
   if (!Array.isArray(strmSync.value.config.path_mappings)) strmSync.value.config.path_mappings = []
-  strmSync.value.config.path_mappings.push({ server: '*', source: '', target: '' })
+  strmSync.value.config.path_mappings.push({ server: '*', source: '', target: '', target_kind: 'strm' })
 }
 
 async function previewStrmSync() {
@@ -673,7 +677,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
           <VSwitch v-model="config.media_probe_enabled" color="purple" label="整理前自动扫描" hide-details />
           <div class="module-status-chips">
             <VChip size="small" :color="data.media_probe?.available ? 'success' : 'warning'" variant="tonal" :prepend-icon="data.media_probe?.available ? 'mdi-check-circle-outline' : 'mdi-alert-circle-outline'">{{ data.media_probe?.available ? 'ffprobe 可用' : 'ffprobe 待检查' }}</VChip>
-            <VChip size="small" color="purple" variant="tonal">{{ selectedProbeFieldItems.length }} 个扫描项</VChip>
+            <VChip size="small" color="purple" variant="tonal">{{ selectedProbeFieldItems.length }} 个输出项</VChip>
             <VChip size="small" variant="tonal">缓存 {{ data.media_probe?.cache_entries || 0 }}</VChip>
           </div>
         </template>
@@ -690,7 +694,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
     </ModuleHeader>
     <VAlert v-if="error" type="error" variant="tonal" closable class="mb-4" @click:close="error = ''">{{ error }}</VAlert>
     <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-      {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排（在「字段与制作组」页维护）和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : props.mode === 'probe' ? '扫描发生在命名渲染前，不修改源文件；标准字段可补空、覆盖或追加，probe_* 变量可直接用于命名模板。' : '这里展示当前 MP 实际加载的识别预设；插件覆盖不会修改 MP 或 Rust 文件。' }}
+      {{ props.mode === 'naming' ? '实际顺序：连接与分隔、制作组编排（在「字段与制作组」页维护）和自定义字段参与 MoviePilot 模板渲染；文本映射最后处理完整相对路径与字幕后缀。' : props.mode === 'probe' ? 'ffprobe 每次完整读取媒体流；下方选项只控制向 MP/Jinja 命名上下文输出哪些字段，不会裁剪神医联动数据。' : '这里展示当前 MP 实际加载的识别预设；插件覆盖不会修改 MP 或 Rust 文件。' }}
     </VAlert>
     <VAlert v-if="data.recognition_rules?.errors?.length" type="warning" variant="tonal" density="compact" class="mb-4">
       部分规则读取失败：{{ data.recognition_rules.errors.join('；') }}
@@ -770,8 +774,8 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
         <VCard variant="flat" border class="workspace-card probe-strategy-card">
           <VCardItem>
             <template #prepend><VAvatar color="primary" variant="tonal" size="38"><VIcon icon="mdi-tune-vertical" size="21" /></VAvatar></template>
-            <VCardTitle class="text-subtitle-1">扫描与写入策略</VCardTitle>
-            <VCardSubtitle>选择需要读取的媒体信息，并分别决定如何写回 MP 字段。</VCardSubtitle>
+            <VCardTitle class="text-subtitle-1">字段输出策略</VCardTitle>
+            <VCardSubtitle>ffprobe 始终完整扫描；这里只决定哪些结果参与命名以及如何写回 MP 字段。</VCardSubtitle>
             <template #append><VChip size="small" color="primary" variant="tonal">{{ selectedProbeFieldItems.length }} / {{ mediaProbeFieldItems.length }}</VChip></template>
           </VCardItem>
           <VCardText class="probe-config-body">
@@ -784,16 +788,15 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
             <template v-if="selectedProbeFieldItems.length">
               <VChip v-for="item in selectedProbeFieldItems" :key="item.key" size="small" color="secondary" variant="tonal">{{ item.label }}<span class="probe-chip-policy">{{ fieldPolicyItems.find(policy => policy.value === probeFieldPolicy(item.key))?.title }}</span></VChip>
             </template>
-            <div v-else class="probe-selection-empty"><VIcon icon="mdi-selection-off" size="18" /> 尚未选择扫描项</div>
+            <div v-else class="probe-selection-empty"><VIcon icon="mdi-selection-off" size="18" /> 未选择命名输出项；神医联动仍会使用完整扫描结果</div>
           </div>
           <VExpansionPanels variant="accordion" multiple class="probe-panels">
             <VExpansionPanel>
-              <VExpansionPanelTitle><div><div class="font-weight-medium">扫描字段</div><div class="text-caption text-medium-emphasis">支持补空、覆盖和追加；点击展开逐项配置</div></div></VExpansionPanelTitle>
+              <VExpansionPanelTitle><div><div class="font-weight-medium">命名字段输出</div><div class="text-caption text-medium-emphasis">选择写入 MP/Jinja 上下文的字段，并设置补空、覆盖或追加</div></div></VExpansionPanelTitle>
               <VExpansionPanelText><div class="probe-field-list">
                 <div v-for="item in mediaProbeFieldItems" :key="item.key" class="probe-field-row">
-                  <VCheckboxBtn :model-value="probeFieldSelected(item.key)" color="primary" @update:model-value="value => toggleProbeField(item.key, value)" />
                   <div class="probe-field-main"><div class="font-weight-medium">{{ item.label }} <code>{{ item.target }}</code></div><div class="text-caption text-medium-emphasis">{{ item.detail }}</div></div>
-                  <VSelect :model-value="probeFieldPolicy(item.key)" :items="fieldPolicyItems" density="compact" hide-details class="probe-policy-select" :disabled="!probeFieldSelected(item.key)" @update:model-value="value => setProbeFieldPolicy(item.key, value)" />
+                  <div class="probe-field-controls"><VSelect :model-value="probeFieldPolicy(item.key)" :items="fieldPolicyItems" density="compact" hide-details class="probe-policy-select" :disabled="!probeFieldSelected(item.key)" @update:model-value="value => setProbeFieldPolicy(item.key, value)" /><VCheckboxBtn :model-value="probeFieldSelected(item.key)" color="primary" @update:model-value="value => toggleProbeField(item.key, value)" /></div>
                 </div>
               </div><VAlert type="info" variant="tonal" density="compact" class="mt-3">追加模式保留原标题/MP 已识别值并去重添加扫描值，例如 <code>HDR10 + DOVI → HDR10 DOVI</code>；字幕映射按自定义占位符连接符追加。</VAlert></VExpansionPanelText>
             </VExpansionPanel>
@@ -896,12 +899,12 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
               </div>
               </section>
               <section class="strm-config-section">
-                <div class="strm-section-head"><div><VIcon icon="mdi-folder-swap-outline" size="19" color="secondary" /><div><strong>路径映射</strong><span>把 MP 整理路径转换成 Emby 中看到的路径</span></div></div><VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="addStrmMapping">添加映射</VBtn></div>
+                <div class="strm-section-head"><div><VIcon icon="mdi-folder-swap-outline" size="19" color="secondary" /><div><strong>Emby 媒体路径映射</strong><span>填写目录前缀；右侧是 Emby“编辑元数据”里看到的媒体文件目录，不是 STRM 内容中的真实地址</span></div></div><VBtn size="small" variant="tonal" prepend-icon="mdi-plus" @click="addStrmMapping">添加映射</VBtn></div>
               <div v-if="strmSync.config.path_mappings?.length" class="strm-mapping-list">
                 <div v-for="(mapping, index) in strmSync.config.path_mappings" :key="index" class="strm-mapping-row">
-                  <VSelect v-model="mapping.server" :items="[{ title: '全部服务器', value: '*' }, ...strmServerItems]" label="服务器" density="compact" hide-details />
-                  <div class="strm-path-pair"><VTextField v-model="mapping.source" label="MP 前缀" placeholder="/media" density="compact" hide-details /><VIcon icon="mdi-arrow-right" color="medium-emphasis" /><VTextField v-model="mapping.target" label="Emby 前缀" placeholder="/mnt/media" density="compact" hide-details /></div>
-                  <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="strmSync.config.path_mappings.splice(index, 1)" />
+                  <div class="strm-mapping-meta"><VSelect v-model="mapping.server" :items="[{ title: '全部服务器', value: '*' }, ...strmServerItems]" label="服务器" density="compact" hide-details /><VSelect v-model="mapping.target_kind" :items="strmTargetKindItems" label="Emby 媒体类型" density="compact" hide-details /><VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="strmSync.config.path_mappings.splice(index, 1)" /></div>
+                  <div class="strm-path-pair"><VTextField v-model="mapping.source" label="MP 实际媒体目录前缀" placeholder="/pilipili" density="compact" hide-details /><VIcon icon="mdi-arrow-right" color="medium-emphasis" /><VTextField v-model="mapping.target" label="Emby 媒体文件目录前缀" placeholder="/mnt2/strm/pilipili2" density="compact" hide-details /></div>
+                  <div class="text-caption text-medium-emphasis">示例：<code>/pilipili/动画/A/E01.mkv</code> → <code>{{ (mapping.target || '/mnt2/strm/pilipili2').replace(/\/$/, '') }}/动画/A/E01{{ (mapping.target_kind || 'strm') === 'strm' ? '.strm' : '.mkv' }}</code></div>
                 </div>
               </div>
               <div v-else class="strm-empty compact"><VIcon icon="mdi-map-marker-path" size="26" /><span>MP 与 Emby 路径相同时无需配置</span></div>
@@ -1202,7 +1205,8 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .strm-section-head span { color: rgba(var(--v-theme-on-surface), .55); font-size: .72rem; line-height: 1.4; }
 .strm-timing-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .strm-mapping-list, .strm-job-list { display: grid; gap: 8px; }
-.strm-mapping-row { display: grid; grid-template-columns: minmax(125px, .42fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
+.strm-mapping-row { min-width: 0; display: grid; gap: 10px; padding: 12px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
+.strm-mapping-meta { min-width: 0; display: grid; grid-template-columns: minmax(120px, .7fr) minmax(210px, 1.3fr) auto; gap: 8px; align-items: center; }
 .strm-path-pair { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 7px; align-items: center; }
 .strm-save-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .strm-preview-row { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr) auto; gap: 10px; align-items: center; }
@@ -1215,11 +1219,12 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .probe-chip-policy { padding-left: 6px; border-left: 1px solid currentColor; opacity: .65; font-size: .66rem; }
 .probe-selection-empty { display: flex; align-items: center; gap: 7px; color: rgba(var(--v-theme-on-surface), .48); font-size: .82rem; }
 .probe-panels { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
-.probe-field-list { display: grid; overflow: hidden; }
-.probe-field-row { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 9px 4px; border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.probe-field-list { display: grid; overflow: hidden; container-type: inline-size; }
+.probe-field-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(166px, auto); gap: 12px; align-items: center; padding: 11px 4px; border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .probe-field-row:last-child { border-bottom: 0; }
 .probe-field-main { min-width: 0; }
-.probe-policy-select { width: 148px; }
+.probe-field-controls { min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.probe-policy-select { flex: 0 1 148px; min-width: 116px; max-width: 148px; }
 .subtitle-mapping-box { display: grid; gap: 12px; padding: 14px; border-radius: 12px; background: rgba(var(--v-theme-secondary), .05); }
 .probe-advanced-grid { display: grid; grid-template-columns: minmax(120px, .45fr) minmax(0, 1fr); gap: 12px; }
 .ffprobe-help { display: grid; gap: 6px; padding-left: 22px; }
@@ -1264,6 +1269,11 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .preset-table thead { position: sticky; top: 0; z-index: 1; background: rgb(var(--v-theme-surface)); }
 .preset-table code { white-space: normal; overflow-wrap: anywhere; }
 .supplement-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@container (max-width: 460px) {
+  .probe-field-row { grid-template-columns: 1fr; gap: 7px; }
+  .probe-field-controls { justify-content: space-between; }
+  .probe-policy-select { flex: 1 1 auto; max-width: 210px; }
+}
 @media (max-width: 1050px) {
   .probe-workspace, .strm-config-grid { grid-template-columns: 1fr; }
   .strm-config-section + .strm-config-section { border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-left: 0; }
@@ -1284,15 +1294,19 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .probe-result-table, .supplement-field-grid, .strm-timing-grid { grid-template-columns: 1fr; }
   .module-status-chips { width: 100%; }
   .probe-path-row { grid-template-columns: 1fr; }
-  .strm-mapping-row { grid-template-columns: 1fr auto; }
-  .strm-path-pair { grid-column: 1 / -1; }
+  .strm-mapping-meta { grid-template-columns: minmax(0, 1fr) auto; }
+  .strm-mapping-meta > :nth-child(2) { grid-column: 1; grid-row: 2; }
+  .strm-mapping-meta > :last-child { grid-column: 2; grid-row: 1 / span 2; }
+  .strm-path-pair { grid-template-columns: 1fr; }
+  .strm-path-pair > .v-icon { transform: rotate(90deg); justify-self: center; }
   .strm-job-row { grid-template-columns: minmax(0, 1fr) auto; }
   .strm-job-row > .v-btn { grid-row: 2; }
   .strm-save-row { align-items: flex-start; flex-direction: column; }
   .probe-variable-row { grid-template-columns: 1fr; gap: 4px; padding: 9px 10px; }
   .probe-variable-row strong { text-align: left; }
-  .probe-field-row { grid-template-columns: auto minmax(0, 1fr); }
-  .probe-policy-select { grid-column: 2; width: 100%; }
+  .probe-field-row { grid-template-columns: 1fr; gap: 7px; }
+  .probe-field-controls { justify-content: space-between; }
+  .probe-policy-select { flex: 1 1 auto; max-width: 210px; }
   .probe-advanced-grid { grid-template-columns: 1fr; }
 }
 </style>

@@ -393,7 +393,7 @@ class EmbyEpisodeGroupSynchronizer:
     @classmethod
     def map_path(cls, path: str, server_name: str, mappings: Iterable[Dict[str, Any]]) -> str:
         normalized = cls.normalize_path(path)
-        matches: List[Tuple[int, str, str]] = []
+        matches: List[Tuple[int, str, str, str]] = []
         for item in mappings or []:
             if not isinstance(item, dict):
                 continue
@@ -403,12 +403,18 @@ class EmbyEpisodeGroupSynchronizer:
             source = cls.normalize_path(str(item.get("source") or ""))
             target = cls.normalize_path(str(item.get("target") or ""))
             if source and target and (normalized.casefold() == source.casefold() or normalized.casefold().startswith(source.casefold().rstrip("/") + "/")):
-                matches.append((len(source), source, target))
+                target_kind = str(item.get("target_kind") or "media").strip().casefold()
+                matches.append((len(source), source, target, target_kind))
         if not matches:
             return normalized
-        _, source, target = max(matches, key=lambda value: value[0])
+        _, source, target, target_kind = max(matches, key=lambda value: value[0])
         suffix = normalized[len(source):].lstrip("/")
-        return target.rstrip("/") + (f"/{suffix}" if suffix else "")
+        mapped = target.rstrip("/") + (f"/{suffix}" if suffix else "")
+        if target_kind == "strm" and suffix:
+            leaf = mapped.rsplit("/", 1)[-1]
+            if "." in leaf and not leaf.casefold().endswith(".strm"):
+                mapped = mapped.rsplit(".", 1)[0] + ".strm"
+        return mapped
 
     @staticmethod
     def normalize_path(value: str) -> str:
