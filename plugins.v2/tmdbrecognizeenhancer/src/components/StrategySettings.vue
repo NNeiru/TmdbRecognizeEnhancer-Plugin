@@ -129,7 +129,7 @@ function applyBalancedPreset() {
     </VRow>
 
     <VAlert v-if="tmdbFirstMode" type="success" variant="tonal" class="mt-4">
-      当前只提交一次完整解析标题。通常采用 TMDB 第一个影视结果；若当季目录或近期识别记忆明确指向本次候选之一，会在保留 TMDB 顺序的基础上优先该候选。评分与分差不参与选择。
+      当前只提交一次完整解析标题。通常采用 TMDB 第一个影视结果；若近期季度目录、识别记忆或人工优先名单明确指向本次候选之一，会在保留搜索顺序的基础上优先该候选。评分与分差不参与选择。
     </VAlert>
 
     <VCard variant="outlined" class="setting-card mt-4">
@@ -142,8 +142,14 @@ function applyBalancedPreset() {
         <VRow>
           <VCol cols="12" md="6">
             <div class="context-box">
-              <VSwitch v-model="config.seasonal_evidence_enabled" color="primary" label="使用当季动画目录" hide-details />
-              <div class="text-body-2 text-medium-emphasis mb-3">仅读取插件已缓存的当前季度看板。相同标题同时存在动画与真人版时，优先已映射的当季动画条目；识别时不访问外部网站。</div>
+              <VSwitch v-model="config.seasonal_evidence_enabled" color="primary" label="使用近期季度动画目录" hide-details />
+              <div class="text-body-2 text-medium-emphasis mb-3">AniList 的单季查询不会自动带入上季开播的跨季番；插件会读取已缓存的当前及此前季度看板，兼顾跨季连载和上一季资源补整，识别时不访问外部网站。</div>
+              <VSelect v-model.number="config.seasonal_evidence_quarters" :items="[
+                { title: '仅当前季度', value: 1 },
+                { title: '当前 + 上一季度（推荐）', value: 2 },
+                { title: '最近三个季度', value: 3 },
+                { title: '最近四个季度', value: 4 },
+              ]" label="季度证据窗口" density="comfortable" :disabled="!config.seasonal_evidence_enabled" />
               <VSlider v-model="config.seasonal_evidence_weight" :min="0" :max="40" :step="1" color="primary" :disabled="!config.seasonal_evidence_enabled" thumb-label>
                 <template #prepend><span class="evidence-label">影响强度</span></template>
                 <template #append><strong>{{ config.seasonal_evidence_weight }}</strong></template>
@@ -160,6 +166,30 @@ function applyBalancedPreset() {
                 <VCol cols="6"><VTextField v-model.number="config.recognition_memory_ttl_days" type="number" min="1" max="90" label="记忆保存时间" suffix="天" :disabled="!config.recognition_memory_enabled" /></VCol>
               </VRow>
             </div>
+          </VCol>
+        </VRow>
+        <VDivider class="my-5" />
+        <div class="d-flex align-center ga-2 mb-1">
+          <VIcon icon="mdi-playlist-star" color="primary" />
+          <strong>TMDB 候选人工规则</strong>
+        </div>
+        <div class="text-body-2 text-medium-emphasis mb-4">只处理本次搜索实际返回的候选，不会凭 ID 强行创建结果。排除先执行；优先名单命中后直接选择，多个优先 ID 同时出现时按填写顺序。</div>
+        <VRow dense>
+          <VCol cols="12" md="6">
+            <VCombobox
+              v-model="config.tmdb_exclude_ids" multiple chips closable-chips clearable
+              label="TMDB 排除名单" placeholder="输入 ID 后按回车"
+              hint="命中的候选会在评分和分差计算前移除；与优先名单冲突时排除优先"
+              persistent-hint
+            />
+          </VCol>
+          <VCol cols="12" md="6">
+            <VCombobox
+              v-model="config.tmdb_prefer_ids" multiple chips closable-chips clearable
+              label="TMDB 优先名单" placeholder="输入 ID 后按回车"
+              hint="本轮候选出现其中一个 ID 时直接选择；越靠前优先级越高"
+              persistent-hint
+            />
           </VCol>
         </VRow>
       </VCardText>

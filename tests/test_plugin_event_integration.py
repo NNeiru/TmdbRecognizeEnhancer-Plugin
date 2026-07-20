@@ -563,6 +563,35 @@ def test_current_quarter_catalog_prioritizes_mapped_anime_candidate(monkeypatch)
     assert candidates[1]["_context_priority"] > 0
 
 
+def test_previous_quarter_catalog_supports_cross_quarter_recognition(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "seasonal_evidence_enabled": True,
+        "seasonal_evidence_quarters": 2,
+        "seasonal_evidence_weight": 18,
+        "recognition_memory_enabled": False,
+    })
+    plugin._current_quarter_key = lambda now=None: "2026-Q3"
+    plugin.save_data(plugin.DATA_KEY_SEASON_CATALOG, {
+        "2026-Q2": {"items": [{
+            "name": "Long Running Anime", "aliases": ["Long Running Anime"],
+            "tmdb_match": {
+                "accepted": True,
+                "best": {"tmdb_id": 306121},
+            },
+        }]},
+    })
+
+    candidate = plugin._attach_context_evidence([{
+        "id": 306121, "media_type": "tv", "name": "Long Running Anime",
+    }], "Long Running Anime")[0]
+
+    assert candidate["_seasonal_evidence"]["quarter"] == "2026-Q2"
+    assert candidate["_seasonal_evidence"]["quarter_offset"] == 1
+    assert candidate["_seasonal_evidence"]["component"] == 92.0
+
+
 def test_recognition_memory_counts_distinct_files_and_expires(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
@@ -718,7 +747,110 @@ def test_tmdb_first_mode_can_promote_current_quarter_anime(monkeypatch):
 
     assert result["best"]["tmdb_id"] == 306121
     assert result["best"]["seasonal_evidence"]["quarter"] == "2026-Q3"
-    assert "当季目录" in result["reason"]
+    assert "季度目录" in result["reason"]
+
+
+def test_tmdb_first_policy_excludes_then_directly_prefers_configured_id(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "recognition_mode": "tmdb_first",
+        "fetch_aliases": False,
+        "seasonal_evidence_enabled": False,
+        "recognition_memory_enabled": False,
+        "tmdb_exclude_ids": [10],
+        "tmdb_prefer_ids": [30],
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 10, "media_type": "tv", "name": "Excluded"},
+        {"id": 20, "media_type": "tv", "name": "Normal"},
+        {"id": 30, "media_type": "tv", "name": "Preferred"},
+    ])
+
+    result = plugin._recognize_title("Example", include_candidates=True)
+
+    assert result["accepted"] is True
+    assert result["best"]["tmdb_id"] == 30
+    assert result["candidate_policy"]["excluded_ids"] == [10]
+    excluded = next(item for item in result["candidates"] if item["tmdb_id"] == 10)
+    assert excluded["suppressed_by_exclusion"] is True
+
+
+def test_scored_policy_recomputes_ranking_and_priority_bypasses_threshold(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "recognition_mode": "scored",
+        "fetch_aliases": False,
+        "minimum_score": 100,
+        "minimum_margin": 50,
+        "seasonal_evidence_enabled": False,
+        "recognition_memory_enabled": False,
+        "tmdb_exclude_ids": [10],
+        "tmdb_prefer_ids": [30],
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 10, "media_type": "tv", "name": "Example"},
+        {"id": 20, "media_type": "tv", "name": "Example"},
+        {"id": 30, "media_type": "tv", "name": "Weak Other Title"},
+    ])
+
+    result = plugin._recognize_title("Example", include_candidates=True)
+
+    assert result["accepted"] is True
+    assert result["best"]["tmdb_id"] == 30
+    assert result["margin_waived"] is True
+    assert result["decisive_evidence"]["kind"] == "tmdb-prefer-list"
+    assert "优先名单" in result["reason"]
+
+
+def test_scored_exclusion_is_removed_before_best_and_margin_are_calculated(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "recognition_mode": "scored",
+        "fetch_aliases": False,
+        "minimum_score": 0,
+        "minimum_margin": 0,
+        "seasonal_evidence_enabled": False,
+        "recognition_memory_enabled": False,
+        "tmdb_exclude_ids": [10],
+    })
+    plugin._tmdb_api = SimpleNamespace(search_multiis=lambda query: [
+        {"id": 10, "media_type": "tv", "name": "Example"},
+        {"id": 20, "media_type": "tv", "name": "Example Series"},
+        {"id": 30, "media_type": "tv", "name": "Different"},
+    ])
+
+    result = plugin._recognize_title("Example", include_candidates=True)
+
+    assert result["best"]["tmdb_id"] == 20
+    assert result["runner_up"]["tmdb_id"] == 30
+    assert result["margin"] == round(
+        result["best"]["score"] - result["runner_up"]["score"], 2,
+    )
+    assert all(
+        item["tmdb_id"] != 10
+        for item in (result["best"], result["runner_up"])
+    )
+
+
+def test_candidate_policy_config_normalizes_ids_and_exclusion_wins(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = module.TmdbRecognizeEnhancer()
+
+    config = plugin._normalize_config({
+        "tmdb_exclude_ids": "10, 20；bad 10",
+        "tmdb_prefer_ids": [20, "30", "30", 0],
+        "seasonal_evidence_quarters": 9,
+    })
+
+    assert config["tmdb_exclude_ids"] == [10, 20]
+    assert config["tmdb_prefer_ids"] == [30]
+    assert config["seasonal_evidence_quarters"] == 4
 
 
 def test_tmdb_first_prefers_animation_for_animation_release_group(monkeypatch):

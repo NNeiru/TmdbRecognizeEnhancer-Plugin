@@ -69,7 +69,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.7.0-beta.24"
+    plugin_version = "0.7.0-beta.25"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -140,10 +140,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "release_group_type_weight": 12.0,
         "seasonal_evidence_enabled": True,
         "seasonal_evidence_weight": 18.0,
+        "seasonal_evidence_quarters": 2,
         "recognition_memory_enabled": True,
         "recognition_memory_weight": 16.0,
         "recognition_memory_min_hits": 3,
         "recognition_memory_ttl_days": 14,
+        "tmdb_exclude_ids": [],
+        "tmdb_prefer_ids": [],
         "custom_rename_fields_enabled": True,
         "media_probe_enabled": False,
         "media_probe_policy": "fill_empty",
@@ -4100,14 +4103,27 @@ class TmdbRecognizeEnhancer(_PluginBase):
         candidates, type_constraint = self._filter_candidates_by_media_type(
             candidates, hints, type_constraint
         )
+        candidates, excluded_candidates, candidate_policy = self._apply_tmdb_candidate_policy(
+            candidates,
+        )
         candidates = self._attach_context_evidence(candidates, search_title)
         scored = [self._score_candidate(search_title, queries, candidate, hints) for candidate in candidates]
+        excluded_scored = [
+            self._score_candidate(search_title, queries, candidate, hints)
+            for candidate in excluded_candidates
+        ]
+        for candidate in excluded_scored:
+            candidate["suppressed_by_exclusion"] = True
         scored.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
 
         ranked, duplicate_summary = self._collapse_duplicate_candidates(scored)
         ranked, shadow_count = self._suppress_shadow_season_entries(ranked, hints)
         duplicate_summary["shadow_season_count"] = shadow_count
         ranked, decisive = self._apply_decisive_year_evidence(ranked, hints)
+        ranked, policy_decisive = self._promote_policy_candidate(
+            ranked, scored, candidate_policy,
+        )
+        decisive = policy_decisive or decisive
         best = ranked[0] if ranked else None
         runner_up = ranked[1] if len(ranked) > 1 else None
         margin = round(best["score"] - runner_up["score"], 2) if best and runner_up else (100.0 if best else 0.0)
@@ -4116,45 +4132,78 @@ class TmdbRecognizeEnhancer(_PluginBase):
             margin = 0.0
         minimum_score = float(self._config["minimum_score"])
         minimum_margin = float(self._config["minimum_margin"])
-        margin_waived = bool(decisive and best and best["score"] >= minimum_score)
+        policy_override = bool(policy_decisive and best)
+        margin_waived = bool(
+            policy_override or (decisive and best and best["score"] >= minimum_score)
+        )
         accepted = bool(
-            best and best["score"] >= minimum_score
-            and (margin >= minimum_margin or margin_waived)
+            best and (
+                policy_override or (
+                    best["score"] >= minimum_score
+                    and (margin >= minimum_margin or margin_waived)
+                )
+            )
         )
         web_search = {"attempted": False}
 
         if self._config.get("web_search_fallback") and not accepted:
-            candidates, web_search = self._apply_web_search_fallback(search_title, hints, candidates)
+            candidates, web_search = self._apply_web_search_fallback(
+                search_title, hints, [*candidates, *excluded_candidates],
+            )
             candidates, type_constraint = self._filter_candidates_by_media_type(
                 candidates, hints, type_constraint
             )
+            candidates, excluded_candidates, candidate_policy = self._apply_tmdb_candidate_policy(
+                candidates,
+            )
             candidates = self._attach_context_evidence(candidates, search_title)
             scored = [self._score_candidate(search_title, queries, candidate, hints) for candidate in candidates]
+            excluded_scored = [
+                self._score_candidate(search_title, queries, candidate, hints)
+                for candidate in excluded_candidates
+            ]
+            for candidate in excluded_scored:
+                candidate["suppressed_by_exclusion"] = True
             scored.sort(key=lambda item: (item["score"], item.get("popularity") or 0), reverse=True)
             ranked, duplicate_summary = self._collapse_duplicate_candidates(scored)
             ranked, shadow_count = self._suppress_shadow_season_entries(ranked, hints)
             duplicate_summary["shadow_season_count"] = shadow_count
             ranked, decisive = self._apply_decisive_year_evidence(ranked, hints)
+            ranked, policy_decisive = self._promote_policy_candidate(
+                ranked, scored, candidate_policy,
+            )
+            decisive = policy_decisive or decisive
             best = ranked[0] if ranked else None
             runner_up = ranked[1] if len(ranked) > 1 else None
             margin = round(best["score"] - runner_up["score"], 2) if best and runner_up else (100.0 if best else 0.0)
             raw_margin = margin
             if decisive and margin < 0:
                 margin = 0.0
-            margin_waived = bool(decisive and best and best["score"] >= minimum_score)
+            policy_override = bool(policy_decisive and best)
+            margin_waived = bool(
+                policy_override or (decisive and best and best["score"] >= minimum_score)
+            )
             accepted = bool(
-                best and best["score"] >= minimum_score
-                and (margin >= minimum_margin or margin_waived)
+                best and (
+                    policy_override or (
+                        best["score"] >= minimum_score
+                        and (margin >= minimum_margin or margin_waived)
+                    )
+                )
             )
 
         if not best:
-            if type_constraint.get("active") and type_constraint.get("removed_count"):
+            if candidate_policy.get("excluded_count"):
+                reason = "本次 TMDB 候选均命中排除名单，已按用户规则拒绝"
+            elif type_constraint.get("active") and type_constraint.get("removed_count"):
                 reason = (
                     f"类型约束为{type_constraint['label']}，TMDB 返回的候选均为其他类型，已安全拒绝"
                 )
             else:
                 reason = "TMDB 与搜索引擎兜底均未返回可验证候选" if web_search.get("attempted") \
                     else "所有降级搜索词均未返回 TMDB 候选"
+        elif policy_decisive:
+            reason = policy_decisive["reason"]
         elif best["score"] < minimum_score:
             reason = f"最佳候选 {best['score']} 分，低于阈值 {minimum_score:g}"
         elif decisive:
@@ -4184,12 +4233,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "margin_waived": margin_waived,
             "decisive_evidence": decisive,
             "duplicate_summary": duplicate_summary,
+            "candidate_policy": candidate_policy,
             "web_search": web_search,
             "type_constraint": type_constraint,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         if include_candidates:
-            result["candidates"] = scored
+            result["candidates"] = [*scored, *excluded_scored]
         return result
 
     def _recognize_tmdb_first_result(
@@ -4206,15 +4256,27 @@ class TmdbRecognizeEnhancer(_PluginBase):
         candidates, type_constraint = self._filter_candidates_by_media_type(
             candidates, hints, type_constraint
         )
+        candidates, excluded_candidates, candidate_policy = self._apply_tmdb_candidate_policy(
+            candidates,
+        )
         candidates, release_group_preference = self._prefer_candidates_by_release_group(
             candidates, hints
         )
         candidates = self._attach_context_evidence(candidates, title)
         candidates.sort(
-            key=lambda item: self._safe_float(item.get("_context_priority"), 0.0),
+            key=lambda item: (
+                int(self._safe_int(item.get("id"), 0) == candidate_policy.get("preferred_id")),
+                self._safe_float(item.get("_context_priority"), 0.0),
+            ),
             reverse=True,
         )
         diagnostics = [self._score_candidate(title, queries, item, hints) for item in candidates]
+        excluded_diagnostics = [
+            self._score_candidate(title, queries, item, hints)
+            for item in excluded_candidates
+        ]
+        for candidate in excluded_diagnostics:
+            candidate["suppressed_by_exclusion"] = True
         best = diagnostics[0] if diagnostics else None
         runner_up = diagnostics[1] if len(diagnostics) > 1 else None
         if best:
@@ -4226,17 +4288,23 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "selection_mode": "tmdb_first",
             "title": title,
             "reason": (
-                f"单次 TMDB Multi Search 已直接采用第一个{type_constraint.get('label') or '影视'}结果；"
+                (
+                    f"候选命中 TMDB 优先名单 #{candidate_policy['preferred_id']}，已直接选择；"
+                    if candidate_policy.get("preferred_found") else
+                    f"单次 TMDB Multi Search 已直接采用第一个{type_constraint.get('label') or '影视'}结果；"
+                )
                 + (
                     f"制作组标记为{release_group_preference['label']}，已优先符合题材的候选；"
                     if release_group_preference.get("applied") else ""
                 )
                 + (
-                    "当季目录或近期识别记忆已调整候选优先级；"
+                    "季度目录或近期识别记忆已调整候选优先级；"
                     if best and self._safe_float(best.get("context_priority"), 0) > 0 else ""
                 )
                 + "评分与分差未参与决策"
                 if best else (
+                    "本次 TMDB 候选均命中排除名单，已按用户规则拒绝"
+                    if candidate_policy.get("excluded_count") else
                     f"类型约束为{type_constraint['label']}，TMDB 未返回该类型候选"
                     if type_constraint.get("active") else
                     "单次 TMDB Multi Search 未返回电影或电视剧结果"
@@ -4250,10 +4318,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "web_search": {"attempted": False, "reason": "首结果模式不执行外部兜底"},
             "type_constraint": type_constraint,
             "release_group_preference": release_group_preference,
+            "candidate_policy": candidate_policy,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         if include_candidates:
-            result["candidates"] = diagnostics
+            result["candidates"] = [*diagnostics, *excluded_diagnostics]
         return result
 
     def _prefer_candidates_by_release_group(
@@ -4349,6 +4418,77 @@ class TmdbRecognizeEnhancer(_PluginBase):
         )
         constraint["candidate_count"] = len(filtered)
         return filtered, constraint
+
+    def _apply_tmdb_candidate_policy(
+            self, candidates: List[Dict[str, Any]]
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+        """先排除禁用 ID，再确定本轮实际出现的首个人工优先 ID。"""
+        excluded_ids = {
+            self._safe_int(value, 0) for value in self._config.get("tmdb_exclude_ids") or []
+        }
+        excluded_ids.discard(0)
+        prefer_ids = [
+            self._safe_int(value, 0) for value in self._config.get("tmdb_prefer_ids") or []
+            if self._safe_int(value, 0) not in excluded_ids
+        ]
+        allowed: List[Dict[str, Any]] = []
+        excluded: List[Dict[str, Any]] = []
+        for candidate in candidates:
+            tmdb_id = self._safe_int(candidate.get("id"), 0)
+            if tmdb_id in excluded_ids:
+                candidate["_policy_excluded"] = True
+                excluded.append(candidate)
+            else:
+                allowed.append(candidate)
+        available_ids = {self._safe_int(item.get("id"), 0) for item in allowed}
+        preferred_id = next((value for value in prefer_ids if value in available_ids), 0)
+        return allowed, excluded, {
+            "active": bool(excluded_ids or prefer_ids),
+            "excluded_count": len(excluded),
+            "excluded_ids": [self._safe_int(item.get("id"), 0) for item in excluded],
+            "preferred_id": preferred_id or None,
+            "preferred_found": bool(preferred_id),
+        }
+
+    @staticmethod
+    def _promote_policy_candidate(
+            ranked: List[Dict[str, Any]],
+            scored: List[Dict[str, Any]],
+            policy: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """把人工优先候选提升为最终第一名，不受去重代表项影响。"""
+        preferred_id = policy.get("preferred_id")
+        if not preferred_id:
+            return ranked, None
+        selected = next(
+            (item for item in scored if item.get("tmdb_id") == preferred_id), None,
+        )
+        if not selected:
+            return ranked, None
+        previous_duplicate = selected.get("duplicate_of")
+        if previous_duplicate:
+            former = next(
+                (item for item in scored if item.get("tmdb_id") == previous_duplicate), None,
+            )
+            if former:
+                former["suppressed_as_duplicate"] = True
+                former["duplicate_of"] = preferred_id
+                former["suppressed_reason"] = (
+                    f"用户优先名单明确选择 TMDB {preferred_id} 作为同作品代表项"
+                )
+        selected.pop("suppressed_as_duplicate", None)
+        selected.pop("duplicate_of", None)
+        selected.pop("suppressed_reason", None)
+        selected.pop("suppressed_as_shadow_season", None)
+        selected["preferred_by_policy"] = True
+        promoted = [selected, *(
+            item for item in ranked if item.get("tmdb_id") != preferred_id
+        )]
+        return promoted, {
+            "kind": "tmdb-prefer-list",
+            "tmdb_id": preferred_id,
+            "reason": f"候选命中 TMDB 优先名单 #{preferred_id}，已按用户规则直接选择",
+        }
 
     def _search_candidates(self, queries: List[str]) -> List[Dict[str, Any]]:
         """按查询词检索 TMDB，去重后为有限数量候选补充别名详情。"""
@@ -4610,15 +4750,32 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     @staticmethod
     def _current_quarter_key(now: Optional[datetime] = None) -> str:
-        """返回当前自然季度键；季度证据只使用这一期，避免旧缓存干扰。"""
+        """返回当前自然季度键，作为可配置近期季度窗口的起点。"""
         now = now or datetime.now()
         return f"{now.year}-Q{(now.month - 1) // 3 + 1}"
+
+    @classmethod
+    def _recent_quarter_keys(cls, current: str, count: int) -> List[str]:
+        """从当前季度向前生成窗口；用于兼容跨季连载和上一季资源补整。"""
+        match = re.fullmatch(r"(\d{4})-Q([1-4])", str(current or ""))
+        if not match:
+            return [current] if current else []
+        year, quarter = int(match.group(1)), int(match.group(2))
+        keys: List[str] = []
+        for _ in range(max(1, min(4, count))):
+            keys.append(f"{year}-Q{quarter}")
+            quarter -= 1
+            if quarter == 0:
+                year -= 1
+                quarter = 4
+        return keys
 
     def _seasonal_candidate_evidence(
             self, candidate: Dict[str, Any], title: str,
             quarter: str = "", items: Optional[List[Dict[str, Any]]] = None,
+            quarter_offset: int = 0,
     ) -> Dict[str, Any]:
-        """用已缓存的当季 AniList→TMDB 映射提供无网络软证据。"""
+        """用指定季度已缓存的 AniList→TMDB 映射提供无网络软证据。"""
         if not self._config.get("seasonal_evidence_enabled"):
             return {}
         tmdb_id = self._safe_int(candidate.get("id"), 0)
@@ -4653,10 +4810,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 best_match = item
         if not best_match or best_relation < 55:
             return {}
+        recency = max(.7, 1.0 - max(0, quarter_offset) * .08)
         return {
             "active": True,
-            "component": round(100.0 if best_relation >= 72 else 82.0, 2),
+            "component": round((100.0 if best_relation >= 72 else 82.0) * recency, 2),
             "quarter": quarter,
+            "quarter_offset": max(0, quarter_offset),
             "title": best_match.get("display_name") or best_match.get("name_cn") or best_match.get("name"),
             "relation": round(best_relation, 2),
         }
@@ -4737,16 +4896,31 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _attach_context_evidence(
             self, candidates: List[Dict[str, Any]], title: str
     ) -> List[Dict[str, Any]]:
-        """一次读取上下文，将当季与近期记忆注入当前候选并形成稳定优先级。"""
+        """一次读取上下文，将近期季度目录与识别记忆注入候选。"""
         memory = self._read_recognition_memory() if self._config.get("recognition_memory_enabled") else {"entries": {}}
         quarter = self._current_quarter_key()
-        quarter_data = {}
+        quarter_windows: List[Tuple[str, List[Dict[str, Any]]]] = []
         if self._config.get("seasonal_evidence_enabled"):
-            quarter_data = self._read_season_catalog_cache().get(quarter) or {}
-        seasonal_items = quarter_data.get("items") if isinstance(quarter_data, dict) else []
+            cache = self._read_season_catalog_cache()
+            window_size = self._safe_int(
+                self._config.get("seasonal_evidence_quarters"), 2,
+            )
+            for quarter_key in self._recent_quarter_keys(quarter, window_size):
+                quarter_data = cache.get(quarter_key) or {}
+                items = quarter_data.get("items") if isinstance(quarter_data, dict) else []
+                quarter_windows.append((quarter_key, items or []))
         for candidate in candidates:
-            seasonal = self._seasonal_candidate_evidence(
-                candidate, title, quarter=quarter, items=seasonal_items,
+            seasonal_matches = [
+                self._seasonal_candidate_evidence(
+                    candidate, title, quarter=quarter_key, items=items,
+                    quarter_offset=index,
+                )
+                for index, (quarter_key, items) in enumerate(quarter_windows)
+            ]
+            seasonal = max(
+                (item for item in seasonal_matches if item.get("active")),
+                key=lambda item: self._safe_float(item.get("component"), 0),
+                default={},
             )
             recent = self._memory_candidate_evidence(candidate, title, memory)
             candidate["_seasonal_evidence"] = seasonal
@@ -5377,6 +5551,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "web_search_timeout": (5, 30),
             "recognition_memory_min_hits": (2, 10),
             "recognition_memory_ttl_days": (1, 90),
+            "seasonal_evidence_quarters": (1, 4),
             "emby_episode_group_sync_initial_delay_seconds": (0, 300),
             "emby_episode_group_sync_retry_seconds": (10, 600),
             "emby_episode_group_sync_max_wait_minutes": (1, 1440),
@@ -5419,6 +5594,26 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged["web_search_engine"] = engine if engine in self._web_search_engines else "auto"
         mode = str(merged.get("recognition_mode") or "tmdb_first").strip().lower()
         merged["recognition_mode"] = mode if mode in ("tmdb_first", "scored") else "tmdb_first"
+        candidate_lists: Dict[str, List[int]] = {}
+        for key in ("tmdb_exclude_ids", "tmdb_prefer_ids"):
+            raw_values = merged.get(key) or []
+            if isinstance(raw_values, str):
+                raw_values = re.split(r"[\s,;，；]+", raw_values)
+            elif not isinstance(raw_values, (list, tuple, set)):
+                raw_values = []
+            values: List[int] = []
+            for raw in raw_values:
+                value = self._safe_int(raw, 0)
+                if value > 0 and value not in values:
+                    values.append(value)
+            candidate_lists[key] = values[:200]
+        excluded_ids = set(candidate_lists["tmdb_exclude_ids"])
+        merged["tmdb_exclude_ids"] = candidate_lists["tmdb_exclude_ids"]
+        # 同一 ID 同时出现时以排除为准，避免互相冲突的强制规则。
+        merged["tmdb_prefer_ids"] = [
+            value for value in candidate_lists["tmdb_prefer_ids"]
+            if value not in excluded_ids
+        ]
         invalid_separator = re.compile(r"[\\/:*?\"<>|\x00-\x1f]")
         for key, default in (
                 ("rename_default_separator", ""),
@@ -5540,7 +5735,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             key: result.get(key)
             for key in (
                 "accepted", "title", "original_title", "reason", "queries", "hints",
-                "best", "runner_up", "margin", "web_search", "episode_adjustment", "selection_mode", "created_at",
+                "best", "runner_up", "margin", "web_search", "episode_adjustment", "selection_mode",
+                "candidate_policy", "created_at",
             )
         }
         record["kind"] = "recognition"
