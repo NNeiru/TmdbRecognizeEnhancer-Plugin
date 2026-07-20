@@ -943,7 +943,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
     </section>
 
     <section v-else-if="props.mode === 'naming'">
-      <VTabs v-model="renameRuleSection" color="secondary" class="sub-tabs mb-4">
+      <VTabs v-model="renameRuleSection" color="primary" class="sub-tabs mb-4">
         <VTab value="defaults" prepend-icon="mdi-tune-variant">连接与分隔</VTab>
         <VTab value="fields" prepend-icon="mdi-code-braces">自定义字段</VTab>
         <VTab value="text" prepend-icon="mdi-find-replace">文本映射</VTab>

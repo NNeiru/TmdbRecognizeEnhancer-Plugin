@@ -448,12 +448,12 @@ onMounted(loadStatus)
                   <VBtn icon="mdi-refresh" variant="text" :loading="loading" @click="loadStatus" />
                 </template>
               </ModuleHeader>
-              <div v-if="filteredHistory.length" class="history-list">
+              <div v-if="filteredHistory.length" class="history-list" role="list">
                 <div v-for="(item, historyIndex) in filteredHistory" :key="`${item.created_at}-${item.module}-${item.title}-${historyIndex}`" class="history-row">
                   <div class="history-marker" :class="`history-marker-${historyStatus(item).marker}`"><span /></div>
-                  <VCard variant="outlined" class="history-card">
-                    <VCardText><div class="d-flex align-start ga-3"><div class="flex-grow-1"><div class="d-flex flex-wrap align-center ga-2"><div class="font-weight-bold">{{ item.title }}</div><VChip size="x-small" color="primary" variant="tonal">{{ item.module || 'TMDB 搜索增强' }}</VChip></div><div v-if="item.original_title" class="text-caption text-medium-emphasis text-truncate mt-1" :title="item.original_title">原标题：{{ item.original_title }}</div><div class="text-caption text-medium-emphasis mt-1">{{ item.created_at }} · {{ item.reason }}</div><div v-if="!item.accepted && item.kind !== 'operation'" class="text-caption text-info mt-1">插件未接管本次候选选择，MoviePilot 仍会继续执行原生识别与整理；这不代表最终整理失败。</div><div v-if="item.episode_adjustment" class="text-caption mt-1">集数偏移：{{ item.episode_adjustment.reason }}<span v-if="item.episode_adjustment.season != null"> · S{{ item.episode_adjustment.season }}E{{ item.episode_adjustment.episode }}</span></div><div class="d-flex flex-wrap ga-1 mt-2"><VChip v-for="stage in item.stages" :key="stage" size="x-small" color="secondary" variant="tonal">{{ stage }}</VChip><VChip v-for="query in item.queries" :key="query" size="x-small" variant="tonal">{{ query }}</VChip><VChip v-if="item.web_search?.attempted" size="x-small" color="info" variant="tonal" prepend-icon="mdi-web">外部 {{ item.web_search.result_count }} 条 · 证据 {{ item.web_search.evidence_candidates || 0 }}</VChip></div></div><VChip :color="historyStatus(item).color" size="small">{{ historyStatus(item).label }}</VChip></div></VCardText>
-                  </VCard>
+                  <article class="history-card" role="listitem">
+                    <div class="history-card-content"><div class="d-flex align-start ga-3"><div class="flex-grow-1"><div class="d-flex flex-wrap align-center ga-2"><div class="font-weight-bold">{{ item.title }}</div><VChip size="x-small" color="primary" variant="tonal">{{ item.module || 'TMDB 搜索增强' }}</VChip></div><div v-if="item.original_title" class="text-caption text-medium-emphasis text-truncate mt-1" :title="item.original_title">原标题：{{ item.original_title }}</div><div class="text-caption text-medium-emphasis mt-1">{{ item.created_at }} · {{ item.reason }}</div><div v-if="!item.accepted && item.kind !== 'operation'" class="text-caption text-info mt-1">插件未接管本次候选选择，MoviePilot 仍会继续执行原生识别与整理；这不代表最终整理失败。</div><div v-if="item.episode_adjustment" class="text-caption mt-1">集数偏移：{{ item.episode_adjustment.reason }}<span v-if="item.episode_adjustment.season != null"> · S{{ item.episode_adjustment.season }}E{{ item.episode_adjustment.episode }}</span></div><div class="d-flex flex-wrap ga-1 mt-2"><VChip v-for="stage in item.stages" :key="stage" size="x-small" color="secondary" variant="tonal">{{ stage }}</VChip><VChip v-for="query in item.queries" :key="query" size="x-small" variant="tonal">{{ query }}</VChip><VChip v-if="item.web_search?.attempted" size="x-small" color="info" variant="tonal" prepend-icon="mdi-web">外部 {{ item.web_search.result_count }} 条 · 证据 {{ item.web_search.evidence_candidates || 0 }}</VChip></div></div><VChip :color="historyStatus(item).color" size="small">{{ historyStatus(item).label }}</VChip></div></div>
+                  </article>
                 </div>
               </div>
               <div v-else class="empty-preview"><VIcon icon="mdi-text-box-search-outline" size="60" /><div class="text-h6 mt-3">{{ history.length ? '当前筛选没有日志' : '尚无模块日志' }}</div></div>
@@ -492,7 +492,7 @@ onMounted(loadStatus)
 .hero-glow-a { width: 220px; height: 220px; right: 8%; top: -120px; }
 .hero-glow-b { width: 150px; height: 150px; left: 30%; bottom: -110px; }
 .page-body { padding: 18px 16px 28px; }
-.metric-card, .workspace-card, .history-card, .future-card { border-color: rgba(var(--v-theme-on-surface), .1); border-radius: 14px; }
+.metric-card, .workspace-card, .future-card { border-color: rgba(var(--v-theme-on-surface), .1); border-radius: 14px; }
 .metric-card { height: 100%; background: linear-gradient(145deg, rgba(var(--v-theme-surface),1), rgba(var(--v-theme-primary),.035)); }
 .header-control-copy { display: flex; flex-direction: column; min-width: 210px; }
 .header-control-copy strong { font-size: .9rem; }
@@ -537,7 +537,7 @@ onMounted(loadStatus)
 .candidate-suppressed { opacity: .62; background: rgba(var(--v-theme-info),.035); }
 .context-evidence { margin-top: 2px; color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .empty-preview { min-height: 390px; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; color: rgba(var(--v-theme-on-surface),.52); }
-.history-list { display: flex; flex-direction: column; gap: 16px; }
+.history-list { position: relative; z-index: 0; display: flex; flex-direction: column; gap: 16px; isolation: isolate; transform: translateZ(0); }
 .history-filter { flex: 0 0 150px; }
 .history-row { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 12px; align-items: stretch; }
 .history-marker { position: relative; display: flex; justify-content: center; padding-top: 20px; }
@@ -547,7 +547,8 @@ onMounted(loadStatus)
 .history-marker-success { color: rgb(var(--v-theme-success)); }
 .history-marker-info { color: rgb(var(--v-theme-info)); }
 .history-marker-warning { color: rgb(var(--v-theme-warning)); }
-.history-card { min-width: 0; background: rgb(var(--v-theme-surface)); }
+.history-card { min-width: 0; overflow: hidden; border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 14px; background: rgb(var(--v-theme-surface)); color: rgb(var(--v-theme-on-surface)); box-shadow: none; }
+.history-card-content { padding: 16px; }
 .future-card { height: 100%; }
 @media (max-width: 720px) { .hero-content { align-items: flex-start; flex-wrap: wrap; padding: 22px; } .hero-content :deep(.v-spacer) { display: none; } .tab-content { padding: 18px; } .sticky-actions { margin: 18px -18px -18px; } .module-grid { grid-template-columns: 1fr; } .header-control-copy { flex-basis: 100%; } }
 </style>
