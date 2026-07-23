@@ -30,7 +30,7 @@ FIELD_SPECS: Dict[str, Dict[str, Any]] = {
 class RecognitionRuleRegistry:
     """读取 MP 规则，并把用户修改编译为低成本运行时覆盖。"""
 
-    _MAX_OVERRIDES = 300
+    _MAX_OVERRIDES = 2000
     _ACTIONS = {"override", "clear"}
 
     def __init__(self) -> None:
@@ -255,6 +255,62 @@ class RecognitionRuleRegistry:
             "count": len(items),
             "override_count": len(overrides),
         }
+
+    def bulk_set_priority(
+            self, overrides: Any, rule_ids: Iterable[str], priority: Any,
+    ) -> Tuple[List[Dict[str, Any]], int, List[str]]:
+        """为目录中的一组规则创建或更新覆盖优先级。
+
+        内置规则本身没有插件优先级，因此首次批量设置时需要复制为只改变
+        执行顺序的覆盖记录；已经编辑过的覆盖则保留其正则、输出和启停状态。
+        """
+        selected_ids = list(dict.fromkeys(
+            str(rule_id or "").strip() for rule_id in rule_ids if str(rule_id or "").strip()
+        ))
+        target_priority = max(-1000, min(1000, self._safe_int(priority, 100)))
+        current = self.normalize_overrides(overrides)
+        with self._lock:
+            catalog = {str(item.get("id") or ""): deepcopy(item) for item in self._catalog}
+
+        by_id = {str(item.get("id") or ""): index for index, item in enumerate(current)}
+        by_source = {
+            str(item.get("source_rule_id") or ""): index
+            for index, item in enumerate(current)
+            if item.get("source_rule_id")
+        }
+        updated = 0
+        missing: List[str] = []
+        for selected_id in selected_ids:
+            item = catalog.get(selected_id)
+            if not item:
+                missing.append(selected_id)
+                continue
+            index = (
+                by_source.get(selected_id)
+                if item.get("builtin")
+                else by_id.get(str((item.get("effective") or {}).get("id") or item.get("id") or ""))
+            )
+            if index is not None:
+                current[index] = {**current[index], "priority": target_priority}
+                updated += 1
+                continue
+            if not item.get("builtin"):
+                missing.append(selected_id)
+                continue
+            candidate = {
+                "source_rule_id": selected_id,
+                "field": item.get("field"),
+                "pattern": item.get("pattern"),
+                "value": item.get("value") or "{match}",
+                "action": "override",
+                "enabled": True,
+                "priority": target_priority,
+                "label": item.get("label") or "内置规则覆盖",
+            }
+            current.append(candidate)
+            updated += 1
+
+        return self.normalize_overrides(current), updated, missing
 
     def apply(self, meta: Any) -> List[Dict[str, Any]]:
         """在 MP 解析后覆盖字段；无覆盖规则时只做一次空列表判断。"""

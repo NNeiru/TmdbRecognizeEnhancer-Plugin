@@ -74,7 +74,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.3"
+    plugin_version = "0.8.4"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -630,6 +630,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "summary": "删除内置识别字段覆盖规则",
             },
             {
+                "path": "/metadata-tools/recognition-rule/priority/bulk",
+                "endpoint": self.bulk_recognition_rule_priority_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "批量修改当前筛选识别规则的插件优先级",
+            },
+            {
                 "path": "/metadata-tools/recognition-rule/preview",
                 "endpoint": self.preview_recognition_rule_api,
                 "methods": ["POST"],
@@ -1002,6 +1009,26 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self.save_data(self.DATA_KEY_RECOGNITION_RULE_OVERRIDES, overrides)
         self._recognition_rules.refresh(overrides)
         return self.get_metadata_tools_api()
+
+    def bulk_recognition_rule_priority_api(self, payload: dict = Body(...)) -> schemas.Response:
+        """批量设置目录规则的插件覆盖优先级；不会修改 MP/Rust 文件。"""
+        payload = payload or {}
+        rule_ids = payload.get("rule_ids")
+        if not isinstance(rule_ids, list) or not rule_ids:
+            return schemas.Response(success=False, message="当前筛选结果为空，没有可修改的规则")
+        normalized, updated, missing = self._recognition_rules.bulk_set_priority(
+            self._read_recognition_rule_overrides(),
+            rule_ids,
+            payload.get("priority"),
+        )
+        if not updated:
+            return schemas.Response(success=False, message="筛选规则已经失效，请刷新 MP 规则后重试")
+        self.save_data(self.DATA_KEY_RECOGNITION_RULE_OVERRIDES, normalized)
+        self._recognition_rules.refresh(normalized)
+        response = self.get_metadata_tools_api()
+        if missing:
+            response.message = f"已修改 {updated} 条；另有 {len(missing)} 条规则已随 MP 更新失效"
+        return response
 
     def preview_recognition_rule_api(self, payload: dict = Body(...)) -> schemas.Response:
         """用临时 MetaBase 试算当前已保存的覆盖层。"""

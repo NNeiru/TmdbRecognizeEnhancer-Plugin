@@ -78,3 +78,59 @@ def test_user_rule_is_visible_in_catalog():
     assert len(custom) == 1
     assert custom[0]["field"] == "videoCodec"
     assert custom[0]["builtin"] is False
+
+
+def test_bulk_priority_creates_builtin_override_and_preserves_existing_edits():
+    module = _load_module()
+    registry = module.RecognitionRuleRegistry()
+    first = registry._builtin_item(
+        "videoCodec", r"\bHEVC\b", "H265", "HEVC",
+        "mp_python", "MP 内置",
+    )
+    second = registry._builtin_item(
+        "videoCodec", r"\bAVC\b", "H264", "AVC",
+        "mp_python", "MP 内置",
+    )
+    registry._catalog = [first, second]
+    existing = [{
+        "source_rule_id": second["id"],
+        "field": "videoCodec",
+        "pattern": r"\bAVC(?:1)?\b",
+        "value": "x264",
+        "label": "用户已编辑",
+        "enabled": False,
+        "priority": 20,
+    }]
+
+    rules, updated, missing = registry.bulk_set_priority(
+        existing, [first["id"], second["id"]], 240,
+    )
+
+    assert updated == 2
+    assert missing == []
+    assert len(rules) == 2
+    by_source = {item["source_rule_id"]: item for item in rules}
+    assert by_source[first["id"]]["priority"] == 240
+    assert by_source[first["id"]]["pattern"] == r"\bHEVC\b"
+    assert by_source[second["id"]]["priority"] == 240
+    assert by_source[second["id"]]["pattern"] == r"\bAVC(?:1)?\b"
+    assert by_source[second["id"]]["value"] == "x264"
+    assert by_source[second["id"]]["enabled"] is False
+
+
+def test_low_plugin_priority_still_runs_after_native_parse():
+    module = _load_module()
+    registry = module.RecognitionRuleRegistry()
+    registry.refresh([{
+        "field": "videoCodec",
+        "pattern": r"\bHEVC\b",
+        "value": "H265",
+        "priority": -1000,
+        "enabled": True,
+    }])
+    meta = _meta("Example.HEVC.mkv")
+    meta.video_encode = "MP 原生结果"
+
+    registry.apply(meta)
+
+    assert meta.video_encode == "H265"

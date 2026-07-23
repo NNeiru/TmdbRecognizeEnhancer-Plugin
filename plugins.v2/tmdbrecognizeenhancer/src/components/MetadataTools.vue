@@ -43,6 +43,8 @@ const strmTargetPath = ref('')
 const strmPreview = ref(null)
 const dialog = ref(false)
 const form = ref({ id: '', source_rule_id: '', field: 'videoBit', pattern: '', value: '{match}', action: 'override', enabled: true, priority: 100, label: '' })
+const bulkPriorityDialog = ref(false)
+const bulkPriority = ref(100)
 const previewTitle = ref('[Group] Example.S01E01.1080p.WEB-DL.H265.10bit.AAC.mkv')
 const preview = ref(null)
 const renameDialog = ref(false)
@@ -463,6 +465,16 @@ function openRule(item = null) {
 
 function openNewRule() { openRule(null) }
 
+function openBulkPriority() {
+  const priorities = [...new Set(
+    rules.value
+      .map(item => item.effective?.priority)
+      .filter(value => value !== undefined && value !== null),
+  )]
+  bulkPriority.value = priorities.length === 1 ? priorities[0] : 100
+  bulkPriorityDialog.value = true
+}
+
 async function saveRule() {
   saving.value = 'rule'
   error.value = ''
@@ -479,6 +491,23 @@ async function resetRule(item) {
     const payload = item.builtin ? { source_rule_id: item.id } : { id: item.effective?.id || item.id }
     data.value = unwrapResponse(await props.api.post(`${pluginBase.value}/metadata-tools/recognition-rule/delete`, payload)) || data.value
   } catch (err) { error.value = explainError(err, '恢复内置规则失败') }
+  finally { saving.value = '' }
+}
+
+async function saveBulkPriority() {
+  if (!rules.value.length) return
+  saving.value = 'bulk-priority'
+  error.value = ''
+  try {
+    data.value = unwrapResponse(await props.api.post(
+      `${pluginBase.value}/metadata-tools/recognition-rule/priority/bulk`,
+      {
+        rule_ids: rules.value.map(item => item.id),
+        priority: Number(bulkPriority.value),
+      },
+    )) || data.value
+    bulkPriorityDialog.value = false
+  } catch (err) { error.value = explainError(err, '批量优先级保存失败') }
   finally { saving.value = '' }
 }
 
@@ -729,7 +758,10 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
         <VTextField v-model="search" label="搜索字段、名称或正则" prepend-inner-icon="mdi-magnify" clearable hide-details />
         <VSelect v-model="field" label="识别字段" :items="fieldItems" hide-details />
         <VSelect v-model="source" label="规则来源" :items="sourceItems" hide-details />
-        <VBtn color="primary" prepend-icon="mdi-plus" @click="openNewRule">新增覆盖</VBtn>
+        <div class="rule-filter-actions">
+          <VBtn variant="tonal" prepend-icon="mdi-format-list-numbered" :disabled="!rules.length" @click="openBulkPriority">批量优先级</VBtn>
+          <VBtn color="primary" prepend-icon="mdi-plus" @click="openNewRule">新增覆盖</VBtn>
+        </div>
       </div>
       <div class="text-caption text-medium-emphasis mb-2">当前 MP 共读取 {{ data.recognition_rules?.count || 0 }} 条，已覆盖 {{ data.recognition_rules?.override_count || 0 }} 条；筛选结果 {{ rules.length }} 条。</div>
       <VTable density="comfortable" class="tools-table">
@@ -737,7 +769,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
         <tbody><tr v-for="item in pagedRules" :key="item.id">
           <td><div class="font-weight-medium">{{ item.field_label }}</div><code>{{ item.field }}</code></td>
           <td><div class="d-flex align-center ga-2"><span>{{ item.effective?.label || item.label }}</span><VChip v-if="item.overridden" size="x-small" color="warning" variant="tonal">插件已覆盖</VChip></div><div class="rule-pattern" :title="item.effective?.pattern || item.pattern">{{ item.effective?.pattern || item.pattern }}</div><div v-if="item.overridden && item.builtin && item.effective?.pattern !== item.pattern" class="text-caption text-medium-emphasis">MP 原正则：{{ item.pattern }}</div><div class="text-caption text-medium-emphasis">{{ item.effective?.action === 'clear' ? '命中后清空字段' : `输出：${item.effective?.value ?? item.value}` }}</div></td>
-          <td><VChip size="small" variant="tonal">{{ item.source_label }}</VChip></td>
+          <td><VChip size="small" variant="tonal">{{ item.source_label }}</VChip><div class="text-caption text-medium-emphasis mt-1">{{ item.overridden ? `插件优先级 ${item.effective?.priority ?? 100}` : '沿用 MP 原生顺序' }}</div></td>
           <td><VBtn size="small" variant="tonal" prepend-icon="mdi-pencil-outline" @click="openRule(item)">编辑</VBtn><VBtn v-if="item.overridden" size="small" variant="text" color="warning" :loading="saving === `reset:${item.id}`" @click="resetRule(item)">{{ item.builtin ? '恢复' : '删除' }}</VBtn></td>
         </tr></tbody>
       </VTable>
@@ -1122,6 +1154,32 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
       </VCard>
     </VDialog>
 
+    <VDialog v-model="bulkPriorityDialog" max-width="580">
+      <VCard class="rule-dialog-card">
+        <VCardItem class="rule-dialog-header">
+          <template #prepend><VAvatar color="primary" variant="tonal"><VIcon icon="mdi-format-list-numbered" /></VAvatar></template>
+          <VCardTitle>批量修改筛选结果优先级</VCardTitle>
+          <VCardSubtitle>只处理当前搜索、字段和来源共同筛选出的 {{ rules.length }} 条规则，不受分页影响。</VCardSubtitle>
+        </VCardItem>
+        <VDivider />
+        <VCardText class="rule-dialog-body">
+          <VTextField v-model="bulkPriority" type="number" min="-1000" max="1000" label="插件覆盖优先级" hint="范围 -1000～1000；数值越高，同一字段命中多条插件规则时越先采用" persistent-hint />
+          <VAlert type="info" variant="tonal" density="compact">
+            未覆盖的 MP 内置规则会生成一条内容不变、只增加优先级的插件覆盖；已编辑规则仅修改优先级，原正则、输出、启停状态均保留。
+          </VAlert>
+          <VAlert type="warning" variant="tonal" density="compact">
+            该数值只决定插件覆盖之间的顺序。MoviePilot 词表始终先解析；之后命中的插件覆盖仍会改写相应字段，即使其优先级低于 0。
+          </VAlert>
+        </VCardText>
+        <VDivider />
+        <VCardActions class="rule-dialog-actions">
+          <VSpacer />
+          <VBtn variant="text" @click="bulkPriorityDialog = false">取消</VBtn>
+          <VBtn color="primary" prepend-icon="mdi-check-all" :loading="saving === 'bulk-priority'" @click="saveBulkPriority">应用到 {{ rules.length }} 条</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+
     <VDialog v-model="renameDialog" max-width="820">
       <VCard><VCardItem><VCardTitle>{{ renameForm.original_key ? '编辑自定义命名字段' : '新增自定义命名字段' }}</VCardTitle><VCardSubtitle>字段会作为独立变量加入 MP 的 Jinja2 命名上下文，不覆盖原有字段。</VCardSubtitle></VCardItem><VDivider /><VCardText class="rule-dialog-body">
         <VRow><VCol cols="12" sm="5"><VTextField v-model="renameForm.key" label="字段名" :disabled="!!renameForm.original_key" hint="保存后字段名固定，避免破坏其它字段依赖" persistent-hint /></VCol><VCol cols="12" sm="7"><VTextField v-model="renameForm.label" label="显示名称" /></VCol></VRow>
@@ -1158,6 +1216,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
 
 <style scoped>
 .filter-row { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(180px, 240px) minmax(180px, 240px) auto; gap: 12px; align-items: center; }
+.rule-filter-actions { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .tools-table { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
 .rule-pattern { max-width: 660px; margin-top: 4px; color: rgba(var(--v-theme-on-surface), .64); font: .76rem/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
 code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
@@ -1355,5 +1414,6 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .probe-field-controls { justify-content: space-between; }
   .probe-policy-select { flex: 1 1 auto; max-width: 210px; }
   .probe-advanced-grid { grid-template-columns: 1fr; }
+  .rule-filter-actions { display: grid; grid-template-columns: 1fr 1fr; }
 }
 </style>
