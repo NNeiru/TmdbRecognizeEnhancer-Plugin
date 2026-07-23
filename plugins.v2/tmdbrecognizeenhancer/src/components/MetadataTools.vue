@@ -769,7 +769,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
         <tbody><tr v-for="item in pagedRules" :key="item.id">
           <td><div class="font-weight-medium">{{ item.field_label }}</div><code>{{ item.field }}</code></td>
           <td><div class="d-flex align-center ga-2"><span>{{ item.effective?.label || item.label }}</span><VChip v-if="item.overridden" size="x-small" color="warning" variant="tonal">插件已覆盖</VChip></div><div class="rule-pattern" :title="item.effective?.pattern || item.pattern">{{ item.effective?.pattern || item.pattern }}</div><div v-if="item.overridden && item.builtin && item.effective?.pattern !== item.pattern" class="text-caption text-medium-emphasis">MP 原正则：{{ item.pattern }}</div><div class="text-caption text-medium-emphasis">{{ item.effective?.action === 'clear' ? '命中后清空字段' : `输出：${item.effective?.value ?? item.value}` }}</div></td>
-          <td><VChip size="small" variant="tonal">{{ item.source_label }}</VChip><div class="text-caption text-medium-emphasis mt-1">{{ item.overridden ? `插件优先级 ${item.effective?.priority ?? 100}` : '沿用 MP 原生顺序' }}</div></td>
+          <td><VChip size="small" variant="tonal">{{ item.source_label }}</VChip><div v-if="item.overridden" class="text-caption text-medium-emphasis mt-1">插件优先级 {{ item.effective?.priority ?? 100 }}</div></td>
           <td><VBtn size="small" variant="tonal" prepend-icon="mdi-pencil-outline" @click="openRule(item)">编辑</VBtn><VBtn v-if="item.overridden" size="small" variant="text" color="warning" :loading="saving === `reset:${item.id}`" @click="resetRule(item)">{{ item.builtin ? '恢复' : '删除' }}</VBtn></td>
         </tr></tbody>
       </VTable>
@@ -1164,12 +1164,6 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
         <VDivider />
         <VCardText class="rule-dialog-body">
           <VTextField v-model="bulkPriority" type="number" min="-1000" max="1000" label="插件覆盖优先级" hint="范围 -1000～1000；数值越高，同一字段命中多条插件规则时越先采用" persistent-hint />
-          <VAlert type="info" variant="tonal" density="compact">
-            未覆盖的 MP 内置规则会生成一条内容不变、只增加优先级的插件覆盖；已编辑规则仅修改优先级，原正则、输出、启停状态均保留。
-          </VAlert>
-          <VAlert type="warning" variant="tonal" density="compact">
-            该数值只决定插件覆盖之间的顺序。MoviePilot 词表始终先解析；之后命中的插件覆盖仍会改写相应字段，即使其优先级低于 0。
-          </VAlert>
         </VCardText>
         <VDivider />
         <VCardActions class="rule-dialog-actions">
