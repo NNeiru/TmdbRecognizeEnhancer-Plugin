@@ -134,3 +134,94 @@ def test_low_plugin_priority_still_runs_after_native_parse():
     registry.apply(meta)
 
     assert meta.video_encode == "H265"
+
+
+def test_unconfigured_catalog_keeps_native_result_and_compiles_nothing():
+    module = _load_module()
+    registry = module.RecognitionRuleRegistry()
+    builtin = registry._builtin_item(
+        "videoCodec", r"\bSHARED\b", "Builtin", "内置",
+        "mp_python", "MP 内置",
+    )
+    word = registry._builtin_item(
+        "videoCodec", r"\bSHARED\b", "Word", "词表",
+        "mp_config", "MP 词表",
+    )
+    registry._discover_builtin_rules = lambda: ([builtin, word], [])
+
+    registry.refresh([])
+    meta = _meta("Example.SHARED.mkv")
+    meta.video_encode = "MP 原生选择"
+    changes = registry.apply(meta)
+
+    assert changes == []
+    assert meta.video_encode == "MP 原生选择"
+    assert registry.runtime_stats()["compiled_rules"] == 0
+
+
+def test_lowered_builtin_compares_against_unmodified_word_default_priority():
+    module = _load_module()
+    registry = module.RecognitionRuleRegistry()
+    builtin = registry._builtin_item(
+        "videoCodec", r"\bSHARED\b", "Builtin", "内置",
+        "mp_python", "MP 内置",
+    )
+    word = registry._builtin_item(
+        "videoCodec", r"\bSHARED\b", "Word", "词表",
+        "mp_config", "MP 词表",
+    )
+    registry._discover_builtin_rules = lambda: ([builtin, word], [])
+    registry.refresh([{
+        "source_rule_id": builtin["id"],
+        "field": "videoCodec",
+        "pattern": builtin["pattern"],
+        "value": builtin["value"],
+        "priority": 99,
+        "enabled": True,
+        "label": builtin["label"],
+    }])
+    meta = _meta("Example.SHARED.mkv")
+    meta.video_encode = "Builtin"
+
+    changes = registry.apply(meta)
+
+    assert meta.video_encode == "Word"
+    assert changes[0]["rule_id"] == word["id"]
+
+
+def test_raised_builtin_beats_unmodified_word_and_custom_tie_beats_builtin():
+    module = _load_module()
+    registry = module.RecognitionRuleRegistry()
+    builtin = registry._builtin_item(
+        "videoCodec", r"\bSHARED\b", "Builtin", "内置",
+        "mp_python", "MP 内置",
+    )
+    word = registry._builtin_item(
+        "videoCodec", r"\bSHARED\b", "Word", "词表",
+        "mp_config", "MP 词表",
+    )
+    registry._discover_builtin_rules = lambda: ([builtin, word], [])
+    registry.refresh([{
+        "source_rule_id": builtin["id"],
+        "field": "videoCodec",
+        "pattern": builtin["pattern"],
+        "value": builtin["value"],
+        "priority": 101,
+        "enabled": True,
+        "label": builtin["label"],
+    }])
+    meta = _meta("Example.SHARED.mkv")
+    registry.apply(meta)
+    assert meta.video_encode == "Builtin"
+
+    registry.refresh([{
+        "field": "videoCodec",
+        "pattern": r"\bSHARED\b",
+        "value": "PluginCustom",
+        "priority": 100,
+        "enabled": True,
+        "label": "插件自定义",
+    }])
+    meta = _meta("Example.SHARED.mkv")
+    registry.apply(meta)
+    assert meta.video_encode == "PluginCustom"

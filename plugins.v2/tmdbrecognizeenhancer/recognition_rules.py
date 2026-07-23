@@ -130,14 +130,58 @@ class RecognitionRuleRegistry:
                 "effective": deepcopy(override),
             })
 
+        # 只有某个字段出现启用中的覆盖时，才为该字段建立完整的插件候选池。
+        # 这样一条 99 会自然与未修改规则的默认 100 比较；完全未配置的字段
+        # 仍由 MP 原生解析，插件不会重复运行数百条正则。
+        active_fields = {
+            item["field"] for item in normalized if item.get("enabled")
+        }
         compiled: List[Tuple[Dict[str, Any], Any]] = []
-        for item in normalized:
-            if not item["enabled"]:
+        for order, item in enumerate(catalog):
+            if item.get("field") not in active_fields:
                 continue
+            effective = item.get("effective")
+            if effective and not effective.get("enabled"):
+                continue
+            if effective:
+                rule = deepcopy(effective)
+                content_changed = any((
+                    str(rule.get("pattern") or "") != str(item.get("pattern") or ""),
+                    str(rule.get("value") or "") != str(item.get("value") or ""),
+                    str(rule.get("action") or "override") != "override",
+                ))
+                active = True
+            else:
+                rule = {
+                    "id": item.get("id"),
+                    "source_rule_id": "",
+                    "field": item.get("field"),
+                    "pattern": item.get("pattern"),
+                    "value": item.get("value") or "{match}",
+                    "action": "override",
+                    "enabled": True,
+                    "priority": 100,
+                    "label": item.get("label") or "MP 默认规则",
+                }
+                content_changed = False
+                active = not item.get("builtin")
+            rule["_plugin_active"] = active
+            rule["_catalog_order"] = order
+            rule["_tie_rank"] = (
+                0 if (not item.get("builtin") or content_changed)
+                else 1 if item.get("source") == "mp_config"
+                else 2
+            )
             try:
-                compiled.append((item, re.compile(item["pattern"], re.IGNORECASE)))
+                compiled.append((rule, re.compile(str(rule.get("pattern") or ""), re.IGNORECASE)))
             except re.error as err:
-                errors.append(f"覆盖规则 {item['label']} 正则无效：{err}")
+                errors.append(f"覆盖规则 {rule.get('label')} 正则无效：{err}")
+        compiled.sort(key=lambda pair: (
+            -self._safe_int(pair[0].get("priority"), 100),
+            self._safe_int(pair[0].get("_tie_rank"), 2),
+            self._safe_int(pair[0].get("_catalog_order"), 0),
+            str(pair[0].get("id") or ""),
+        ))
 
         with self._lock:
             self._catalog = catalog
@@ -313,7 +357,7 @@ class RecognitionRuleRegistry:
         return self.normalize_overrides(current), updated, missing
 
     def apply(self, meta: Any) -> List[Dict[str, Any]]:
-        """在 MP 解析后覆盖字段；无覆盖规则时只做一次空列表判断。"""
+        """在 MP 解析后按完整字段候选池校正；无覆盖字段时快速返回。"""
         with self._lock:
             compiled = list(self._compiled)
             self._apply_count += 1
@@ -323,11 +367,11 @@ class RecognitionRuleRegistry:
         if not raw:
             return []
         tokens = [token for token in re.split(r"[\s.\-_\[\]【】()（）]+", raw) if token]
-        changes: List[Dict[str, Any]] = []
-        changed_fields = set()
+        winners: Dict[str, Tuple[Dict[str, Any], Any]] = {}
+        activated_fields = set()
         for rule, pattern in compiled:
             field = rule["field"]
-            if field in changed_fields:
+            if field in activated_fields:
                 continue
             match = pattern.search(raw)
             if not match:
@@ -337,6 +381,16 @@ class RecognitionRuleRegistry:
                         break
             if not match:
                 continue
+            winners.setdefault(field, (rule, match))
+            if rule.get("_plugin_active"):
+                activated_fields.add(field)
+
+        changes: List[Dict[str, Any]] = []
+        for field in activated_fields:
+            winner = winners.get(field)
+            if not winner:
+                continue
+            rule, match = winner
             spec = FIELD_SPECS[field]
             attr = spec["attr"]
             before = getattr(meta, attr, None)
@@ -348,7 +402,6 @@ class RecognitionRuleRegistry:
                 if after is None:
                     continue
             setattr(meta, attr, after)
-            changed_fields.add(field)
             changes.append({
                 "field": field, "before": before, "after": after,
                 "rule_id": rule["id"], "label": rule["label"],
