@@ -2,13 +2,13 @@
 
 面向 MoviePilot V2 的媒体识别与整理增强插件。插件通过 MoviePilot 插件接口扩展 TMDB 候选选择、动漫集数偏移、命名规则和 Emby 剧集组联动，不修改 MoviePilot 或 MoviePilot-Rust 源码。
 
-当前正式版本：`0.6.0`
+当前版本：`0.8.7`
 
 ## 功能概览
 
 | 模块 | 作用 |
 | --- | --- |
-| TMDB 搜索增强 | 复用 MP 已解析的标题、年份、类型和季集信息，提供首结果模式或可解释评分模式 |
+| 动画跨站 ID 与 TMDB 搜索增强 | 自动维护 bangumi-data，优先按 AniList/Bangumi/AniDB 身份精确映射；未命中再使用首结果或可解释评分 |
 | 集数偏移 | 将片源中的累计集数、相对集数等坐标转换为 TMDB 默认编集或指定剧集组坐标 |
 | 季度番剧看板 | 汇总季度动画，辅助匹配 TMDB 并批量建立偏移规则 |
 | Emby 剧集组联动 | 整理实际采用剧集组后，安全定位 Emby Series 并写入 StrmAssistant 的 `TmdbEg` |

@@ -766,7 +766,7 @@ onMounted(async () => {
       <VCardItem>
         <template #prepend><VAvatar color="secondary" variant="tonal"><VIcon icon="mdi-view-dashboard-outline" /></VAvatar></template>
         <VCardTitle>季度番剧看板</VCardTitle>
-        <VCardSubtitle>AniList 日漫主目录 · Bangumi/TMDB 补充国漫与海外动画；当前仅显示 {{ quarterKey }}</VCardSubtitle>
+        <VCardSubtitle>AniList 日漫主目录 · 跨站 ID 优先映射 · 未命中再搜索 TMDB；当前仅显示 {{ quarterKey }}</VCardSubtitle>
         <template #append>
           <div class="d-flex align-center ga-2">
             <VBtnToggle v-model="boardView" mandatory density="compact" variant="outlined" divided>

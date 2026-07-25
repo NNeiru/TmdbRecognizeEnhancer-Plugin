@@ -807,6 +807,98 @@ def test_tmdb_first_mode_uses_first_result_without_score_or_margin(monkeypatch):
     assert result["margin"] == 0.0
 
 
+def test_cross_id_mapping_precedes_tmdb_title_search(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config = plugin._normalize_config({
+        "enabled": True,
+        "anime_cross_id_enabled": True,
+        "anime_cross_id_anilist_resolver_enabled": False,
+    })
+    plugin._anime_cross_id = SimpleNamespace(
+        status=lambda: {"ready": True},
+        lookup=lambda **kwargs: {
+            "accepted": True,
+            "tmdb_id": 223564,
+            "media_type": "tv",
+            "matched_title": kwargs["title"],
+            "record": {
+                "title": "君のことが大大大大大好きな100人の彼女",
+                "aliases": ["超超超超超喜欢你的100个女朋友"],
+                "anilist_id": "162694",
+                "bangumi_id": "435723",
+                "anidb_id": "18021",
+                "mal_id": "54714",
+                "begin": "2023-10-08",
+            },
+        },
+    )
+    search = Mock(return_value=[])
+    plugin._tmdb_api = SimpleNamespace(
+        search_multiis=search,
+        get_info=lambda **kwargs: {
+            "name": "超超超超超喜欢你的100个女朋友",
+            "original_name": "君のことが大大大大大好きな100人の彼女",
+            "first_air_date": "2023-10-08",
+        },
+    )
+
+    result = plugin._recognize_title(
+        "Kimi No Koto Ga Daidaidaidaidaisuki Na 100 Nin No Kanojo",
+        include_candidates=True,
+    )
+
+    assert result["accepted"] is True
+    assert result["selection_mode"] == "cross_id"
+    assert result["best"]["tmdb_id"] == 223564
+    assert result["queries"] == []
+    search.assert_not_called()
+
+
+def test_anilist_identity_bridge_uses_distinctive_suffix_but_requires_exact_alias(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    searched = []
+
+    class Response:
+        @staticmethod
+        def raise_for_status():
+            return None
+
+        @staticmethod
+        def json():
+            return {
+                "data": {"Page": {"media": [{
+                    "id": 162694,
+                    "title": {
+                        "romaji": "Kimi no Koto ga Dai Dai Dai Dai Daisuki na 100-nin no Kanojo",
+                        "english": "The 100 Girlfriends Who Really Love You",
+                        "native": "君のことが大大大大大好きな100人の彼女",
+                    },
+                    "synonyms": [],
+                    "format": "TV",
+                }]}}
+            }
+
+    class Request:
+        def post_res(self, url, json):
+            term = json["variables"]["search"]
+            searched.append(term)
+            return Response() if term == "100 Nin No Kanojo" else SimpleNamespace(
+                raise_for_status=lambda: None,
+                json=lambda: {"data": {"Page": {"media": []}}},
+            )
+
+    monkeypatch.setattr(module, "RequestUtils", lambda **kwargs: Request())
+
+    result = plugin._resolve_anilist_identity(
+        "Kimi No Koto Ga Daidaidaidaidaisuki Na 100 Nin No Kanojo"
+    )
+
+    assert result["anilist_id"] == 162694
+    assert searched[-1] == "100 Nin No Kanojo"
+
+
 def test_tmdb_first_mode_can_promote_current_quarter_anime(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
@@ -1975,6 +2067,47 @@ def test_anibridge_mapping_prefills_tmdb_without_title_search(monkeypatch):
     assert catalog[0]["tmdb_match"]["accepted"] is True
     assert catalog[0]["tmdb_match"]["best"]["tmdb_id"] == 456
     assert catalog[0]["tmdb_match"]["best"]["source"] == "anibridge"
+
+
+def test_catalog_uses_local_cross_id_before_anibridge_or_tmdb_search(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._anime_cross_id = SimpleNamespace(
+        status=lambda: {"ready": True},
+        lookup=lambda **kwargs: {
+            "accepted": True,
+            "tmdb_id": 456,
+            "media_type": "tv",
+            "record": {
+                "anilist_id": "88",
+                "bangumi_id": "99",
+                "tmdb_path": "tv/456/season/2",
+            },
+        },
+    )
+    catalog = [{
+        "id": "anilist:88",
+        "source": "anilist",
+        "anilist_id": 88,
+        "display_name": "Example Season 2",
+        "name": "Example Season 2",
+        "date": "2026-07-03",
+        "catalog_media_type": "tv",
+    }]
+
+    matched = plugin._enrich_cross_id_catalog_mappings(catalog)
+
+    assert matched == 1
+    assert catalog[0]["tmdb_match"]["best"]["tmdb_id"] == 456
+    assert catalog[0]["tmdb_match"]["best"]["source"] == "bangumi-data"
+    assert catalog[0]["source_season"] == 2
+
+    class UnexpectedRequest:
+        def __init__(self, **kwargs):
+            raise AssertionError("本地映射成功后不应下载 AniBridge")
+
+    monkeypatch.setattr(module, "RequestUtils", UnexpectedRequest)
+    plugin._enrich_anibridge_mappings(catalog, {})
 
 
 def test_catalog_fast_match_uses_structured_english_title(monkeypatch):

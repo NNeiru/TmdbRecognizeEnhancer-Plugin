@@ -1,0 +1,9 @@
+bangumi-data
+https://github.com/bangumi-data/bangumi-data
+
+Database snapshot licensed under Creative Commons Attribution 4.0
+International (CC BY 4.0).
+
+The snapshot is bundled only to provide an immediately usable initial index.
+The plugin can update it from the upstream project and records the downloaded
+source, update time and content hash in its own data directory.

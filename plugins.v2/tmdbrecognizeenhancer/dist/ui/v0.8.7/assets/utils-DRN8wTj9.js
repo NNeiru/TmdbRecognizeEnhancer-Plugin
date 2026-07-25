@@ -1,9 +1,17 @@
-export const DEFAULT_CONFIG = {
+const _export_sfc = (sfc, props) => {
+  const target = sfc.__vccOpts || sfc;
+  for (const [key, val] of props) {
+    target[key] = val;
+  }
+  return target;
+};
+
+const DEFAULT_CONFIG = {
   enabled: false,
   recognizer_enabled: true,
   show_sidebar_nav: true,
   debug: false,
-  recognition_mode: 'tmdb_first',
+  recognition_mode: "tmdb_first",
   prefer_parsed_title: true,
   use_year_hint: true,
   use_original_title_evidence: true,
@@ -13,7 +21,7 @@ export const DEFAULT_CONFIG = {
   anime_cross_id_update_interval_hours: 24,
   anime_cross_id_anilist_resolver_enabled: true,
   web_search_fallback: false,
-  web_search_engine: 'auto',
+  web_search_engine: "auto",
   web_search_max_results: 8,
   web_search_timeout: 15,
   web_search_min_evidence: 78,
@@ -44,7 +52,7 @@ export const DEFAULT_CONFIG = {
   emby_episode_group_sync_retry_seconds: 30,
   emby_episode_group_sync_max_wait_minutes: 15,
   emby_episode_group_sync_path_mappings: [],
-  emby_episode_group_sync_conflict_policy: 'skip',
+  emby_episode_group_sync_conflict_policy: "skip",
   emby_episode_group_sync_refresh_metadata: true,
   release_group_assist_enabled: true,
   recognition_rule_overrides_enabled: true,
@@ -60,65 +68,55 @@ export const DEFAULT_CONFIG = {
   tmdb_prefer_ids: [],
   custom_rename_fields_enabled: true,
   rename_mapping_enabled: true,
-  rename_default_separator: '',
+  rename_default_separator: "",
   rename_separator_fields: [],
-  customization_separator: '@',
-  release_group_default_connector: '@',
+  customization_separator: "@",
+  release_group_default_connector: "@",
   release_group_normalize_unknown_connectors: false,
   strm_media_info_sync_enabled: false,
   strm_media_info_sync_servers: [],
   strm_media_info_sync_initial_delay_seconds: 20,
   strm_media_info_sync_retry_seconds: 30,
   strm_media_info_sync_max_wait_minutes: 30,
-  strm_media_info_sync_path_mappings: [],
-}
-
-export const UI_VERSION = __TMDB_ENHANCER_UI_VERSION__
-
-/**
- * 检测“旧前端模块 + 新插件后端”。模块联邦会把 remote 缓存在当前页面内存中，
- * 因此版本不一致时必须重建整个宿主页；新版后端会返回版本化 remote URL。
- */
-export function ensureUiVersion(backendVersion) {
-  const backend = String(backendVersion || '').trim()
-  if (!backend || backend === UI_VERSION || typeof window === 'undefined') return false
-  const guardKey = `tmdb-recognize-enhancer-ui-reload:${backend}`
-  if (window.sessionStorage?.getItem(guardKey) !== 'done') {
-    window.sessionStorage?.setItem(guardKey, 'done')
-    const nextUrl = new URL(window.location.href)
-    nextUrl.searchParams.set('_tmdb_ui', backend)
-    window.setTimeout(() => window.location.replace(nextUrl.toString()), 120)
+  strm_media_info_sync_path_mappings: []
+};
+const UI_VERSION = "0.8.7";
+function ensureUiVersion(backendVersion) {
+  const backend = String(backendVersion || "").trim();
+  if (!backend || backend === UI_VERSION || typeof window === "undefined") return false;
+  const guardKey = `tmdb-recognize-enhancer-ui-reload:${backend}`;
+  if (window.sessionStorage?.getItem(guardKey) !== "done") {
+    window.sessionStorage?.setItem(guardKey, "done");
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("_tmdb_ui", backend);
+    window.setTimeout(() => window.location.replace(nextUrl.toString()), 120);
   }
-  return true
+  return true;
 }
-
-export function cloneConfig(config) {
-  return JSON.parse(JSON.stringify({ ...DEFAULT_CONFIG, ...(config || {}) }))
+function cloneConfig(config) {
+  return JSON.parse(JSON.stringify({ ...DEFAULT_CONFIG, ...config || {} }));
 }
-
-export function unwrapResponse(response) {
-  const payload = response?.data && response.data.success !== undefined
-    ? response.data
-    : response
+function unwrapResponse(response) {
+  const payload = response?.data && response.data.success !== void 0 ? response.data : response;
   if (payload?.success === false) {
-    const error = new Error(payload.message || '请求处理失败')
-    error.response = payload
-    throw error
+    const error = new Error(payload.message || "请求处理失败");
+    error.response = payload;
+    throw error;
   }
-  if (payload && Object.prototype.hasOwnProperty.call(payload, 'data') && payload.success !== undefined) {
-    return payload.data
+  if (payload && Object.prototype.hasOwnProperty.call(payload, "data") && payload.success !== void 0) {
+    return payload.data;
   }
-  return response?.data ?? response
+  return response?.data ?? response;
+}
+function scoreColor(score) {
+  if (Number(score || 0) >= 85) return "success";
+  if (Number(score || 0) >= 72) return "warning";
+  return "error";
+}
+function mediaTypeText(value) {
+  if (value === "电影" || value === "movie") return "电影";
+  if (value === "电视剧" || value === "tv") return "电视剧";
+  return "未知";
 }
 
-export function scoreColor(score) {
-  if (Number(score || 0) >= 85) return 'success'
-  if (Number(score || 0) >= 72) return 'warning'
-  return 'error'
-}
-
-export function mediaTypeText(value) {
-  if (value === '电影' || value === 'movie') return '电影'
-  if (value === '电视剧' || value === 'tv') return '电视剧'
-  return '未知'
-}
+export { UI_VERSION as U, _export_sfc as _, cloneConfig as c, ensureUiVersion as e, mediaTypeText as m, scoreColor as s, unwrapResponse as u };

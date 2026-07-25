@@ -51,6 +51,7 @@ except ImportError:  # pragma: no cover - 仅用于兼容缺少异步事件枚�
     EventType = None
 
 from .emby_episode_group_sync import EmbyEpisodeGroupSynchronizer
+from .anime_cross_id import AnimeCrossIdDatabase
 from .emby_media_info import build_sync_payload, is_acceptable as media_info_acceptable
 from .episode_normalizer import EpisodeNormalizer
 from .media_probe import MediaFileProbe, StaticFfprobeProvisioner
@@ -74,7 +75,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.6"
+    plugin_version = "0.8.7"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -95,7 +96,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     # 季度目录匹配使用独立策略，不继承整理识别的 max_queries、降级开关等参数。
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
-    CATALOG_SCHEMA_VERSION = 2
+    CATALOG_SCHEMA_VERSION = 3
     DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
         "recognizer_enabled": True,
@@ -106,6 +107,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "use_year_hint": True,
         "use_original_title_evidence": True,
         "shared_recognition_enabled": True,
+        "anime_cross_id_enabled": True,
+        "anime_cross_id_auto_update": True,
+        "anime_cross_id_update_interval_hours": 24,
+        "anime_cross_id_anilist_resolver_enabled": True,
         "web_search_fallback": False,
         "web_search_engine": "auto",
         "web_search_max_results": 8,
@@ -240,6 +245,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         super().__init__()
         self._config = dict(self.DEFAULT_CONFIG)
         self._tmdb_api: Optional[TmdbApi] = None
+        self._anime_cross_id: Optional[AnimeCrossIdDatabase] = None
+        self._anime_identity_cache_lock = threading.RLock()
+        self._anime_identity_cache: Dict[str, Dict[str, Any]] = {}
         self._episode_normalizer: Optional[EpisodeNormalizer] = None
         self._runtime_adapter = MoviePilotRuntimeAdapter()
         self._episode_transfer_adapter = EpisodeNormalizationTransferAdapter()
@@ -284,6 +292,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self._close_tmdb_client()
         self._tmdb_api = TmdbApi()
         self._episode_normalizer = EpisodeNormalizer(self._tmdb_api)
+        self._sync_anime_cross_id_state()
         self._refresh_metadata_tools()
         self._sync_runtime_adapter_state()
         self._sync_subtitle_adapter_state()
@@ -317,6 +326,27 @@ class TmdbRecognizeEnhancer(_PluginBase):
             except Exception as err:  # noqa: BLE001 - 逐个候选降级
                 logger.debug(f"[媒体整理增强] 静态 ffprobe 下载失败 {candidate}: {err}")
         return None
+
+    def _sync_anime_cross_id_state(self) -> None:
+        """加载本地跨站 ID 快照，并按配置在后台维护最新版。"""
+        if self._anime_cross_id is None:
+            self._anime_cross_id = AnimeCrossIdDatabase(
+                self._plugin_data_dir(), self._download_github_asset,
+            )
+            self._anime_cross_id.load()
+        if (
+                not self.get_state()
+                or not self._config.get("anime_cross_id_enabled", True)
+        ):
+            return
+        interval = self._safe_int(
+            self._config.get("anime_cross_id_update_interval_hours"), 24,
+        )
+        if (
+                self._config.get("anime_cross_id_auto_update", True)
+                and self._anime_cross_id.needs_refresh(interval)
+        ):
+            self._anime_cross_id.refresh_in_background()
 
     def _sync_static_ffprobe_state(self) -> None:
         """按配置在后台准备 ISO 探测用静态 ffprobe。"""
@@ -432,6 +462,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "清空近期识别记忆",
+            },
+            {
+                "path": "/anime-cross-id/status",
+                "endpoint": self.get_anime_cross_id_status_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取动画跨站 ID 数据库状态",
+            },
+            {
+                "path": "/anime-cross-id/refresh",
+                "endpoint": self.refresh_anime_cross_id_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "后台更新动画跨站 ID 数据库",
             },
             {
                 "path": "/episode-normalizer",
@@ -756,6 +800,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         "mode": self._config.get("recognition_mode"),
                         "status": "运行中" if self.get_state() and self._config.get("recognizer_enabled") else "已停用",
                     },
+                    "anime_cross_id": {
+                        "enabled": bool(self._config.get("anime_cross_id_enabled")),
+                        "status": (
+                            "已停用" if not self._config.get("anime_cross_id_enabled")
+                            else "更新中" if self._anime_cross_id_status().get("updating")
+                            else "运行中" if self._anime_cross_id_status().get("ready")
+                            else "等待首次同步"
+                        ),
+                        **self._anime_cross_id_status(),
+                    },
                     "episode_offset": {
                         "enabled": bool(self._config.get("episode_normalizer_enabled")),
                         "status": (
@@ -831,6 +885,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "plugin_first": bool(getattr(settings, "RECOGNIZE_PLUGIN_FIRST", False)),
                     "emby_sync": self._emby_sync_status_data(include_jobs=False),
                 },
+                "anime_cross_id_database": self._anime_cross_id_status(),
             },
         )
 
@@ -854,7 +909,45 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._sync_emby_worker_state()
         self._sync_strm_worker_state()
         self._sync_static_ffprobe_state()
+        self._sync_anime_cross_id_state()
         return self.get_status()
+
+    def _anime_cross_id_status(self) -> Dict[str, Any]:
+        status = (
+            self._anime_cross_id.status()
+            if self._anime_cross_id else {
+                "ready": False, "updating": False, "item_count": 0,
+                "tmdb_count": 0, "error": "",
+            }
+        )
+        return {
+            **status,
+            "enabled": bool(self._config.get("anime_cross_id_enabled", True)),
+            "auto_update": bool(self._config.get("anime_cross_id_auto_update", True)),
+            "update_interval_hours": self._safe_int(
+                self._config.get("anime_cross_id_update_interval_hours"), 24,
+            ),
+            "anilist_resolver_enabled": bool(
+                self._config.get("anime_cross_id_anilist_resolver_enabled", True)
+            ),
+        }
+
+    def get_anime_cross_id_status_api(self) -> schemas.Response:
+        """返回跨站数据库当前快照与更新状态。"""
+        return schemas.Response(success=True, data=self._anime_cross_id_status())
+
+    def refresh_anime_cross_id_api(self) -> schemas.Response:
+        """立即在后台检查最新版，不阻塞管理页面请求。"""
+        if self._anime_cross_id is None:
+            self._sync_anime_cross_id_state()
+        started = bool(
+            self._anime_cross_id
+            and self._anime_cross_id.refresh_in_background(force=True)
+        )
+        return schemas.Response(
+            success=True,
+            data={**self._anime_cross_id_status(), "started": started},
+        )
 
     def clear_recognition_memory_api(self) -> schemas.Response:
         """清空用户可控的近期识别偏好，不影响运行日志和季度看板。"""
@@ -2010,7 +2103,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         )
 
     def query_season_catalog_api(self, payload: dict = Body(...)) -> schemas.Response:
-        """选择季度即返回 AniList 看板，并用 AniBridge 预填已知 TMDB 映射。"""
+        """选择季度即返回 AniList 看板，并优先用本地跨站数据库映射 TMDB。"""
         payload = payload or {}
         year = self._safe_int(payload.get("year"), datetime.now().year)
         quarter = self._safe_int(payload.get("quarter"), 1)
@@ -2361,6 +2454,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     ),
                     "Accept": "application/json",
                 }
+                # AniList 看板天然携带稳定 ID，先查本地数据库；绝大多数日漫
+                # 到这里即可得到 Series，不需要发起任何标题搜索。
+                self._enrich_cross_id_catalog_mappings(items)
                 with ThreadPoolExecutor(max_workers=2, thread_name_prefix="catalog-source") as source_executor:
                     source_futures = {
                         source_executor.submit(self._enrich_anibridge_mappings, items, headers): "AniBridge 映射",
@@ -2375,6 +2471,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
                             logger.warning(
                                 f"[TMDB识别增强] {source_futures[future]}后台加载失败：{err}"
                             )
+                # Bangumi 补源会追加国漫/海外条目，再补查一次它们的稳定 ID。
+                self._enrich_cross_id_catalog_mappings(items)
                 try:
                     self._enrich_tmdb_animation_catalog(year, season, items)
                 except Exception as err:
@@ -3830,6 +3928,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     getattr(meta, "original_name", "") or getattr(meta, "org_string", "")
                 ),
                 "release_group": self._clean_title(getattr(meta, "resource_team", "")),
+                "anilist_id": (
+                    getattr(meta, "anilist_id", None)
+                    or getattr(meta, "anilistid", None)
+                ),
+                "bangumi_id": (
+                    getattr(meta, "bangumi_id", None)
+                    or getattr(meta, "bangumiid", None)
+                ),
+                "anidb_id": (
+                    getattr(meta, "anidb_id", None)
+                    or getattr(meta, "anidbid", None)
+                ),
             }
             hints.update({key: value for key, value in parsed_hints.items() if value not in (None, "", 0)})
             if recognition_rule_changes:
@@ -3862,6 +3972,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     or raw_title
                 ),
                 "release_group": self._clean_title(getattr(runtime_meta, "resource_team", "")),
+                "anilist_id": (
+                    getattr(runtime_meta, "anilist_id", None)
+                    or getattr(runtime_meta, "anilistid", None)
+                ),
+                "bangumi_id": (
+                    getattr(runtime_meta, "bangumi_id", None)
+                    or getattr(runtime_meta, "bangumiid", None)
+                ),
+                "anidb_id": (
+                    getattr(runtime_meta, "anidb_id", None)
+                    or getattr(runtime_meta, "anidbid", None)
+                ),
             }
             hints.update({key: value for key, value in runtime_hints.items() if value not in (None, "")})
             if runtime_hints["media_type"]:
@@ -4143,6 +4265,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             hints.pop("year", None)
         if not self._config.get("use_original_title_evidence", True):
             hints.pop("original_title", None)
+        cross_id = self._recognize_by_anime_cross_id(
+            title, hints, include_candidates=include_candidates,
+        )
+        if cross_id.get("accepted"):
+            return cross_id
         mode = recognition_mode if recognition_mode in ("tmdb_first", "scored") \
             else self._config.get("recognition_mode")
         search_title = title
@@ -4151,6 +4278,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             result.update({
                 "title": title,
                 "search_title": search_title,
+                "cross_id": cross_id,
             })
             return result
 
@@ -4331,10 +4459,254 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "release_group_preference": release_group_preference,
             "candidate_sources": candidate_sources,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "cross_id": cross_id,
         }
         if include_candidates:
             result["candidates"] = [*scored, *excluded_scored]
         return result
+
+    def _recognize_by_anime_cross_id(
+            self,
+            title: str,
+            hints: Dict[str, Any],
+            include_candidates: bool = False,
+    ) -> Dict[str, Any]:
+        """先用确定的跨站 ID 映射；不唯一或找不到时明确回落原 TMDB 链。"""
+        base = {
+            "accepted": False,
+            "attempted": False,
+            "selection_mode": "cross_id",
+            "reason": "动画跨站 ID 数据库未启用",
+        }
+        if not self._config.get("anime_cross_id_enabled", True):
+            return base
+        release_kind = str(
+            (hints.get("release_group_profile") or {}).get("kind") or ""
+        )
+        if release_kind == "live_action":
+            return {
+                **base,
+                "reason": "制作组已明确标记为真人电视剧，跳过动画跨站数据库",
+            }
+        database = self._anime_cross_id
+        if database is None or not database.status().get("ready"):
+            return {
+                **base,
+                "attempted": True,
+                "reason": "动画跨站 ID 数据库尚未就绪，继续使用 TMDB 搜索",
+            }
+
+        lookup = database.lookup(
+            title=title,
+            original_title=hints.get("original_title"),
+            anilist_id=hints.get("anilist_id"),
+            bangumi_id=hints.get("bangumi_id"),
+            anidb_id=hints.get("anidb_id"),
+            # 季集文件中的年份通常是本季播出年，不拿它筛选 Series 身份。
+            media_type=hints.get("media_type"),
+        )
+        source = "local"
+        if (
+                not lookup.get("accepted")
+                and self._config.get("anime_cross_id_anilist_resolver_enabled", True)
+        ):
+            resolved = self._resolve_anilist_identity(title)
+            if resolved.get("anilist_id"):
+                lookup = database.lookup(
+                    anilist_id=resolved["anilist_id"],
+                    media_type=hints.get("media_type"),
+                )
+                lookup["anilist_resolution"] = resolved
+                source = "anilist"
+
+        if not lookup.get("accepted"):
+            return {
+                **base,
+                "attempted": True,
+                "reason": (
+                    f"{lookup.get('reason') or '跨站身份未唯一确定'}，继续使用 TMDB 搜索"
+                ),
+                "lookup": lookup,
+            }
+
+        tmdb_id = self._safe_int(lookup.get("tmdb_id"), 0)
+        if tmdb_id in set(self._config.get("tmdb_exclude_ids") or []):
+            return {
+                **base,
+                "attempted": True,
+                "reason": f"跨站映射命中 TMDB {tmdb_id}，但该 ID 在排除名单中",
+                "lookup": lookup,
+            }
+        media_type = self._normalize_media_type(lookup.get("media_type"))
+        if not tmdb_id or not media_type:
+            return {
+                **base,
+                "attempted": True,
+                "reason": "跨站映射缺少有效 TMDB 类型或 ID，继续使用 TMDB 搜索",
+                "lookup": lookup,
+            }
+
+        detail: Dict[str, Any] = {}
+        try:
+            detail = self._tmdb_api.get_info(mtype=media_type, tmdbid=tmdb_id) or {}
+        except Exception as err:  # noqa: BLE001 - ID 映射本身仍有效
+            logger.debug(f"[媒体整理增强] 跨站映射 TMDB 详情读取失败：{err}")
+        record = lookup.get("record") or {}
+        aliases = record.get("aliases") or []
+        fallback_name = next(
+            (value for value in aliases if re.search(r"[\u3400-\u9fff]", str(value))),
+            record.get("title") or title,
+        )
+        name = (
+            detail.get("name") or detail.get("title")
+            or detail.get("original_name") or detail.get("original_title")
+            or fallback_name
+        )
+        year = self._normalize_year(
+            str(
+                detail.get("first_air_date") or detail.get("release_date")
+                or record.get("begin") or ""
+            )[:4]
+        )
+        best = {
+            "tmdb_id": tmdb_id,
+            "name": name,
+            "original_name": (
+                detail.get("original_name") or detail.get("original_title")
+                or record.get("title") or ""
+            ),
+            "year": year,
+            "media_type": media_type.value,
+            "score": 100.0,
+            "diagnostic_score": 100.0,
+            "matched_name": (
+                (lookup.get("anilist_resolution") or {}).get("matched_title")
+                or lookup.get("matched_title") or title
+            ),
+            "cross_id_source": source,
+            "cross_id": {
+                key: record.get(key) for key in (
+                    "anilist_id", "bangumi_id", "anidb_id", "mal_id",
+                )
+            },
+        }
+        result = {
+            "accepted": True,
+            "attempted": True,
+            "selection_mode": "cross_id",
+            "title": title,
+            "search_title": title,
+            "reason": (
+                f"动画跨站 ID 精确映射命中 TMDB {tmdb_id}；"
+                "无需执行 TMDB 标题模糊搜索"
+            ),
+            "queries": [],
+            "hints": self._serialize_hints(hints),
+            "best": best,
+            "runner_up": None,
+            "margin": 100.0,
+            "raw_margin": 100.0,
+            "candidate_sources": {
+                "cross_id": {
+                    "attempted": True, "source": source, "count": 1,
+                }
+            },
+            "cross_id": {
+                "source": source,
+                "match_kind": lookup.get("match_kind") or "",
+                "tmdb_id": tmdb_id,
+                "media_type": media_type.value,
+                **best["cross_id"],
+            },
+            "lookup": lookup,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if include_candidates:
+            result["candidates"] = [best]
+        return result
+
+    def _resolve_anilist_identity(self, title: str) -> Dict[str, Any]:
+        """按严格标题同一性查 AniList ID；AniList 不直接决定 TMDB 候选。"""
+        query_title = self._clean_title(title)
+        cache_key = AnimeCrossIdDatabase.normalize_title(query_title)
+        if not cache_key:
+            return {}
+        now = time.time()
+        with self._anime_identity_cache_lock:
+            cached = self._anime_identity_cache.get(cache_key) or {}
+            cache_ttl = 86400 if cached.get("value") else 3600
+            if now - self._safe_float(cached.get("cached_at"), 0) < cache_ttl:
+                return deepcopy(cached.get("value") or {})
+
+        query = """
+        query($search:String){
+          Page(page:1,perPage:10){
+            media(type:ANIME,search:$search,isAdult:false,sort:SEARCH_MATCH){
+              id title{romaji english native} synonyms format
+            }
+          }
+        }
+        """
+        resolved: Dict[str, Any] = {}
+        try:
+            request = RequestUtils(
+                headers={"User-Agent": "MoviePilot-MediaEnhancer/1.0"},
+                proxies=self._valid_proxies(getattr(settings, "PROXY", None)),
+                timeout=15,
+            )
+            tokens = re.findall(r"[A-Za-z0-9]+", query_title)
+            search_terms = list(dict.fromkeys(filter(None, (
+                query_title,
+                " ".join(tokens[-4:]) if len(tokens) > 4 else "",
+                " ".join(tokens[-3:]) if len(tokens) > 5 else "",
+            ))))
+            exact = []
+            for search_term in search_terms:
+                response = request.post_res(
+                    "https://graphql.anilist.co",
+                    json={"query": query, "variables": {"search": search_term}},
+                )
+                if not response:
+                    continue
+                response.raise_for_status()
+                media = ((((response.json().get("data") or {}).get("Page") or {})
+                          .get("media")) or [])
+                for item in media:
+                    if not isinstance(item, dict):
+                        continue
+                    titles = item.get("title") or {}
+                    aliases = [
+                        titles.get("romaji"), titles.get("english"), titles.get("native"),
+                        *(item.get("synonyms") or []),
+                    ]
+                    matched = next((
+                        str(alias) for alias in aliases
+                        if alias and AnimeCrossIdDatabase.normalize_title(alias) == cache_key
+                    ), "")
+                    if matched:
+                        exact.append({
+                            "anilist_id": self._safe_int(item.get("id"), 0),
+                            "matched_title": matched,
+                            "format": item.get("format") or "",
+                        })
+                if exact:
+                    break
+            exact = [item for item in exact if item["anilist_id"]]
+            if len({item["anilist_id"] for item in exact}) == 1:
+                resolved = exact[0]
+        except Exception as err:  # noqa: BLE001 - 失败后正常回落 TMDB
+            logger.debug(f"[媒体整理增强] AniList 身份解析失败：{err}")
+        with self._anime_identity_cache_lock:
+            self._anime_identity_cache[cache_key] = {
+                "cached_at": now, "value": deepcopy(resolved),
+            }
+            if len(self._anime_identity_cache) > 300:
+                oldest = min(
+                    self._anime_identity_cache,
+                    key=lambda key: self._anime_identity_cache[key].get("cached_at", 0),
+                )
+                self._anime_identity_cache.pop(oldest, None)
+        return resolved
 
     @staticmethod
     def _apply_shared_recognition_evidence(
@@ -5954,6 +6326,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         bool_keys = (
             "enabled", "recognizer_enabled", "show_sidebar_nav", "debug", "prefer_parsed_title",
             "use_year_hint", "use_original_title_evidence", "shared_recognition_enabled",
+            "anime_cross_id_enabled", "anime_cross_id_auto_update",
+            "anime_cross_id_anilist_resolver_enabled",
             "web_search_fallback",
             "main_title_fallback",
             "progressive_fallback", "fetch_aliases", "episode_normalizer_enabled",
@@ -5986,6 +6360,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "strm_media_info_sync_retry_seconds": (10, 600),
             "strm_media_info_sync_max_wait_minutes": (1, 1440),
             "media_probe_timeout": (3, 30),
+            "anime_cross_id_update_interval_hours": (1, 168),
         }
         for key, (minimum, maximum) in ranges.items():
             merged[key] = max(minimum, min(maximum, self._safe_int(merged.get(key), int(self.DEFAULT_CONFIG[key]))))
@@ -6164,6 +6539,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """保存跨模块运行日志摘要，避免完整响应无限增长。"""
         adjustment = result.get("episode_adjustment")
         has_search = bool(result.get("queries"))
+        has_cross_id = result.get("selection_mode") == "cross_id"
         if has_search and result.get("accepted"):
             self._remember_recognition(result)
         record = {
@@ -6171,12 +6547,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             for key in (
                 "accepted", "title", "original_title", "reason", "queries", "hints",
                 "best", "runner_up", "margin", "web_search", "episode_adjustment", "selection_mode",
-                "candidate_policy", "created_at",
+                "candidate_policy", "cross_id", "created_at",
             )
         }
         record["kind"] = "recognition"
         record["module"] = (
-            "TMDB 搜索增强 + 集数偏移" if has_search and adjustment is not None
+            "动画跨站 ID + 集数偏移" if has_cross_id and adjustment is not None
+            else "动画跨站 ID" if has_cross_id
+            else "TMDB 搜索增强 + 集数偏移" if has_search and adjustment is not None
             else "集数偏移" if adjustment is not None else "TMDB 搜索增强"
         )
         record["level"] = "success" if result.get("accepted") else "warning"
@@ -6973,10 +7351,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _enrich_anibridge_mappings(
             self, catalog: List[Dict[str, Any]], headers: Dict[str, str]
     ) -> None:
-        """一次下载每日映射并只保留当前季度的 AniList→TMDB TV 关系。"""
+        """本地数据库未覆盖时，再用 AniBridge 补充 AniList→TMDB TV 关系。"""
         wanted = {
             self._safe_int(item.get("anilist_id"), 0): item
-            for item in catalog if self._safe_int(item.get("anilist_id"), 0)
+            for item in catalog
+            if self._safe_int(item.get("anilist_id"), 0)
+            and not (item.get("tmdb_match") or {}).get("accepted")
         }
         if not wanted:
             return
@@ -7016,6 +7396,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         for anilist_id, ids in candidates.items():
             valid_ids = sorted(value for value in ids if value)
             item = wanted[anilist_id]
+            if (item.get("tmdb_match") or {}).get("accepted"):
+                continue
             item["tmdb_candidates"] = valid_ids
             if len(valid_ids) != 1:
                 continue
@@ -7034,6 +7416,65 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 },
                 "margin": 100.0,
             }
+
+    def _enrich_cross_id_catalog_mappings(
+            self, catalog: List[Dict[str, Any]],
+    ) -> int:
+        """用看板条目自带的 AniList/Bangumi ID 直接映射 TMDB。"""
+        if (
+                not self._config.get("anime_cross_id_enabled", True)
+                or self._anime_cross_id is None
+                or not self._anime_cross_id.status().get("ready")
+        ):
+            return 0
+        matched = 0
+        for item in catalog:
+            current = item.get("tmdb_match") or {}
+            if current.get("accepted"):
+                continue
+            lookup = self._anime_cross_id.lookup(
+                anilist_id=item.get("anilist_id"),
+                bangumi_id=(
+                    item.get("bangumi_id")
+                    or (
+                        item.get("source_id")
+                        if item.get("source") == "bangumi" else None
+                    )
+                ),
+                media_type=item.get("catalog_media_type"),
+            )
+            if not lookup.get("accepted"):
+                continue
+            tmdb_id = self._safe_int(lookup.get("tmdb_id"), 0)
+            media_type = self._normalize_media_type(lookup.get("media_type"))
+            if not tmdb_id or not media_type:
+                continue
+            record = lookup.get("record") or {}
+            tmdb_path = str(record.get("tmdb_path") or "")
+            season_match = re.search(r"/season/(\d+)", tmdb_path)
+            if season_match and item.get("source_season") is None:
+                item["source_season"] = self._safe_int(season_match.group(1), 0)
+            item["tmdb_match"] = {
+                "accepted": True,
+                "attempted": True,
+                "reason": "bangumi-data 跨站 ID 精确映射",
+                "best": {
+                    "tmdb_id": tmdb_id,
+                    "name": item.get("display_name") or item.get("name"),
+                    "year": str(item.get("date") or "")[:4],
+                    "media_type": media_type.value,
+                    "score": 100.0,
+                    "source": "bangumi-data",
+                },
+                "margin": 100.0,
+                "cross_id": {
+                    "anilist_id": record.get("anilist_id") or item.get("anilist_id"),
+                    "bangumi_id": record.get("bangumi_id") or item.get("bangumi_id"),
+                    "tmdb_path": tmdb_path,
+                },
+            }
+            matched += 1
+        return matched
 
     @classmethod
     def _normalize_bangumi_subject(

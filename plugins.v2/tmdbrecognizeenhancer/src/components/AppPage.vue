@@ -48,6 +48,7 @@ const filteredHistory = computed(() => history.value.filter(item => {
 }))
 const normalizerStatus = computed(() => status.value.episode_normalizer || {})
 const modules = computed(() => status.value.modules || {})
+const crossIdStatus = computed(() => status.value.anime_cross_id_database || {})
 
 function historyStatus(item) {
   if (item.accepted) return { color: 'success', marker: 'success', label: item.kind === 'operation' ? '完成' : (item.best?.score ?? '通过') }
@@ -193,6 +194,20 @@ async function clearRecognitionMemory() {
   }
 }
 
+async function refreshCrossId() {
+  error.value = ''
+  try {
+    const response = await props.api.post(`${pluginBase.value}/anime-cross-id/refresh`, {})
+    status.value = {
+      ...status.value,
+      anime_cross_id_database: unwrapResponse(response) || crossIdStatus.value,
+    }
+    window.setTimeout(loadStatus, 1200)
+  } catch (err) {
+    error.value = err?.message || '跨站 ID 数据库更新失败'
+  }
+}
+
 function typeConstraintSourceText(source) {
   return ({
     manual: '手动指定',
@@ -314,7 +329,12 @@ onMounted(loadStatus)
 
           <section v-if="tab === 'settings'" class="workspace-panel">
             <div class="tab-content">
-              <StrategySettings v-model="config" :show-module-switches="false" />
+              <StrategySettings
+                v-model="config"
+                :show-module-switches="false"
+                :cross-id-status="crossIdStatus"
+                @refresh-cross-id="refreshCrossId"
+              />
               <div class="sticky-actions">
                 <div class="text-caption text-medium-emphasis mr-auto">近期记忆：{{ summary.recognition_memory?.active_targets || 0 }} 个已生效目标 / {{ summary.recognition_memory?.sample_count || 0 }} 个不同文件</div>
                 <VBtn variant="text" prepend-icon="mdi-delete-clock-outline" :disabled="!(summary.recognition_memory?.sample_count)" @click="clearRecognitionMemory">清除近期记忆</VBtn>
@@ -368,8 +388,8 @@ onMounted(loadStatus)
                       <VCardTitle>{{ preview.accepted ? '候选已通过' : '本次安全拒绝' }}</VCardTitle>
                       <VCardSubtitle>{{ preview.reason }}</VCardSubtitle>
                       <template #append>
-                        <VChip size="small" :color="preview.selection_mode === 'tmdb_first' ? 'primary' : 'secondary'" variant="tonal">
-                          实际：{{ preview.selection_mode === 'tmdb_first' ? '单次首结果' : '可解释评分' }}
+                        <VChip size="small" :color="preview.selection_mode === 'cross_id' ? 'success' : (preview.selection_mode === 'tmdb_first' ? 'primary' : 'secondary')" variant="tonal">
+                          实际：{{ preview.selection_mode === 'cross_id' ? '跨站 ID 精确映射' : (preview.selection_mode === 'tmdb_first' ? '单次首结果' : '可解释评分') }}
                         </VChip>
                       </template>
                     </VCardItem>
@@ -422,8 +442,18 @@ onMounted(loadStatus)
                             <VAlert v-if="preview.best?.eligible_rank != null && preview.best?.tmdb_rank != null && preview.best.eligible_rank !== preview.best.tmdb_rank" type="info" variant="tonal" density="compact" class="mb-3">候选过滤后已按剩余结果重算有效排名；TMDB 原始排名仅保留为诊断信息。</VAlert>
                             <VAlert v-if="preview.best?.season_coordinate_evidence?.checked" type="info" variant="tonal" density="compact" class="mb-3">季集校验：{{ preview.best.season_coordinate_evidence.reason }}<span v-if="preview.best.season_coordinate_evidence.matched_group_name"> · {{ preview.best.season_coordinate_evidence.matched_group_name }}</span></VAlert>
                             <VAlert v-if="preview.web_search?.attempted" type="info" variant="tonal" density="compact" class="mb-3">搜索引擎兜底：{{ preview.web_search.engine }} 返回 {{ preview.web_search.result_count }} 条，发现 {{ preview.web_search.discovered?.length || 0 }} 个 TMDB 链接。</VAlert>
-                            <div class="text-caption text-medium-emphasis mb-2">实际搜索词</div>
-                            <div class="d-flex flex-wrap ga-2 mb-4"><VChip v-for="query in preview.queries" :key="query" size="small" color="primary" variant="tonal">{{ query }}</VChip></div>
+                            <template v-if="preview.selection_mode === 'cross_id'">
+                              <div class="text-caption text-medium-emphasis mb-2">跨站身份</div>
+                              <div class="d-flex flex-wrap ga-2 mb-4">
+                                <VChip size="small" color="success" variant="tonal">TMDB {{ preview.cross_id?.tmdb_id }}</VChip>
+                                <VChip v-if="preview.cross_id?.anilist_id" size="small" variant="tonal">AniList {{ preview.cross_id.anilist_id }}</VChip>
+                                <VChip v-if="preview.cross_id?.bangumi_id" size="small" variant="tonal">Bangumi {{ preview.cross_id.bangumi_id }}</VChip>
+                              </div>
+                            </template>
+                            <template v-else>
+                              <div class="text-caption text-medium-emphasis mb-2">实际搜索词</div>
+                              <div class="d-flex flex-wrap ga-2 mb-4"><VChip v-for="query in preview.queries" :key="query" size="small" color="primary" variant="tonal">{{ query }}</VChip></div>
+                            </template>
                             <VTable v-if="preview.candidates?.length" density="compact" class="candidate-table">
                               <thead><tr><th>候选</th><th>命中与证据</th><th>得分</th></tr></thead>
                               <tbody><tr v-for="candidate in preview.candidates" :key="`${candidate.media_type}-${candidate.tmdb_id}`" :class="{ 'candidate-suppressed': candidate.suppressed_as_duplicate || candidate.suppressed_as_shadow_season || candidate.suppressed_by_exclusion }"><td><strong>{{ candidate.name }}</strong><div class="text-caption text-medium-emphasis">{{ candidate.year || '—' }} · #{{ candidate.tmdb_id }}</div></td><td class="text-caption">{{ candidate.matched_name || '—' }}<div class="text-medium-emphasis">查询来源 {{ candidate.query_confidence ?? 0 }}<span v-if="candidate.web_evidence"> · 外部证据 {{ candidate.web_evidence }}</span></div><div v-if="candidate.release_group_evidence?.component !== null" class="text-medium-emphasis">制作组 {{ candidate.release_group_evidence.label }}：{{ candidate.release_group_evidence.component }} 分</div><div v-if="candidate.seasonal_evidence?.active" class="context-evidence">季度目录 {{ candidate.seasonal_evidence.quarter }}：{{ candidate.seasonal_evidence.component }} 分</div><div v-if="candidate.memory_evidence?.active" class="context-evidence">近期命中 {{ candidate.memory_evidence.hits }} 次：{{ candidate.memory_evidence.component }} 分</div><div v-if="candidate.preferred_by_policy" class="context-evidence">命中 TMDB 优先名单</div><div v-if="candidate.suppressed_by_exclusion" class="text-medium-emphasis">已被 TMDB 排除名单剔除</div></td><td><VChip size="small" variant="tonal" :color="candidate.suppressed_as_duplicate || candidate.suppressed_as_shadow_season || candidate.suppressed_by_exclusion ? 'grey' : scoreColor(candidate.score)">{{ preview.selection_mode === 'tmdb_first' ? '诊断 ' : '' }}{{ candidate.diagnostic_score ?? candidate.score }}</VChip></td></tr></tbody>

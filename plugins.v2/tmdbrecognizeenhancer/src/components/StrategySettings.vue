@@ -6,8 +6,9 @@ const props = defineProps({
   modelValue: { type: Object, required: true },
   compact: { type: Boolean, default: false },
   showModuleSwitches: { type: Boolean, default: true },
+  crossIdStatus: { type: Object, default: () => ({}) },
 })
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits(['update:modelValue', 'refresh-cross-id'])
 const config = computed({
   get: () => props.modelValue,
   set: value => emit('update:modelValue', value),
@@ -134,6 +135,59 @@ function applyBalancedPreset() {
     </VCard>
 
     <VExpansionPanels multiple variant="accordion" class="advanced-panels">
+      <VExpansionPanel value="cross-id">
+        <VExpansionPanelTitle>
+          <div class="panel-title">
+            <VIcon icon="mdi-database-sync-outline" color="primary" />
+            <div>
+              <strong>动画跨站 ID 数据库</strong>
+              <small>
+                {{ crossIdStatus.ready
+                  ? `${Number(crossIdStatus.tmdb_count || 0).toLocaleString()} 条 TMDB 映射`
+                  : (crossIdStatus.updating ? '正在同步数据库' : '等待首次同步') }}
+              </small>
+            </div>
+          </div>
+        </VExpansionPanelTitle>
+        <VExpansionPanelText>
+          <VAlert type="info" variant="tonal" density="compact" class="mb-4">
+            先用 bangumi-data 的 AniList／Bangumi／AniDB 身份精确映射 TMDB；无法唯一确定时，才进入下方现有 TMDB 搜索与评分。
+          </VAlert>
+          <div class="quick-options-grid">
+            <div class="toggle-item"><div><strong>优先使用跨站 ID</strong><small>只接受唯一映射，不做宽泛标题猜测</small></div><VSwitch v-model="config.anime_cross_id_enabled" color="primary" hide-details /></div>
+            <div class="toggle-item"><div><strong>自动维护数据库</strong><small>后台检查更新，失败时继续使用旧快照</small></div><VSwitch v-model="config.anime_cross_id_auto_update" color="primary" hide-details :disabled="!config.anime_cross_id_enabled" /></div>
+            <div class="toggle-item"><div><strong>AniList 身份桥接</strong><small>罗马音未在本地标题表中时，只查询 AniList ID</small></div><VSwitch v-model="config.anime_cross_id_anilist_resolver_enabled" color="primary" hide-details :disabled="!config.anime_cross_id_enabled" /></div>
+          </div>
+          <div class="cross-id-footer mt-4">
+            <div class="cross-id-meta">
+              <VChip size="small" :color="crossIdStatus.ready ? 'success' : (crossIdStatus.error ? 'error' : 'default')" variant="tonal">
+                {{ crossIdStatus.ready ? '数据库就绪' : (crossIdStatus.error ? '同步异常' : '尚未就绪') }}
+              </VChip>
+              <span v-if="crossIdStatus.updated_at">更新于 {{ crossIdStatus.updated_at }}</span>
+              <span>bangumi-data · CC BY 4.0</span>
+            </div>
+            <VSelect
+              v-model.number="config.anime_cross_id_update_interval_hours"
+              :items="[
+                { title: '每 6 小时检查', value: 6 },
+                { title: '每天检查（推荐）', value: 24 },
+                { title: '每 3 天检查', value: 72 },
+                { title: '每周检查', value: 168 },
+              ]"
+              density="compact" label="更新周期" hide-details
+              class="cross-id-interval"
+              :disabled="!config.anime_cross_id_auto_update"
+            />
+            <VBtn
+              variant="tonal" color="primary" prepend-icon="mdi-refresh"
+              :loading="crossIdStatus.updating"
+              @click.stop="emit('refresh-cross-id')"
+            >立即更新</VBtn>
+          </div>
+          <VAlert v-if="crossIdStatus.error" type="warning" variant="tonal" density="compact" class="mt-3">{{ crossIdStatus.error }}</VAlert>
+        </VExpansionPanelText>
+      </VExpansionPanel>
+
       <VExpansionPanel value="candidate-policy">
         <VExpansionPanelTitle>
           <div class="panel-title"><VIcon icon="mdi-playlist-star" color="primary" /><div><strong>TMDB 人工候选规则</strong><small>排除 {{ config.tmdb_exclude_ids?.length || 0 }} 个 · 优先 {{ config.tmdb_prefer_ids?.length || 0 }} 个</small></div></div>
@@ -233,6 +287,9 @@ function applyBalancedPreset() {
 .weight-box { padding: 10px 12px; border-radius: 11px; background: rgba(var(--v-theme-primary), .04); }
 .weight-head { display: flex; align-items: center; gap: 8px; font-size: .82rem; }
 .weight-head strong { margin-left: auto; color: rgb(var(--v-theme-primary)); font-variant-numeric: tabular-nums; }
+.cross-id-footer { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.cross-id-meta { display: flex; align-items: center; gap: 10px; flex: 1 1 360px; flex-wrap: wrap; color: rgba(var(--v-theme-on-surface), .62); font-size: .78rem; }
+.cross-id-interval { flex: 0 1 210px; }
 @media (max-width: 760px) {
   .mode-toggle { width: 100%; }
   .mode-toggle :deep(.v-btn) { flex: 1 1 50%; }
