@@ -13,12 +13,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from datetime import datetime
 from difflib import SequenceMatcher
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlencode, urlparse
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Body
+from starlette.responses import FileResponse, PlainTextResponse
 
 from app import schemas
 from app.core.config import settings
@@ -29,6 +31,12 @@ from app.modules.themoviedb.tmdbapi import TmdbApi
 from app.plugins import _PluginBase
 from app.schemas.types import ChainEventType, MediaType
 from app.utils.http import RequestUtils
+
+try:
+    from PIL import Image, ImageOps
+except ImportError:  # pragma: no cover - MoviePilot 正常镜像内置 Pillow。
+    Image = None
+    ImageOps = None
 
 try:
     from app.core.context import MediaInfo as MoviePilotMediaInfo
@@ -99,7 +107,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.13"
+    plugin_version = "0.8.14"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -123,6 +131,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
     CATALOG_SCHEMA_VERSION = 3
+    NOTIFICATION_CANDIDATE_PAGE_SIZE = 3
+    NOTIFICATION_COLLAGE_LIMIT = 9
     DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
         "recognizer_enabled": True,
@@ -899,6 +909,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "立即生成并发送集数偏移候选批次",
+            },
+            {
+                "path": "/notification-enhancer/candidates/collage/{batch_id}",
+                "endpoint": self.get_notification_candidate_collage_api,
+                "methods": ["GET"],
+                "auth": "apikey",
+                "summary": "获取集数偏移候选海报拼图",
             },
             {
                 "path": "/diagnostics",
@@ -3224,6 +3241,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "poster": item.get("poster") or "",
                 "platform": item.get("platform") or "",
                 "region": item.get("region") or "",
+                "date": item.get("date") or "",
+                "episode_count": self._safe_int(item.get("episode_count"), 0),
+                "catalog_media_type": item.get("catalog_media_type") or "",
                 "has_prequel": bool(item.get("has_prequel")),
                 "is_multi_season": bool(item.get("is_multi_season")),
                 "score": best.get("score"),
@@ -3360,6 +3380,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons: List[List[dict]],
             channel: Any,
             service: str,
+            image: str = "",
+            original_message_id: Optional[int] = None,
+            original_chat_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """绕过 MP 定时队列，向具体通知实例立即发送候选交互消息。"""
         if NotificationHelper is None:
@@ -3383,7 +3406,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 result = service_info.instance.send_msg(
                     title=title,
                     text=html_utils.escape(text),
+                    image=image or None,
                     buttons=buttons,
+                    original_message_id=original_message_id,
+                    original_chat_id=original_chat_id,
                     parse_mode="HTML",
                 )
             except Exception as err:  # noqa: BLE001 - 渠道异常不能中断候选扫描。
@@ -3407,6 +3433,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 mtype=NotificationType.Plugin if NotificationType is not None else None,
                 title=title,
                 text=text,
+                image=image or None,
                 buttons=buttons,
                 save_history=False,
             ))
@@ -3422,6 +3449,378 @@ class TmdbRecognizeEnhancer(_PluginBase):
             and self._config.get("notification_episode_candidates_enabled")
             and self._notification_candidate_target() is not None
         )
+
+    def _notification_collage_path(self, batch_id: str) -> Path:
+        return (
+            self.get_data_path()
+            / "notification-candidate-collages"
+            / f"{batch_id}.jpg"
+        )
+
+    def _notification_collage_url(self, batch_id: str) -> str:
+        query = urlencode({"apikey": str(settings.API_TOKEN or "")})
+        return (
+            f"http://127.0.0.1:{settings.PORT}/api/v1/plugin/"
+            f"{self.__class__.__name__}/notification-enhancer/candidates/"
+            f"collage/{batch_id}?{query}"
+        )
+
+    def get_notification_candidate_collage_api(self, batch_id: str):
+        """供 MoviePilot Telegram 模块读取本地候选海报拼图。"""
+        if not re.fullmatch(r"[0-9a-f]{12}", str(batch_id or "")):
+            return PlainTextResponse("collage not found", status_code=404)
+        path = self._notification_collage_path(batch_id)
+        if not path.exists() or not path.is_file():
+            return PlainTextResponse("collage not found", status_code=404)
+        return FileResponse(path, media_type="image/jpeg", filename=f"{batch_id}.jpg")
+
+    @staticmethod
+    def _sample_candidate_posters(
+            candidates: List[Dict[str, Any]], limit: int,
+    ) -> List[str]:
+        posters = list(dict.fromkeys(
+            str(item.get("poster") or "").strip()
+            for item in candidates
+            if str(item.get("poster") or "").strip()
+        ))
+        if len(posters) <= limit:
+            return posters
+        indexes = [
+            round(index * (len(posters) - 1) / (limit - 1))
+            for index in range(limit)
+        ]
+        return [posters[index] for index in indexes]
+
+    @staticmethod
+    def _fetch_candidate_poster(url: str) -> Optional[bytes]:
+        try:
+            response = RequestUtils(
+                proxies=settings.PROXY,
+                timeout=8,
+            ).get_res(url=url)
+            if response is None or response.status_code != 200:
+                return None
+            return response.content
+        except Exception as err:  # noqa: BLE001 - 单张海报失败不影响通知正文。
+            logger.debug(f"[媒体整理增强] 候选海报下载失败：{url}，{err}")
+            return None
+
+    def _build_notification_candidate_collage(
+            self,
+            *,
+            batch_id: str,
+            candidates: List[Dict[str, Any]],
+    ) -> str:
+        """从批次中均匀抽取最多九张海报，生成 Telegram 总览拼图。"""
+        if Image is None or ImageOps is None:
+            return ""
+        urls = self._sample_candidate_posters(
+            candidates, self.NOTIFICATION_COLLAGE_LIMIT,
+        )
+        if not urls:
+            return ""
+        fetched: Dict[str, bytes] = {}
+        with ThreadPoolExecutor(max_workers=min(6, len(urls))) as executor:
+            futures = {
+                executor.submit(self._fetch_candidate_poster, url): url
+                for url in urls
+            }
+            for future in as_completed(futures):
+                content = future.result()
+                if content:
+                    fetched[futures[future]] = content
+        posters = []
+        for url in urls:
+            content = fetched.get(url)
+            if not content:
+                continue
+            try:
+                posters.append(Image.open(BytesIO(content)).convert("RGB"))
+            except Exception as err:  # noqa: BLE001 - 损坏图片只跳过该张。
+                logger.debug(f"[媒体整理增强] 候选海报解码失败：{url}，{err}")
+        if not posters:
+            return ""
+
+        columns = min(3, len(posters))
+        rows = (len(posters) + columns - 1) // columns
+        tile_width, tile_height, gap = 240, 360, 8
+        canvas = Image.new(
+            "RGB",
+            (
+                columns * tile_width + (columns + 1) * gap,
+                rows * tile_height + (rows + 1) * gap,
+            ),
+            (28, 25, 38),
+        )
+        resampling = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
+        for index, poster in enumerate(posters):
+            tile = ImageOps.fit(
+                poster,
+                (tile_width, tile_height),
+                method=resampling,
+                centering=(0.5, 0.5),
+            )
+            x = gap + (index % columns) * (tile_width + gap)
+            y = gap + (index // columns) * (tile_height + gap)
+            canvas.paste(tile, (x, y))
+
+        path = self._notification_collage_path(batch_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        canvas.save(path, format="JPEG", quality=88, optimize=True)
+        cutoff = time.time() - 7 * 24 * 3600
+        for old_path in path.parent.glob("*.jpg"):
+            try:
+                if old_path != path and old_path.stat().st_mtime < cutoff:
+                    old_path.unlink(missing_ok=True)
+            except OSError:
+                continue
+        return self._notification_collage_url(batch_id)
+
+    def _notification_candidate_callback(
+            self, action: str, batch_id: str, page: int = 0,
+    ) -> str:
+        value = (
+            f"[PLUGIN]{self.__class__.__name__}|"
+            f"nc:{action}:{batch_id}:{max(0, int(page))}"
+        )
+        if len(value.encode("utf-8")) > 64:
+            raise ValueError("Telegram callback_data exceeds 64 bytes")
+        return value
+
+    @staticmethod
+    def _notification_candidate_text(value: Any, limit: int) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        return text if len(text) <= limit else f"{text[:max(1, limit - 1)]}…"
+
+    @staticmethod
+    def _notification_batch_pending_items(
+            batch: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        handled = set(str(value) for value in batch.get("handled_ids") or [])
+        return [
+            item for item in batch.get("items") or []
+            if str(item.get("id") or "") not in handled
+        ]
+
+    def _render_notification_candidate_summary(
+            self,
+            *,
+            batch_id: str,
+            batch: Dict[str, Any],
+            notice: str = "",
+    ) -> Dict[str, Any]:
+        pending = self._notification_batch_pending_items(batch)
+        candidate_type = str(batch.get("candidate_type") or "ready")
+        quarter = str(batch.get("quarter") or "")
+        total = len(batch.get("items") or [])
+        handled = total - len(pending)
+        page_count = max(
+            1,
+            (len(pending) + self.NOTIFICATION_CANDIDATE_PAGE_SIZE - 1)
+            // self.NOTIFICATION_CANDIDATE_PAGE_SIZE,
+        )
+        if not pending:
+            return {
+                "title": f"批次处理完成 · {quarter}",
+                "text": notice or f"本批次 {total} 部候选均已处理。",
+                "buttons": [],
+                "image": str(batch.get("collage") or ""),
+            }
+
+        kind_text = "集数偏移候选" if candidate_type == "ready" else "扫描失败候选"
+        lines = [
+            f"{kind_text} {len(pending)} 部",
+            f"已处理 {handled} / {total} · 共 {page_count} 页",
+            (
+                f"来源：{'实时新增' if batch.get('realtime') else '计划批次'}"
+                f" · {quarter}"
+            ),
+        ]
+        if notice:
+            lines.insert(0, notice)
+        lines.append("进入详情页可查看番剧信息并处理当页；也可直接处理整批。")
+        buttons = [[{
+            "text": f"查看详情 1/{page_count}",
+            "callback_data": self._notification_candidate_callback(
+                "p", batch_id, 0,
+            ),
+        }]]
+        if candidate_type == "ready":
+            buttons.extend([
+                [
+                    {
+                        "text": "整批按 TMDB 默认加入",
+                        "callback_data": self._notification_candidate_callback(
+                            "D", batch_id,
+                        ),
+                    },
+                    {
+                        "text": "整批优先剧集组加入",
+                        "callback_data": self._notification_candidate_callback(
+                            "G", batch_id,
+                        ),
+                    },
+                ],
+                [{
+                    "text": "忽略整批",
+                    "callback_data": self._notification_candidate_callback(
+                        "I", batch_id,
+                    ),
+                }],
+            ])
+        else:
+            buttons.append([
+                {
+                    "text": "整批重新扫描",
+                    "callback_data": self._notification_candidate_callback(
+                        "R", batch_id,
+                    ),
+                },
+                {
+                    "text": "忽略整批",
+                    "callback_data": self._notification_candidate_callback(
+                        "I", batch_id,
+                    ),
+                },
+            ])
+        return {
+            "title": f"待审批 · {quarter} · {len(pending)} 部",
+            "text": "\n".join(lines),
+            "buttons": buttons,
+            "image": str(batch.get("collage") or ""),
+        }
+
+    def _render_notification_candidate_page(
+            self,
+            *,
+            batch_id: str,
+            batch: Dict[str, Any],
+            page: int,
+            notice: str = "",
+    ) -> Dict[str, Any]:
+        pending = self._notification_batch_pending_items(batch)
+        if not pending:
+            return self._render_notification_candidate_summary(
+                batch_id=batch_id, batch=batch, notice=notice,
+            )
+        page_size = self.NOTIFICATION_CANDIDATE_PAGE_SIZE
+        page_count = max(1, (len(pending) + page_size - 1) // page_size)
+        page = min(max(0, page), page_count - 1)
+        page_items = pending[page * page_size:(page + 1) * page_size]
+        candidate_type = str(batch.get("candidate_type") or "ready")
+        lines = [notice] if notice else []
+        for offset, item in enumerate(page_items, start=page * page_size + 1):
+            title = self._notification_candidate_text(
+                item.get("title") or item.get("original_title") or "未命名",
+                80,
+            )
+            original = self._notification_candidate_text(
+                item.get("original_title"), 90,
+            )
+            lines.append(f"{offset}. {title}")
+            if original and original.casefold() != title.casefold():
+                lines.append(f"   原名：{original}")
+            if candidate_type == "ready":
+                score = item.get("score")
+                evidence = f"TMDB {item.get('tmdb_id')}"
+                if score is not None:
+                    evidence += f" · 匹配 {score} 分"
+                lines.append(f"   {evidence}")
+            else:
+                lines.append(
+                    "   原因："
+                    f"{self._notification_candidate_text(
+                        item.get('scan_error') or '未匹配到可信 TMDB 候选',
+                        120,
+                    )}"
+                )
+            facts = [
+                str(item.get("platform") or "").replace("_", " "),
+                str(item.get("date") or ""),
+            ]
+            if self._safe_int(item.get("episode_count"), 0):
+                facts.append(f"{self._safe_int(item.get('episode_count'), 0)} 集")
+            if item.get("has_prequel"):
+                facts.append("续作")
+            if item.get("is_multi_season"):
+                facts.append("多季")
+            lines.append(f"   {' · '.join(value for value in facts if value)}")
+        lines.append(f"第 {page + 1} / {page_count} 页 · 尚待处理 {len(pending)} 部")
+
+        nav = []
+        if page > 0:
+            nav.append({
+                "text": "上一页",
+                "callback_data": self._notification_candidate_callback(
+                    "p", batch_id, page - 1,
+                ),
+            })
+        nav.append({
+            "text": "返回总览",
+            "callback_data": self._notification_candidate_callback(
+                "o", batch_id,
+            ),
+        })
+        if page + 1 < page_count:
+            nav.append({
+                "text": "下一页",
+                "callback_data": self._notification_candidate_callback(
+                    "p", batch_id, page + 1,
+                ),
+            })
+        buttons = [nav]
+        if candidate_type == "ready":
+            buttons.extend([
+                [
+                    {
+                        "text": "本页按 TMDB 默认加入",
+                        "callback_data": self._notification_candidate_callback(
+                            "d", batch_id, page,
+                        ),
+                    },
+                    {
+                        "text": "本页优先剧集组加入",
+                        "callback_data": self._notification_candidate_callback(
+                            "g", batch_id, page,
+                        ),
+                    },
+                ],
+                [{
+                    "text": "忽略本页",
+                    "callback_data": self._notification_candidate_callback(
+                        "i", batch_id, page,
+                    ),
+                }],
+            ])
+        else:
+            buttons.append([
+                {
+                    "text": "重新扫描本页",
+                    "callback_data": self._notification_candidate_callback(
+                        "r", batch_id, page,
+                    ),
+                },
+                {
+                    "text": "忽略本页",
+                    "callback_data": self._notification_candidate_callback(
+                        "i", batch_id, page,
+                    ),
+                },
+            ])
+        image = str(page_items[0].get("poster") or batch.get("collage") or "")
+        return {
+            "title": (
+                f"{'候选详情' if candidate_type == 'ready' else '失败详情'}"
+                f" · {page + 1}/{page_count}"
+            ),
+            "text": "\n".join(lines),
+            "buttons": buttons,
+            "image": image,
+            "page_item_ids": [
+                str(item.get("id")) for item in page_items if item.get("id")
+            ],
+            "page": page,
+        }
 
     @staticmethod
     def _candidate_seen_key(candidate: Dict[str, Any]) -> str:
@@ -3451,6 +3850,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidate_type: str,
             candidates: List[Dict[str, Any]],
             batch_id: str = "",
+            collage: str = "",
+            delivery: Optional[Dict[str, Any]] = None,
+            realtime: bool = False,
     ) -> str:
         item_ids = [str(item.get("id")) for item in candidates if item.get("id")]
         batch_id = batch_id or self._new_notification_candidate_batch_id(
@@ -3464,7 +3866,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "quarter": quarter,
             "candidate_type": candidate_type,
             "item_ids": item_ids,
+            "items": deepcopy(candidates),
+            "handled_ids": [],
             "preference": self._config.get("notification_candidate_preference"),
+            "collage": collage,
+            "message_id": (delivery or {}).get("message_id"),
+            "chat_id": (delivery or {}).get("chat_id"),
+            "realtime": bool(realtime),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         approvals["batches"] = batches
@@ -3506,68 +3914,33 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidate_type=candidate_type,
             candidates=candidates,
         )
-        single = len(candidates) == 1
-        if candidate_type == "failed":
-            preview = "\n".join(
-                f"• {item.get('title')}：{item.get('scan_error') or '未匹配到 TMDB'}"
-                for item in candidates[:8]
-            )
-            title = (
-                f"扫描失败：{candidates[0].get('title')}"
-                if single else f"待处理：{quarter} 扫描失败 {len(candidates)} 部"
-            )
-            buttons = [[
-                {
-                    "text": "重新扫描" if single else "批量重新扫描",
-                    "callback_data": (
-                        f"[PLUGIN]{self.__class__.__name__}|nc:r:{batch_id}"
-                    ),
-                },
-                {
-                    "text": "忽略",
-                    "callback_data": (
-                        f"[PLUGIN]{self.__class__.__name__}|nc:i:{batch_id}"
-                    ),
-                },
-            ]]
-        else:
-            preview = "\n".join(
-                f"• {item.get('title')} · TMDB {item.get('tmdb_id')}"
-                for item in candidates[:8]
-            )
-            title = (
-                f"新增候选：{candidates[0].get('title')}"
-                if single else f"待审批：{quarter} 集数偏移候选 {len(candidates)} 部"
-            )
-            buttons = [[
-                {
-                    "text": "按推荐加入" if single else "按推荐批量加入",
-                    "callback_data": (
-                        f"[PLUGIN]{self.__class__.__name__}|nc:a:{batch_id}"
-                    ),
-                },
-                {
-                    "text": "忽略",
-                    "callback_data": (
-                        f"[PLUGIN]{self.__class__.__name__}|nc:i:{batch_id}"
-                    ),
-                },
-            ]]
-        if len(candidates) > 8:
-            preview += f"\n…另有 {len(candidates) - 8} 部"
         target = self._notification_candidate_target()
         if not target:
             logger.warning("[媒体整理增强] 未选择可接收“插件”通知的候选专用实例")
             return False
+        collage = self._build_notification_candidate_collage(
+            batch_id=batch_id,
+            candidates=candidates,
+        )
+        pending_batch = {
+            "quarter": quarter,
+            "candidate_type": candidate_type,
+            "items": deepcopy(candidates),
+            "handled_ids": [],
+            "collage": collage,
+            "realtime": bool(realtime),
+        }
+        view = self._render_notification_candidate_summary(
+            batch_id=batch_id,
+            batch=pending_batch,
+        )
         delivery = self._send_candidate_instance_notification(
-            title=title,
-            text=(
-                f"{preview}\n\n来源："
-                f"{'实时新增' if realtime else '计划批次'} · {quarter}"
-            ),
-            buttons=buttons,
+            title=view["title"],
+            text=view["text"],
+            buttons=view["buttons"],
             channel=target[0],
             service=target[1],
+            image=view["image"],
         )
         if not delivery.get("success"):
             logger.error(
@@ -3580,6 +3953,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidate_type=candidate_type,
             candidates=candidates,
             batch_id=batch_id,
+            collage=collage,
+            delivery=delivery,
+            realtime=realtime,
         )
         return True
 
@@ -4166,61 +4542,192 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     @eventmanager.register(getattr(EventType, "MessageAction", "message.action"))
     def on_notification_message_action(self, event: Event) -> None:
-        """处理支持交互按钮的渠道回传的季度候选审批动作。"""
+        """处理季度候选总览、分页导航、当页及整批审批动作。"""
         if not event or not isinstance(event.event_data, dict):
             return
         data = event.event_data
         if str(data.get("plugin_id") or "") != self.__class__.__name__:
             return
         content = str(data.get("text") or "")
-        match = re.fullmatch(r"nc:([ari]):([0-9a-f]{12})", content)
+        match = re.fullmatch(
+            r"nc:([opdgiDGIrR]):([0-9a-f]{12}):(\d{1,3})",
+            content,
+        )
+        if match:
+            action, batch_id, page_text = match.groups()
+            page = self._safe_int(page_text, 0)
+        else:
+            page = 0
+        compact_legacy = re.fullmatch(r"nc:([ari]):([0-9a-f]{12})", content)
         legacy_match = re.fullmatch(
             r"notify-candidates:(approve|retry|ignore):([0-9a-f]{12})",
             content,
         )
-        match = match or legacy_match
         if not match:
-            return
-        action, batch_id = match.groups()
-        action = {
-            "a": "approve",
-            "r": "retry",
-            "i": "ignore",
-        }.get(action, action)
+            old_match = compact_legacy or legacy_match
+            if not old_match:
+                return
+            old_action, batch_id = old_match.groups()
+            action = {
+                "a": "A",
+                "approve": "A",
+                "r": "R",
+                "retry": "R",
+                "i": "I",
+                "ignore": "I",
+            }.get(old_action, "")
+            if not action:
+                return
+
         approvals = self._read_notification_approvals()
         batch = (approvals.get("batches") or {}).get(batch_id) or {}
         quarter = str(batch.get("quarter") or "")
-        item_ids = list(batch.get("item_ids") or [])
-        if not quarter or not item_ids:
+        if not quarter:
             return
-        if action == "ignore":
-            result = self.action_notification_candidates_api({
-                "quarter": quarter, "item_ids": item_ids, "action": "ignore",
-            })
-            message = result.message or "候选已忽略"
-        elif action == "retry":
-            result = self.action_notification_candidates_api({
-                "quarter": quarter, "item_ids": item_ids, "action": "retry",
-            })
-            message = result.message or "候选已开始重新扫描"
-        else:
-            preference = str(batch.get("preference") or "group_preferred")
-            result = self.action_notification_candidates_api({
-                "quarter": quarter,
-                "item_ids": item_ids,
-                "action": "add_group" if preference == "group_preferred" else "add_default",
-            })
-            message = result.message or "候选已加入"
+
+        # 兼容 0.8.9—0.8.13 已经保存但未携带详情快照的审批批次。
+        if not batch.get("items"):
+            snapshot = self._notification_candidate_snapshot(quarter)
+            item_index = {
+                str(item.get("id")): item
+                for item in [*snapshot["ready"], *snapshot["failed"]]
+            }
+            batch["items"] = [
+                item_index[item_id]
+                for item_id in batch.get("item_ids") or []
+                if item_id in item_index
+            ]
+            batch.setdefault("handled_ids", [])
+        if not batch.get("items"):
+            return
+
         target = self._notification_candidate_target()
-        self._send_enhanced_notification(
-            title="集数偏移候选处理完成",
-            text=message,
-            source_notice={
-                "userid": data.get("userid"),
-            },
-            channel=data.get("channel") or (target[0] if target else None),
-            service=str(data.get("source") or (target[1] if target else "")),
+        channel = data.get("channel") or (target[0] if target else None)
+        service = str(data.get("source") or (target[1] if target else ""))
+
+        if action in ("o", "p"):
+            view = (
+                self._render_notification_candidate_summary(
+                    batch_id=batch_id, batch=batch,
+                )
+                if action == "o"
+                else self._render_notification_candidate_page(
+                    batch_id=batch_id, batch=batch, page=page,
+                )
+            )
+            self._send_candidate_instance_notification(
+                title=view["title"],
+                text=view["text"],
+                buttons=view["buttons"],
+                # 编辑时保留初始总览拼图，避免 Telegram 尝试从容器
+                # 127.0.0.1 重新拉取本地图片。
+                image="",
+                channel=channel,
+                service=service,
+                original_message_id=data.get("original_message_id"),
+                original_chat_id=data.get("original_chat_id"),
+            )
+            return
+
+        pending = self._notification_batch_pending_items(batch)
+        if action in ("d", "g", "i", "r"):
+            page_view = self._render_notification_candidate_page(
+                batch_id=batch_id, batch=batch, page=page,
+            )
+            item_ids = page_view.get("page_item_ids") or []
+            page = self._safe_int(page_view.get("page"), 0)
+        else:
+            item_ids = [
+                str(item.get("id")) for item in pending if item.get("id")
+            ]
+        if not item_ids:
+            view = self._render_notification_candidate_summary(
+                batch_id=batch_id, batch=batch, notice="本页没有待处理候选。",
+            )
+            self._send_candidate_instance_notification(
+                title=view["title"],
+                text=view["text"],
+                buttons=view["buttons"],
+                image="",
+                channel=channel,
+                service=service,
+                original_message_id=data.get("original_message_id"),
+                original_chat_id=data.get("original_chat_id"),
+            )
+            return
+
+        if action in ("i", "I"):
+            api_action = "ignore"
+        elif action in ("r", "R"):
+            api_action = "retry"
+        elif action in ("d", "D"):
+            api_action = "add_default"
+        elif action in ("g", "G"):
+            api_action = "add_group"
+        else:  # 旧版“按推荐加入”
+            preference = str(batch.get("preference") or "group_preferred")
+            api_action = (
+                "add_group" if preference == "group_preferred" else "add_default"
+            )
+        result = self.action_notification_candidates_api({
+            "quarter": quarter,
+            "item_ids": item_ids,
+            "action": api_action,
+        })
+        result_data = getattr(result, "data", None)
+        result_data = result_data if isinstance(result_data, dict) else {}
+        succeeded_ids = set(item_ids)
+        if api_action in ("add_default", "add_group"):
+            failed_ids = {
+                str(item.get("id"))
+                for item in result_data.get("operation_failures") or []
+                if item.get("id")
+            }
+            succeeded_ids -= failed_ids
+        if not bool(getattr(result, "success", False)):
+            succeeded_ids.clear()
+        batch["handled_ids"] = list(dict.fromkeys([
+            *(batch.get("handled_ids") or []),
+            *succeeded_ids,
+        ]))
+        batches = (
+            approvals.get("batches")
+            if isinstance(approvals.get("batches"), dict)
+            else {}
         )
+        batches[batch_id] = batch
+        approvals["batches"] = batches
+        self._save_notification_approvals(approvals)
+
+        message = str(getattr(result, "message", "") or "审批动作已处理")
+        if self._notification_batch_pending_items(batch):
+            view = self._render_notification_candidate_page(
+                batch_id=batch_id,
+                batch=batch,
+                page=page,
+                notice=message,
+            )
+        else:
+            view = self._render_notification_candidate_summary(
+                batch_id=batch_id,
+                batch=batch,
+                notice=message,
+            )
+        delivery = self._send_candidate_instance_notification(
+            title=view["title"],
+            text=view["text"],
+            buttons=view["buttons"],
+            image="",
+            channel=channel,
+            service=service,
+            original_message_id=data.get("original_message_id"),
+            original_chat_id=data.get("original_chat_id"),
+        )
+        if not delivery.get("success"):
+            logger.warning(
+                f"[媒体整理增强] 候选审批已执行，但 Telegram 原消息更新失败："
+                f"批次={batch_id}，动作={api_action}"
+            )
 
     def _maybe_enqueue_strm_sync(self, data: Any) -> None:
         """为每个整理完成的视频文件排队媒体信息推送（电影与剧集都适用）。"""

@@ -2,6 +2,7 @@
 
 import importlib.util
 import sys
+from io import BytesIO
 from enum import Enum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -2585,3 +2586,131 @@ def test_catalog_add_prefers_production_but_preserves_existing_target(monkeypatc
     rules[:] = [existing]
     plugin._add_catalog_item_to_rules(item, "group_preferred", rules)
     assert rules[0]["target_type"] == "default"
+
+
+def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    items = [
+        {
+            "id": f"anime:{index}",
+            "title": f"番剧 {index}",
+            "original_title": f"Anime {index}",
+            "tmdb_id": 1000 + index,
+            "score": 90 + index,
+            "platform": "TV",
+            "date": "2026-07-01",
+            "episode_count": 12,
+            "poster": f"https://image/{index}.jpg",
+            "has_prequel": index > 1,
+            "is_multi_season": index > 1,
+        }
+        for index in range(1, 8)
+    ]
+    batch = {
+        "quarter": "2026-Q3",
+        "candidate_type": "ready",
+        "items": items,
+        "handled_ids": [],
+        "collage": "http://127.0.0.1/collage.jpg",
+    }
+
+    summary = plugin._render_notification_candidate_summary(
+        batch_id="123456789abc",
+        batch=batch,
+    )
+    second_page = plugin._render_notification_candidate_page(
+        batch_id="123456789abc",
+        batch=batch,
+        page=1,
+    )
+
+    assert "7 部" in summary["title"]
+    assert "共 3 页" in summary["text"]
+    assert summary["image"].endswith("collage.jpg")
+    assert second_page["page_item_ids"] == ["anime:4", "anime:5", "anime:6"]
+    assert "番剧 4" in second_page["text"]
+    callbacks = [
+        button["callback_data"]
+        for row in [*summary["buttons"], *second_page["buttons"]]
+        for button in row
+    ]
+    assert callbacks
+    assert all(len(value.encode("utf-8")) <= 64 for value in callbacks)
+
+
+def test_notification_candidate_page_action_only_handles_current_page(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    items = [
+        {"id": f"anime:{index}", "title": f"番剧 {index}", "tmdb_id": 1000 + index}
+        for index in range(1, 6)
+    ]
+    plugin._data[plugin.DATA_KEY_NOTIFICATION_APPROVALS] = {
+        "batches": {
+            "123456789abc": {
+                "quarter": "2026-Q3",
+                "candidate_type": "ready",
+                "items": items,
+                "item_ids": [item["id"] for item in items],
+                "handled_ids": [],
+                "preference": "group_preferred",
+            }
+        }
+    }
+    plugin._notification_candidate_target = Mock(return_value=("telegram", "候选通知"))
+    plugin._send_candidate_instance_notification = Mock(return_value={"success": True})
+    plugin.action_notification_candidates_api = Mock(return_value=module.schemas.Response(
+        success=True,
+        message="已加入 2 条，失败 0 条",
+        data={"operation_failures": []},
+    ))
+
+    plugin.on_notification_message_action(SimpleNamespace(event_data={
+        "plugin_id": plugin.__class__.__name__,
+        "text": "nc:d:123456789abc:1",
+        "channel": "telegram",
+        "source": "候选通知",
+        "original_message_id": 123,
+        "original_chat_id": "456",
+    }))
+
+    payload = plugin.action_notification_candidates_api.call_args.args[0]
+    assert payload["action"] == "add_default"
+    assert payload["item_ids"] == ["anime:4", "anime:5"]
+    stored = plugin._data[plugin.DATA_KEY_NOTIFICATION_APPROVALS]["batches"][
+        "123456789abc"
+    ]
+    assert set(stored["handled_ids"]) == {"anime:4", "anime:5"}
+    assert plugin._send_candidate_instance_notification.call_args.kwargs[
+        "original_message_id"
+    ] == 123
+
+
+def test_notification_candidate_collage_uses_local_versioned_endpoint(
+        monkeypatch, tmp_path,
+):
+    module = _load_plugin(monkeypatch)
+    if module.Image is None:
+        return
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin.get_data_path = lambda: tmp_path
+    module.settings.PORT = 3000
+    module.settings.API_TOKEN = "test-token"
+    image = module.Image.new("RGB", (100, 150), (120, 80, 180))
+    content = BytesIO()
+    image.save(content, format="JPEG")
+    plugin._fetch_candidate_poster = Mock(return_value=content.getvalue())
+
+    url = plugin._build_notification_candidate_collage(
+        batch_id="123456789abc",
+        candidates=[
+            {"poster": f"https://image/{index}.jpg"} for index in range(5)
+        ],
+    )
+
+    path = plugin._notification_collage_path("123456789abc")
+    assert path.exists()
+    assert "notification-enhancer/candidates/collage/123456789abc" in url
+    assert "apikey=test-token" in url
+    assert module.Image.open(path).size == (752, 744)
