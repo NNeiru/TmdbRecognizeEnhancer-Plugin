@@ -114,6 +114,9 @@ async function load() {
     data.value = unwrapResponse(
       await props.api.get(`${props.pluginBase}/notification-enhancer`),
     ) || data.value
+    if (/^\d{4}-Q[1-4]$/.test(data.value.config?.notification_candidate_quarter || '')) {
+      selectedQuarter.value = data.value.config.notification_candidate_quarter
+    }
   } catch (err) {
     error.value = err?.message || '通知模块加载失败'
   } finally {
@@ -227,6 +230,44 @@ async function candidateAction(action, candidateType = 'ready') {
   }
 }
 
+function candidateFilterPayload() {
+  return {
+    notification_candidate_quarter: selectedQuarter.value,
+    notification_candidate_region: config.value.notification_candidate_region,
+    notification_candidate_platforms: config.value.notification_candidate_platforms,
+    notification_candidate_sequel_only: config.value.notification_candidate_sequel_only,
+    notification_candidate_preference: config.value.notification_candidate_preference,
+  }
+}
+
+let candidateFilterSaveQueue = Promise.resolve()
+let candidateFilterRevision = 0
+
+function persistCandidateFilters() {
+  const payload = candidateFilterPayload()
+  candidateFilterSaveQueue = candidateFilterSaveQueue
+    .catch(() => {})
+    .then(async () => {
+      await props.api.post(
+        `${props.pluginBase}/notification-enhancer/config`,
+        payload,
+      )
+      emit('config-saved', { ...config.value, ...payload })
+    })
+  return candidateFilterSaveQueue
+}
+
+async function applyCandidateFilters() {
+  const revision = ++candidateFilterRevision
+  try {
+    await persistCandidateFilters()
+    if (revision !== candidateFilterRevision) return
+    await queryCandidates()
+  } catch (err) {
+    error.value = err?.message || '筛选条件保存失败'
+  }
+}
+
 function openFailedCandidate(item) {
   manualCandidateItem.value = item
   manualCandidateTmdbId.value = ''
@@ -279,9 +320,15 @@ async function sendCandidateBatch() {
   actionLoading.value = true
   error.value = ''
   try {
+    await persistCandidateFilters()
     const result = unwrapResponse(await props.api.post(
       `${props.pluginBase}/notification-enhancer/candidates/batch/send`,
-      { quarter: selectedQuarter.value },
+      {
+        quarter: selectedQuarter.value,
+        region: config.value.notification_candidate_region,
+        platforms: config.value.notification_candidate_platforms,
+        sequel_only: config.value.notification_candidate_sequel_only,
+      },
     )) || {}
     if (result.snapshot) data.value.candidates = result.snapshot
     if (result.candidate_schedule) data.value.candidate_schedule = result.candidate_schedule
@@ -395,7 +442,6 @@ onBeforeUnmount(() => {
       <div class="option-row mt-3">
         <VSwitch v-model="config.notification_success_enabled" color="success" hide-details label="增强成功通知" />
         <VSwitch v-model="config.notification_failure_enabled" color="warning" hide-details label="处理失败通知" />
-        <VSwitch v-model="config.notification_include_paths" color="primary" hide-details label="附带源与目标路径" />
         <VSwitch v-model="config.notification_passthrough_manual" color="primary" hide-details label="接管时转发其它人工通知" />
       </div>
       <div class="notification-route-grid">
@@ -420,6 +466,65 @@ onBeforeUnmount(() => {
           hide-details
         />
       </div>
+      <VExpansionPanels variant="accordion" class="notification-template-panels">
+        <VExpansionPanel>
+          <VExpansionPanelTitle>
+            <div class="template-panel-title">
+              <VIcon icon="mdi-code-braces" color="primary" />
+              <span>
+                <strong>通知样式与 Jinja2 模板</strong>
+                <small>默认原样使用 MoviePilot 已渲染的通知；只有模板显式引用路径时才会加入路径。</small>
+              </span>
+            </div>
+          </VExpansionPanelTitle>
+          <VExpansionPanelText>
+            <VAlert type="info" variant="tonal" density="compact" class="mb-3">
+              MoviePilot 的系统通知模板会先完成渲染，<code>original_title</code> 与
+              <code>original_text</code> 就是其最终结果。可用：
+              <code>scene</code>、<code>category_label</code>、<code>reason</code>、
+              <code>source_path</code>、<code>target_path</code>、<code>current_time</code>。
+            </VAlert>
+            <div class="notification-template-grid">
+              <div class="notification-template-card success">
+                <h4><VIcon icon="mdi-check-circle-outline" /> 入库成功</h4>
+                <VTextField
+                  v-model="config.notification_success_title_template"
+                  label="标题模板"
+                  variant="outlined"
+                  density="compact"
+                  hide-details
+                />
+                <VTextarea
+                  v-model="config.notification_success_text_template"
+                  label="正文模板"
+                  variant="outlined"
+                  rows="4"
+                  auto-grow
+                  hide-details
+                />
+              </div>
+              <div class="notification-template-card failure">
+                <h4><VIcon icon="mdi-alert-circle-outline" /> 入库失败</h4>
+                <VTextField
+                  v-model="config.notification_failure_title_template"
+                  label="标题模板"
+                  variant="outlined"
+                  density="compact"
+                  hide-details
+                />
+                <VTextarea
+                  v-model="config.notification_failure_text_template"
+                  label="正文模板"
+                  variant="outlined"
+                  rows="4"
+                  auto-grow
+                  hide-details
+                />
+              </div>
+            </div>
+          </VExpansionPanelText>
+        </VExpansionPanel>
+      </VExpansionPanels>
     </section>
 
     <section class="section-shell">
@@ -542,21 +647,21 @@ onBeforeUnmount(() => {
         尚未启用“插件”通知类型，因此暂不可选择。
       </VAlert>
       <div class="candidate-controls">
-        <VSelect v-model="selectedQuarter" :items="quarterItems" label="季度" density="comfortable" variant="outlined" hide-details @update:model-value="queryCandidates" />
+        <VSelect v-model="selectedQuarter" :items="quarterItems" label="季度" density="comfortable" variant="outlined" hide-details @update:model-value="applyCandidateFilters" />
         <VSelect v-model="config.notification_candidate_region" :items="[
           { title: '日漫', value: 'japan' }, { title: '国漫', value: 'china' },
           { title: '海外动画', value: 'other' }, { title: '全部地区', value: 'all' },
-        ]" label="地区" density="comfortable" variant="outlined" hide-details />
+        ]" label="地区" density="comfortable" variant="outlined" hide-details @update:model-value="applyCandidateFilters" />
         <VSelect v-model="config.notification_candidate_preference" :items="[
           { title: '优先剧集组', value: 'group_preferred' },
           { title: 'TMDB 默认编集', value: 'default' },
-        ]" label="通知一键审批目标" density="comfortable" variant="outlined" hide-details />
-        <VBtn variant="tonal" prepend-icon="mdi-refresh" :loading="candidateLoading" @click="queryCandidates">刷新</VBtn>
+        ]" label="通知一键审批目标" density="comfortable" variant="outlined" hide-details @update:model-value="persistCandidateFilters" />
+        <VBtn variant="tonal" prepend-icon="mdi-refresh" :loading="candidateLoading" @click="applyCandidateFilters">刷新</VBtn>
         <VBtn color="primary" variant="tonal" prepend-icon="mdi-send-clock" :loading="actionLoading" @click="sendCandidateBatch">立即生成批次</VBtn>
       </div>
       <div class="option-row compact">
-        <VSwitch v-model="config.notification_candidate_sequel_only" color="primary" hide-details label="仅续作或多季作品" />
-        <VSelect v-model="config.notification_candidate_platforms" :items="['TV', 'TV SHORT', 'ONA', 'OVA']" multiple chips closable-chips label="载体" density="compact" variant="outlined" hide-details class="platform-select" />
+        <VSwitch v-model="config.notification_candidate_sequel_only" color="primary" hide-details label="仅续作或多季作品" @update:model-value="applyCandidateFilters" />
+        <VSelect v-model="config.notification_candidate_platforms" :items="['TV', 'TV SHORT', 'ONA', 'OVA']" multiple chips closable-chips label="载体" density="compact" variant="outlined" hide-details class="platform-select" @update:model-value="applyCandidateFilters" />
       </div>
       <div v-if="readyCandidates.length" class="candidate-list">
         <div class="candidate-toolbar">
@@ -849,8 +954,48 @@ onBeforeUnmount(() => {
   color: rgb(var(--v-theme-error));
   font-size: .72rem;
 }
+.notification-template-panels {
+  margin-top: 14px;
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  border-radius: 14px;
+  overflow: hidden;
+}
+.template-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.template-panel-title span {
+  display: grid;
+  gap: 2px;
+}
+.template-panel-title small {
+  color: rgba(var(--v-theme-on-surface), .6);
+  font-weight: 400;
+}
+.notification-template-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.notification-template-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  border-radius: 12px;
+  background: rgba(var(--v-theme-on-surface), .025);
+}
+.notification-template-card h4 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+}
+.notification-template-card.success h4 { color: rgb(var(--v-theme-success)); }
+.notification-template-card.failure h4 { color: rgb(var(--v-theme-warning)); }
 @media (max-width: 900px) {
-  .mode-grid, .policy-grid, .candidate-items, .delivery-grid, .notification-route-grid { grid-template-columns: 1fr; }
+  .mode-grid, .policy-grid, .candidate-items, .delivery-grid, .notification-route-grid, .notification-template-grid { grid-template-columns: 1fr; }
   .candidate-controls { grid-template-columns: 1fr 1fr; }
   .candidate-toolbar { align-items: flex-start; flex-wrap: wrap; }
   .candidate-actions { flex: 1 0 100%; justify-content: flex-start; padding-left: 34px; }

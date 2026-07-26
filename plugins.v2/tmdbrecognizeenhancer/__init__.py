@@ -21,6 +21,7 @@ from urllib.parse import unquote, urlencode, urlparse
 
 from apscheduler.triggers.cron import CronTrigger
 from fastapi import Body
+from jinja2 import Template
 from starlette.responses import FileResponse, PlainTextResponse
 
 from app import schemas
@@ -114,7 +115,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.34"
+    plugin_version = "0.8.35"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -238,6 +239,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_failure_enabled": True,
         "notification_plugin_enabled": True,
         "notification_include_paths": True,
+        "notification_success_title_template": "{{ original_title }}",
+        "notification_success_text_template": "{{ original_text }}",
+        "notification_failure_title_template": "{{ original_title }}",
+        "notification_failure_text_template": "{{ original_text }}",
         "notification_passthrough_manual": True,
         "notification_record_limit": 200,
         "notification_failure_policies": {
@@ -252,6 +257,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_candidate_batch_frequency": "monthly",
         "notification_candidate_batch_hour": 9,
         "notification_candidate_realtime_enabled": True,
+        "notification_candidate_quarter": "",
         "notification_candidate_region": "japan",
         "notification_candidate_platforms": ["TV", "TV SHORT"],
         "notification_candidate_sequel_only": True,
@@ -291,6 +297,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_failure_enabled",
         "notification_plugin_enabled",
         "notification_include_paths",
+        "notification_success_title_template",
+        "notification_success_text_template",
+        "notification_failure_title_template",
+        "notification_failure_text_template",
         "notification_passthrough_manual",
         "notification_record_limit",
         "notification_failure_policies",
@@ -303,6 +313,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_candidate_batch_frequency",
         "notification_candidate_batch_hour",
         "notification_candidate_realtime_enabled",
+        "notification_candidate_quarter",
         "notification_candidate_region",
         "notification_candidate_platforms",
         "notification_candidate_sequel_only",
@@ -3268,13 +3279,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             or self._config.get("notification_candidate_region")
             or "japan"
         )
+        platform_values = (
+            options.get("platforms")
+            if "platforms" in options and options.get("platforms") is not None
+            else self._config.get("notification_candidate_platforms")
+        )
         platforms = set(
             str(value).strip().upper()
-            for value in (
-                options.get("platforms")
-                or self._config.get("notification_candidate_platforms")
-                or []
-            )
+            for value in (platform_values or [])
         )
         sequel_only = (
             bool(options.get("sequel_only"))
@@ -5765,6 +5777,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             force: bool,
             now: Optional[datetime] = None,
             quarter_override: str = "",
+            candidate_options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         now = now or datetime.now()
         frequency = str(
@@ -5784,7 +5797,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
             if re.fullmatch(r"\d{4}-Q[1-4]", quarter_override or "")
             else f"{now.year}-Q{((now.month - 1) // 3) + 1}"
         )
-        snapshot = self._notification_candidate_snapshot(quarter)
+        snapshot = self._notification_candidate_snapshot(
+            quarter,
+            candidate_options,
+        )
         ready_sent = False
         failed_sent = False
         if self._notification_candidate_delivery_active():
@@ -5825,6 +5841,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self, payload: dict = Body(default={}),
     ) -> schemas.Response:
         """立即生成一批，用于验证筛选和专用通知实例。"""
+        payload = payload or {}
         if not self._notification_candidate_delivery_active():
             return schemas.Response(
                 success=False,
@@ -5832,8 +5849,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
             )
         result = self._send_notification_candidate_batch(
             force=True,
-            quarter_override=str((payload or {}).get("quarter") or ""),
+            quarter_override=str(payload.get("quarter") or ""),
+            candidate_options={
+                "region": payload.get("region"),
+                "platforms": payload.get("platforms"),
+                "sequel_only": payload.get("sequel_only"),
+            },
         )
+        response_options = {
+            "region": payload.get("region"),
+            "platforms": payload.get("platforms"),
+            "sequel_only": payload.get("sequel_only"),
+        }
         delivery_failed = self._safe_int(result.get("delivery_failed"), 0)
         if delivery_failed:
             return schemas.Response(
@@ -5845,7 +5872,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 data={
                     **result,
                     "snapshot": self._notification_candidate_snapshot(
-                        result["quarter"]
+                        result["quarter"],
+                        response_options,
                     ),
                     "candidate_schedule": self._notification_candidate_schedule_status(),
                 },
@@ -5859,7 +5887,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             data={
                 **result,
                 "snapshot": self._notification_candidate_snapshot(
-                    result["quarter"]
+                    result["quarter"],
+                    response_options,
                 ),
                 "candidate_schedule": self._notification_candidate_schedule_status(),
             },
@@ -6448,6 +6477,25 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 matches = correlated
         return max(matches, key=lambda value: value.get("created_ts") or 0)
 
+    @staticmethod
+    def _render_ingest_notification_template(
+            template_text: Any,
+            template_context: Dict[str, Any],
+            fallback: str,
+            *,
+            allow_empty: bool = False,
+    ) -> str:
+        """渲染用户通知模板；语法错误时保留 MP 已渲染的原通知。"""
+        source = str(template_text or "")
+        if not source:
+            return "" if allow_empty else fallback
+        try:
+            rendered = Template(source).render(**template_context).strip()
+            return rendered if rendered or allow_empty else fallback
+        except Exception as err:  # noqa: BLE001 - 模板错误不能吞掉入库通知。
+            logger.warning(f"[媒体整理增强] 入库通知 Jinja2 模板渲染失败：{err}")
+            return fallback
+
     def _handle_notice_message(self, event: Event) -> None:
         if not self._notification_active() or not event or not event.event_data:
             return
@@ -6491,21 +6539,37 @@ class TmdbRecognizeEnhancer(_PluginBase):
             policy = normalize_failure_policies(
                 self._config.get("notification_failure_policies")
             ).get(category["key"], "notify")
-            enhanced_title = f"⚠ 入库失败 · {category['label']}"
-            enhanced_text = f"{title}\n原因：{reason or '未知'}"
         else:
-            enhanced_title = f"✅ {title.replace('！', '').replace('!', '')}"
-            enhanced_text = original_text
-        if self._config.get("notification_include_paths") and context:
-            path_lines = []
-            if context.get("source_path"):
-                path_lines.append(f"来源：{context['source_path']}")
-            if context.get("target_path"):
-                path_lines.append(f"目标：{context['target_path']}")
-            if path_lines:
-                enhanced_text = "\n".join(
-                    value for value in (enhanced_text, *path_lines) if value
-                )
+            reason = ""
+        template_context = {
+            "original_title": title,
+            "original_text": original_text,
+            # title/text 是便于书写的短别名，均指 MP 原生模板已经渲染后的结果。
+            "title": title,
+            "text": original_text,
+            "scene": scene,
+            "category": str(category.get("key") or ""),
+            "category_label": str(category.get("label") or ""),
+            "reason": str(reason or ""),
+            "source_path": str(context.get("source_path") or ""),
+            "target_path": str(context.get("target_path") or ""),
+            "history_id": context.get("history_id") or "",
+            "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        template_prefix = (
+            "notification_failure" if scene == "failure"
+            else "notification_success"
+        )
+        enhanced_title = self._render_ingest_notification_template(
+            self._config.get(f"{template_prefix}_title_template"),
+            template_context,
+            title,
+        )
+        enhanced_text = self._render_ingest_notification_template(
+            self._config.get(f"{template_prefix}_text_template"),
+            template_context,
+            original_text,
+        )
         action = "observed"
         if scene == "failure" and policy == "silent":
             action = "suppressed"
@@ -6898,6 +6962,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             *(batch.get("handled_ids") or []),
             *succeeded_ids,
         ]))
+        # action_notification_candidates_api 可能刚刚写入 ignored/ignored_keys。
+        # 必须重新读取后再保存批次进度，不能用回调开始时的旧快照覆盖忽略状态。
+        approvals = self._read_notification_approvals()
         batches = (
             approvals.get("batches")
             if isinstance(approvals.get("batches"), dict)
@@ -10737,6 +10804,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged["notification_failure_service"] = str(
             merged.get("notification_failure_service") or ""
         ).strip()[:160]
+        for key in (
+            "notification_success_title_template",
+            "notification_success_text_template",
+            "notification_failure_title_template",
+            "notification_failure_text_template",
+        ):
+            fallback = str(self.DEFAULT_CONFIG.get(key) or "")
+            value = merged.get(key)
+            merged[key] = (
+                str(value)[:12000]
+                if value is not None and str(value).strip()
+                else fallback
+            )
         merged["notification_candidate_service"] = str(
             merged.get("notification_candidate_service") or ""
         ).strip()[:160]
@@ -10757,6 +10837,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidate_frequency
             if candidate_frequency in ("monthly", "quarterly")
             else "monthly"
+        )
+        candidate_quarter = str(
+            merged.get("notification_candidate_quarter") or ""
+        ).strip().upper()
+        merged["notification_candidate_quarter"] = (
+            candidate_quarter
+            if re.fullmatch(r"\d{4}-Q[1-4]", candidate_quarter)
+            else ""
         )
         candidate_region = str(
             merged.get("notification_candidate_region") or "japan"

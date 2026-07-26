@@ -3768,6 +3768,117 @@ def test_ignored_candidate_stays_ignored_after_catalog_id_changes(monkeypatch):
     assert snapshot == {"ready": [], "failed": []}
 
 
+def test_notification_batch_uses_submitted_candidate_filters(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._notification_candidate_delivery_active = Mock(return_value=True)
+    plugin._send_notification_candidate_batch = Mock(return_value={
+        "sent": True,
+        "delivery_failed": 0,
+        "quarter": "2026-Q3",
+        "ready": 2,
+        "failed": 0,
+    })
+    plugin._notification_candidate_snapshot = Mock(return_value={
+        "ready": [],
+        "failed": [],
+    })
+    plugin._notification_candidate_schedule_status = Mock(return_value={})
+
+    response = plugin.send_notification_candidate_batch_api({
+        "quarter": "2026-Q3",
+        "region": "all",
+        "platforms": ["ONA"],
+        "sequel_only": False,
+    })
+
+    assert response.success is True
+    call = plugin._send_notification_candidate_batch.call_args.kwargs
+    assert call["quarter_override"] == "2026-Q3"
+    assert call["candidate_options"] == {
+        "region": "all",
+        "platforms": ["ONA"],
+        "sequel_only": False,
+    }
+    plugin._notification_candidate_snapshot.assert_called_with(
+        "2026-Q3",
+        {
+            "region": "all",
+            "platforms": ["ONA"],
+            "sequel_only": False,
+        },
+    )
+
+
+def test_telegram_ignore_is_not_overwritten_by_stale_batch_state(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    item = {
+        "id": "anilist:99",
+        "quarter": "2026-Q3",
+        "anilist_id": 99,
+        "name": "Ignored Anime",
+        "display_name": "已忽略动画",
+        "region": "japan",
+        "platform": "TV",
+        "has_prequel": True,
+        "tmdb_match": {
+            "accepted": True,
+            "best": {
+                "tmdb_id": 999,
+                "name": "Ignored Anime",
+                "media_type": module.MediaType.TV.value,
+            },
+        },
+    }
+    plugin._data[plugin.DATA_KEY_SEASON_CATALOG] = {
+        "2026-Q3": {
+            "items": [dict(item)],
+            "schema_version": plugin.CATALOG_SCHEMA_VERSION,
+        },
+    }
+    plugin._data[plugin.DATA_KEY_NOTIFICATION_APPROVALS] = {
+        "ignored": [],
+        "ignored_keys": [],
+        "batches": {
+            "123456789abc": {
+                "quarter": "2026-Q3",
+                "candidate_type": "ready",
+                "items": [{
+                    "id": "anilist:99",
+                    "title": "已忽略动画",
+                    "tmdb_id": 999,
+                }],
+                "item_ids": ["anilist:99"],
+                "handled_ids": [],
+            },
+        },
+    }
+    plugin._notification_candidate_target = Mock(
+        return_value=("telegram", "集数偏移审批"),
+    )
+    plugin._send_candidate_instance_notification = Mock(
+        return_value={"success": True},
+    )
+
+    plugin.on_notification_message_action(SimpleNamespace(event_data={
+        "plugin_id": plugin.__class__.__name__,
+        "text": "nc:i:123456789abc:0",
+        "channel": "telegram",
+        "source": "集数偏移审批",
+        "original_message_id": 123,
+        "original_chat_id": "456",
+    }))
+
+    approvals = plugin.get_data(plugin.DATA_KEY_NOTIFICATION_APPROVALS)
+    assert "anilist:99" in approvals["ignored"]
+    assert "anilist:99" in approvals["batches"]["123456789abc"]["handled_ids"]
+    assert plugin._notification_candidate_snapshot("2026-Q3") == {
+        "ready": [],
+        "failed": [],
+    }
+
+
 def test_notification_scenes_use_independent_service_instances(monkeypatch):
     module = _load_plugin(monkeypatch)
 
@@ -3910,6 +4021,60 @@ def test_real_success_and_failure_records_use_channel_receipt(monkeypatch):
     assert failure["action"] == "delivery_failed"
     assert failure["details"]["notification_service"] == "入库失败通知"
     assert failure["details"]["delivery_error"] == "Telegram rejected message"
+
+
+def test_ingest_notification_preserves_mp_template_and_only_uses_paths_explicitly(
+        monkeypatch,
+):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_success_enabled": True,
+        # 旧开关即使为真也不能再私自拼接路径。
+        "notification_include_paths": True,
+        "notification_success_title_template": "{{ original_title }}",
+        "notification_success_text_template": "{{ original_text }}",
+    })
+    plugin._notification_active = Mock(return_value=True)
+    plugin._recent_transfer_context = Mock(return_value={
+        "source_path": "/downloads/source.mkv",
+        "target_path": "/media/target.mkv",
+    })
+    plugin._notification_target_kwargs = Mock(return_value={})
+    plugin._send_enhanced_notification = Mock(return_value={
+        "success": True,
+        "direct": False,
+    })
+
+    plugin._handle_notice_message(SimpleNamespace(event_data={
+        "mtype": "整理入库",
+        "title": "MP 模板标题",
+        "text": "MP 模板正文",
+    }))
+
+    sent = plugin._send_enhanced_notification.call_args.kwargs
+    assert sent["title"] == "MP 模板标题"
+    assert sent["text"] == "MP 模板正文"
+    assert "/downloads/source.mkv" not in sent["text"]
+    assert "/media/target.mkv" not in sent["text"]
+
+    plugin._config.update({
+        "notification_success_title_template": "【完成】{{ original_title }}",
+        "notification_success_text_template": (
+            "{{ original_text }}\n目标：{{ target_path }}"
+        ),
+    })
+    plugin._handle_notice_message(SimpleNamespace(event_data={
+        "mtype": "整理入库",
+        "title": "MP 模板标题",
+        "text": "MP 模板正文",
+    }))
+    customized = plugin._send_enhanced_notification.call_args.kwargs
+    assert customized["title"] == "【完成】MP 模板标题"
+    assert customized["text"] == "MP 模板正文\n目标：/media/target.mkv"
 
 
 def test_failed_digest_keeps_pending_records_when_direct_delivery_fails(
