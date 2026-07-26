@@ -2635,6 +2635,13 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     assert "- [ ]" not in summary["rich_markdown"]
     assert "<blockquote>" in summary["rich_text"]
     assert summary["image"].endswith("collage.jpg")
+    summary_blocks = summary["rich_blocks"]
+    assert summary_blocks[0]["type"] == "heading"
+    assert summary_blocks[1]["type"] == "divider"
+    assert summary_blocks[2]["text"]["type"] == "marked"
+    assert "待审批 7 部" in summary_blocks[2]["text"]["text"]
+    assert summary_blocks[3]["type"] == "paragraph"
+    assert summary_blocks[4]["type"] == "footer"
     assert second_page["page_item_ids"] == ["anime:4"]
     assert "番剧 4" in second_page["text"]
     assert second_page["rich_markdown"].startswith("# 番剧 4")
@@ -3009,6 +3016,29 @@ def test_candidate_rich_telegram_edits_blocks_and_replaces_photo(monkeypatch):
         1 for url, _ in captured if url.endswith("/deleteMessage")
     ) == 1
     assert second_result["photo_unique_id"] == "photo-unique-2"
+
+
+def test_candidate_remote_poster_is_normalized_to_two_by_three(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    if module.Image is None:
+        return
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    source = module.Image.new("RGB", (1200, 500), (80, 120, 180))
+    content = BytesIO()
+    source.save(content, format="JPEG")
+    plugin._fetch_candidate_poster = Mock(return_value=content.getvalue())
+
+    prepared = plugin._prepare_candidate_rich_photo(
+        "https://image.example/detail.jpg",
+    )
+    try:
+        assert prepared["success"] is True
+        handle = prepared["handle"]
+        handle.seek(0)
+        with module.Image.open(handle) as normalized:
+            assert normalized.size == (720, 1080)
+    finally:
+        prepared["handle"].close()
 
 
 def test_candidate_rich_telegram_falls_back_when_media_field_is_unsupported(

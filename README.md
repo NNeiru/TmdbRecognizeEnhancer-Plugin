@@ -2,7 +2,7 @@
 
 面向 MoviePilot V2 的媒体识别与整理增强插件。插件通过 MoviePilot 插件接口扩展 TMDB 候选选择、动漫集数偏移、命名规则和 Emby 剧集组联动，不修改 MoviePilot 或 MoviePilot-Rust 源码。
 
-当前版本：`0.8.27`
+当前版本：`0.8.28`
 
 ## 功能概览
 

@@ -113,7 +113,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.27"
+    plugin_version = "0.8.28"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3718,7 +3718,25 @@ class TmdbRecognizeEnhancer(_PluginBase):
         try:
             if Image is not None:
                 with Image.open(BytesIO(content)) as source:
-                    source.convert("RGB").save(
+                    normalized_source = source.convert("RGB")
+                    # 详情页使用 TMDB 等远程单张海报。统一为 2:3 画布，
+                    # 避免横图、方图或不同分辨率令 Rich Message 高度跳动。
+                    # 总览拼图是本地生成文件，保持自身的网格比例。
+                    if (
+                            ImageOps is not None
+                            and image_value.startswith(("https://", "http://"))
+                    ):
+                        resampling = getattr(
+                            getattr(Image, "Resampling", Image),
+                            "LANCZOS",
+                        )
+                        normalized_source = ImageOps.fit(
+                            normalized_source,
+                            (720, 1080),
+                            method=resampling,
+                            centering=(0.5, 0.5),
+                        )
+                    normalized_source.save(
                         prepared,
                         format="JPEG",
                         quality=92,
@@ -4446,6 +4464,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         "text": "批次处理完成",
                     },
                     {
+                        "type": "divider",
+                    },
+                    {
                         "type": "paragraph",
                         "text": {
                             "type": "marked",
@@ -4570,31 +4591,44 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 {
                     "type": "heading",
                     "size": 2,
-                    "text": kind_text,
+                    "text": (
+                        f"{'集数偏移候选' if candidate_type == 'ready' else '扫描失败候选'}"
+                        " · 审批总览"
+                    ),
+                },
+                {
+                    "type": "divider",
+                },
+                {
+                    "type": "paragraph",
+                    "text": {
+                        "type": "marked",
+                        "text": f"{quarter} · 待审批 {len(pending)} 部",
+                    },
                 },
                 {
                     "type": "paragraph",
                     "text": [
                         {
-                            "type": "marked",
-                            "text": f"{quarter} · {len(pending)} 部",
+                            "type": "bold",
+                            "text": "处理进度",
                         },
-                        (
-                            f"　已处理 {handled}/{total}"
-                            f"　·　共 {page_count} 页"
-                        ),
+                        f"　{handled}/{total}",
+                        "　　",
+                        {
+                            "type": "bold",
+                            "text": "详情分页",
+                        },
+                        f"　{page_count} 页",
                     ],
                 },
                 {
-                    "type": "paragraph",
+                    "type": "footer",
                     "text": (
                         f"来源：{'实时新增' if batch.get('realtime') else '计划批次'}"
+                        "　·　可逐项查看详情，也可直接处理整批"
                         + (f"　·　{notice}" if notice else "")
                     ),
-                },
-                {
-                    "type": "paragraph",
-                    "text": "查看详情可逐项处理，也可使用下方按钮处理整批。",
                 },
             ],
             "buttons": buttons,
