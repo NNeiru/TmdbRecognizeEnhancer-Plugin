@@ -99,7 +99,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.12"
+    plugin_version = "0.8.13"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3506,7 +3506,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidate_type=candidate_type,
             candidates=candidates,
         )
-        plugin_id = self.__class__.__name__
         single = len(candidates) == 1
         if candidate_type == "failed":
             preview = "\n".join(
@@ -3520,11 +3519,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons = [[
                 {
                     "text": "重新扫描" if single else "批量重新扫描",
-                    "callback_data": f"[PLUGIN]{plugin_id}|notify-candidates:retry:{batch_id}",
+                    "callback_data": (
+                        f"[PLUGIN]{self.__class__.__name__}|nc:r:{batch_id}"
+                    ),
                 },
                 {
                     "text": "忽略",
-                    "callback_data": f"[PLUGIN]{plugin_id}|notify-candidates:ignore:{batch_id}",
+                    "callback_data": (
+                        f"[PLUGIN]{self.__class__.__name__}|nc:i:{batch_id}"
+                    ),
                 },
             ]]
         else:
@@ -3539,11 +3542,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons = [[
                 {
                     "text": "按推荐加入" if single else "按推荐批量加入",
-                    "callback_data": f"[PLUGIN]{plugin_id}|notify-candidates:approve:{batch_id}",
+                    "callback_data": (
+                        f"[PLUGIN]{self.__class__.__name__}|nc:a:{batch_id}"
+                    ),
                 },
                 {
                     "text": "忽略",
-                    "callback_data": f"[PLUGIN]{plugin_id}|notify-candidates:ignore:{batch_id}",
+                    "callback_data": (
+                        f"[PLUGIN]{self.__class__.__name__}|nc:i:{batch_id}"
+                    ),
                 },
             ]]
         if len(candidates) > 8:
@@ -4166,13 +4173,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if str(data.get("plugin_id") or "") != self.__class__.__name__:
             return
         content = str(data.get("text") or "")
-        match = re.fullmatch(
+        match = re.fullmatch(r"nc:([ari]):([0-9a-f]{12})", content)
+        legacy_match = re.fullmatch(
             r"notify-candidates:(approve|retry|ignore):([0-9a-f]{12})",
             content,
         )
+        match = match or legacy_match
         if not match:
             return
         action, batch_id = match.groups()
+        action = {
+            "a": "approve",
+            "r": "retry",
+            "i": "ignore",
+        }.get(action, action)
         approvals = self._read_notification_approvals()
         batch = (approvals.get("batches") or {}).get(batch_id) or {}
         quarter = str(batch.get("quarter") or "")
