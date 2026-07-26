@@ -113,7 +113,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.25"
+    plugin_version = "0.8.26"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3497,6 +3497,31 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     and not force_reply
                     and use_rich_messages
             ):
+                # Telegram 部分客户端会在编辑 Rich Message 时复用旧的
+                # RichBlockPhoto 渲染缓存，即使 Bot API 已返回新的媒体身份，
+                # 视觉上仍像是在裁切上一张组合图。候选消息有图片时改用标准
+                # Photo 消息，并通过 editMessageMedia 原位替换真实附件；这条
+                # 路径不经过 RichBlockPhoto，因此详情页可稳定显示单张海报。
+                if image:
+                    photo_result = self._send_candidate_photo_telegram(
+                        instance=instance,
+                        caption=rich_text or html_utils.escape(text),
+                        buttons=buttons,
+                        image=image,
+                        original_message_id=original_message_id,
+                        original_media_message_id=original_media_message_id,
+                        original_photo_unique_id=original_photo_unique_id,
+                        original_image_digest=original_image_digest,
+                        original_chat_id=original_chat_id,
+                        userid=userid,
+                    )
+                    if photo_result.get("success"):
+                        return photo_result
+                    logger.warning(
+                        "[媒体整理增强] Telegram 标准图片候选消息发送失败，"
+                        "已回退 Rich Message："
+                        f"{photo_result.get('error') or '未知错误'}"
+                    )
                 rich_result = self._send_candidate_rich_telegram(
                     instance=instance,
                     rich_markdown=rich_markdown,
@@ -3826,6 +3851,29 @@ class TmdbRecognizeEnhancer(_PluginBase):
         }
 
     @staticmethod
+    def _telegram_standard_photo_identity(
+            message: Dict[str, Any],
+    ) -> Dict[str, str]:
+        """从普通 Photo 消息中读取最高分辨率图片的媒体标识。"""
+        photos = message.get("photo")
+        photos = [
+            item for item in photos or [] if isinstance(item, dict)
+        ] if isinstance(photos, list) else []
+        if not photos:
+            return {"file_id": "", "file_unique_id": ""}
+        best = max(
+            photos,
+            key=lambda item: (
+                int(item.get("width") or 0) * int(item.get("height") or 0),
+                int(item.get("file_size") or 0),
+            ),
+        )
+        return {
+            "file_id": str(best.get("file_id") or ""),
+            "file_unique_id": str(best.get("file_unique_id") or ""),
+        }
+
+    @staticmethod
     def _delete_candidate_telegram_message(
             *,
             token: str,
@@ -3862,6 +3910,174 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     response.close()
                 except Exception:
                     pass
+
+    def _send_candidate_photo_telegram(
+            self,
+            *,
+            instance: Any,
+            caption: str,
+            buttons: List[List[dict]],
+            image: str,
+            original_message_id: Optional[int] = None,
+            original_media_message_id: Optional[int] = None,
+            original_photo_unique_id: str = "",
+            original_image_digest: str = "",
+            original_chat_id: Optional[str] = None,
+            userid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """以标准 Photo 消息发送候选页，绕开 RichBlockPhoto 编辑缓存。"""
+        token = str(getattr(instance, "_telegram_token", "") or "").strip()
+        determine_chat = getattr(instance, "_determine_target_chat_id", None)
+        if not token or not callable(determine_chat):
+            return {"success": False, "error": "Telegram 实例缺少 Token 或 Chat ID"}
+        try:
+            chat_id = determine_chat(userid, original_chat_id)
+        except Exception as err:  # noqa: BLE001 - 兼容第三方 Telegram 模块。
+            return {"success": False, "error": f"无法确定 Chat ID：{err}"}
+        if chat_id in (None, ""):
+            return {"success": False, "error": "Telegram Chat ID 为空"}
+
+        photo = self._prepare_candidate_rich_photo(image)
+        if not photo.get("success") or not photo.get("files"):
+            return {
+                "success": False,
+                "error": (
+                    "Telegram 候选图片读取失败："
+                    f"{photo.get('error') or '图片内容为空'}"
+                ),
+            }
+
+        method = "editMessageMedia" if original_message_id else "sendPhoto"
+        api_template = "https://api.telegram.org/bot{0}/{1}"
+        try:
+            from telebot import apihelper
+
+            api_template = getattr(apihelper, "API_URL", api_template)
+            api_url = str(api_template).format(token, method)
+            proxies = getattr(apihelper, "proxy", None)
+        except Exception:  # pragma: no cover - MP Telegram 环境通常有 telebot。
+            api_url = f"https://api.telegram.org/bot{token}/{method}"
+            proxies = getattr(settings, "PROXY", None)
+
+        # Photo caption 上限为 1024 字符。渲染器输出的是受控 HTML；超长时
+        # 去除标签并截断，避免 Telegram 拒绝整条交互消息。
+        caption_value = str(caption or "").strip()
+        if len(caption_value) > 1000:
+            caption_value = html_utils.escape(
+                re.sub(r"<[^>]+>", "", caption_value)[:997] + "…"
+            )
+        reply_markup = self._candidate_telegram_reply_markup(buttons)
+        media = {
+            "type": "photo",
+            "media": photo["media"],
+            "caption": caption_value,
+            "parse_mode": "HTML",
+            "show_caption_above_media": True,
+        }
+        if original_message_id:
+            payload: Dict[str, Any] = {
+                "chat_id": chat_id,
+                "message_id": int(original_message_id),
+                "media": media,
+                "reply_markup": reply_markup,
+            }
+        else:
+            payload = {
+                "chat_id": chat_id,
+                "photo": photo["media"],
+                "caption": caption_value,
+                "parse_mode": "HTML",
+                "show_caption_above_media": True,
+                "reply_markup": reply_markup,
+            }
+
+        response = None
+        image_handle = photo.get("handle")
+        result: Dict[str, Any] = {}
+        try:
+            requester = RequestUtils(
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": str(getattr(settings, "USER_AGENT", "") or ""),
+                },
+                proxies=proxies,
+                timeout=20,
+            )
+            response = requester.post_res(
+                api_url,
+                data={
+                    key: (
+                        json.dumps(value, ensure_ascii=False)
+                        if isinstance(value, (dict, list))
+                        else str(value)
+                    )
+                    for key, value in payload.items()
+                },
+                files=photo["files"],
+            )
+            current = response.json() if response is not None else {}
+            result = current if isinstance(current, dict) else {}
+        except Exception as err:  # noqa: BLE001 - 失败后由 Rich Message 路径兜底。
+            return {"success": False, "error": str(err)}
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            if image_handle is not None:
+                image_handle.close()
+
+        if not result.get("ok"):
+            return {
+                "success": False,
+                "error": result.get("description") or "Telegram 未返回有效结果",
+            }
+        message = result.get("result")
+        message = message if isinstance(message, dict) else {}
+        identity = self._telegram_standard_photo_identity(message)
+        image_digest = str(photo.get("digest") or "")
+        photo_unique_id = identity["file_unique_id"]
+        if not photo_unique_id:
+            return {
+                "success": False,
+                "error": "Telegram 已接受图片消息，但没有返回 Photo 媒体标识",
+            }
+        if (
+                original_image_digest
+                and original_photo_unique_id
+                and image_digest != str(original_image_digest)
+                and photo_unique_id == str(original_photo_unique_id)
+        ):
+            return {
+                "success": False,
+                "error": "Telegram 返回了旧的 Photo 媒体标识",
+            }
+
+        self._delete_candidate_telegram_message(
+            token=token,
+            chat_id=chat_id,
+            message_id=original_media_message_id,
+            api_template=api_template,
+            proxies=proxies,
+        )
+        result_chat = message.get("chat")
+        result_chat = result_chat if isinstance(result_chat, dict) else {}
+        logger.info(
+            "[媒体整理增强] Telegram 标准图片候选消息已确认："
+            f"method={method} digest={image_digest[:12]} "
+            f"file_unique_id={photo_unique_id}"
+        )
+        return {
+            "success": True,
+            "photo_message": True,
+            "message_id": message.get("message_id") or original_message_id,
+            "media_message_id": None,
+            "photo_file_id": identity["file_id"],
+            "photo_unique_id": photo_unique_id,
+            "image_digest": image_digest,
+            "chat_id": (result_chat.get("id") or chat_id),
+        }
 
     def _send_candidate_rich_telegram(
             self,

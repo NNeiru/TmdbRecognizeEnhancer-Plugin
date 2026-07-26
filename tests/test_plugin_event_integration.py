@@ -2989,6 +2989,91 @@ def test_candidate_rich_telegram_edits_blocks_and_replaces_photo(monkeypatch):
     assert second_result["photo_unique_id"] == "photo-unique-2"
 
 
+def test_candidate_photo_telegram_uses_standard_photo_and_media_edit(
+        monkeypatch, tmp_path,
+):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    first_image = tmp_path / "overview.jpg"
+    second_image = tmp_path / "detail.jpg"
+    first_image.write_bytes(b"overview-image")
+    second_image.write_bytes(b"detail-image")
+    captured = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+        def close(self):
+            pass
+
+    class FakeRequestUtils:
+        def __init__(self, **kwargs):
+            pass
+
+        def post_res(self, url, **kwargs):
+            captured.append((url, kwargs))
+            index = len([
+                item_url for item_url, _ in captured
+                if item_url.endswith(("/sendPhoto", "/editMessageMedia"))
+            ])
+            return FakeResponse({
+                "ok": True,
+                "result": {
+                    "message_id": 321,
+                    "chat": {"id": 654},
+                    "photo": [{
+                        "file_id": f"photo-file-{index}",
+                        "file_unique_id": f"photo-unique-{index}",
+                        "width": 1000,
+                        "height": 1500,
+                    }],
+                },
+            })
+
+    monkeypatch.setattr(module, "RequestUtils", FakeRequestUtils)
+    instance = SimpleNamespace(
+        _telegram_token="secret-token",
+        _determine_target_chat_id=lambda userid, chat_id: chat_id or "123",
+    )
+
+    first = plugin._send_candidate_photo_telegram(
+        instance=instance,
+        caption="<b>总览</b>",
+        buttons=[[{"text": "详情", "callback_data": "detail"}]],
+        image=str(first_image),
+    )
+    second = plugin._send_candidate_photo_telegram(
+        instance=instance,
+        caption="<b>详情</b>",
+        buttons=[[{"text": "返回", "callback_data": "overview"}]],
+        image=str(second_image),
+        original_message_id=321,
+        original_photo_unique_id=first["photo_unique_id"],
+        original_image_digest=first["image_digest"],
+        original_chat_id="654",
+    )
+
+    assert first["success"] is True
+    assert first["photo_message"] is True
+    assert second["success"] is True
+    assert second["photo_message"] is True
+    assert first["photo_unique_id"] != second["photo_unique_id"]
+    assert captured[0][0].endswith("/sendPhoto")
+    assert captured[1][0].endswith("/editMessageMedia")
+    assert captured[0][1]["data"]["photo"].startswith("attach://")
+    assert captured[0][1]["data"]["parse_mode"] == "HTML"
+    assert captured[0][1]["files"]
+    edited_media = json.loads(captured[1][1]["data"]["media"])
+    assert edited_media["media"].startswith("attach://")
+    assert edited_media["caption"] == "<b>详情</b>"
+    assert edited_media["show_caption_above_media"] is True
+    assert captured[1][1]["files"]
+
+
 def test_candidate_rich_telegram_falls_back_when_media_field_is_unsupported(
         monkeypatch, tmp_path,
 ):
