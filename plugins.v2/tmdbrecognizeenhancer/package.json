@@ -1,7 +1,7 @@
 {
   "name": "moviepilot-tmdb-recognize-enhancer-plugin",
   "private": true,
-  "version": "0.8.33",
+  "version": "0.8.34",
   "type": "module",
   "scripts": {
     "build": "vite build"

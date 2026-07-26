@@ -114,7 +114,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.33"
+    plugin_version = "0.8.34"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3161,12 +3161,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
             )
             if len(pending) > 8:
                 lines.append(f"\n…另有 {len(pending) - 8} 条")
-            self._send_enhanced_notification(
+            delivery = self._send_enhanced_notification(
                 title=f"入库失败摘要 · {len(pending)} 条",
                 text="\n".join(lines),
                 source_notice={},
                 **self._notification_target_kwargs("failure"),
             )
+            if not delivery.get("success"):
+                return schemas.Response(
+                    success=False,
+                    message=(
+                        "入库失败摘要发送失败："
+                        f"{delivery.get('error') or '通知实例未返回成功结果'}"
+                    ),
+                    data=self._notification_status_data(),
+                )
             pending_ids = {str(item.get("id")) for item in pending}
             for item in records:
                 if str(item.get("id")) in pending_ids:
@@ -3511,12 +3520,47 @@ class TmdbRecognizeEnhancer(_PluginBase):
             channel: Any,
             service: str,
     ) -> Dict[str, Any]:
-        """绕过普通通知队列直发，以取得渠道提供的真实成功回执。"""
+        """测试入口复用真实通知的实例直发链路。"""
+        return self._send_direct_instance_notification(
+            title=title,
+            text=text,
+            channel=channel,
+            service=service,
+            source_notice={},
+        )
+
+    def _send_direct_instance_notification(
+            self,
+            *,
+            title: str,
+            text: str,
+            channel: Any,
+            service: str,
+            source_notice: Optional[Dict[str, Any]] = None,
+            buttons: Optional[List[List[dict]]] = None,
+    ) -> Dict[str, Any]:
+        """绕过普通通知队列向具体实例直发，并返回渠道真实回执。"""
         if NotificationType is None or not getattr(self, "chain", None):
-            return {"success": False}
+            return {
+                "success": False,
+                "direct": True,
+                "error": "MoviePilot direct notification unavailable",
+            }
         notification_cls = getattr(schemas, "Notification", None)
         if notification_cls is None:
-            return {"success": False}
+            return {
+                "success": False,
+                "direct": True,
+                "error": "Notification schema unavailable",
+            }
+        notice = source_notice if isinstance(source_notice, dict) else {}
+        notification_kwargs: Dict[str, Any] = {}
+        for key in ("image", "link", "userid", "username", "targets"):
+            if notice.get(key):
+                notification_kwargs[key] = notice[key]
+        resolved_buttons = buttons if buttons is not None else notice.get("buttons")
+        if resolved_buttons:
+            notification_kwargs["buttons"] = resolved_buttons
         try:
             response = self.chain.send_direct_message(notification_cls(
                 channel=channel,
@@ -3525,20 +3569,29 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 title=title,
                 text=text,
                 save_history=False,
+                **notification_kwargs,
             ))
         except Exception as err:  # noqa: BLE001 - 测试失败需原样记录，不影响模块运行。
-            logger.error(f"[媒体整理增强] 通知实例 {service} 直发测试失败：{err}")
-            return {"success": False, "error": str(err)}
+            logger.error(f"[媒体整理增强] 通知实例 {service} 直发失败：{err}")
+            return {
+                "success": False,
+                "direct": True,
+                "error": str(err),
+            }
         if isinstance(response, dict):
             return {
                 "success": bool(response.get("success")),
+                "direct": True,
                 "message_id": response.get("message_id"),
                 "chat_id": response.get("chat_id"),
+                "error": response.get("error"),
             }
         return {
             "success": bool(getattr(response, "success", False)),
+            "direct": True,
             "message_id": getattr(response, "message_id", None),
             "chat_id": getattr(response, "chat_id", None),
+            "error": getattr(response, "error", None),
         }
 
     def _send_candidate_instance_notification(
@@ -6000,11 +6053,25 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons: Optional[List[List[dict]]] = None,
             channel: Any = None,
             service: str = "",
-    ) -> None:
-        """统一使用 Plugin 类型发送；service 用于精确指定 MP 通知配置实例。"""
+    ) -> Dict[str, Any]:
+        """发送增强通知；指定实例时直发并取得回执，未指定时沿用 MP 广播队列。"""
         if NotificationType is None:
             logger.warning("[媒体整理增强] 当前 MoviePilot 缺少 NotificationType，无法发送增强通知")
-            return
+            return {
+                "success": False,
+                "direct": bool(channel is not None and service),
+                "error": "NotificationType unavailable",
+            }
+        self._remember_outgoing_notification(title=title, text=text)
+        if channel is not None and service:
+            return self._send_direct_instance_notification(
+                title=title,
+                text=text,
+                channel=channel,
+                service=service,
+                source_notice=source_notice,
+                buttons=buttons,
+            )
         kwargs: Dict[str, Any] = {}
         for key in ("image", "link", "userid", "username", "targets"):
             if source_notice.get(key):
@@ -6016,13 +6083,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
         resolved_buttons = buttons if buttons is not None else source_notice.get("buttons")
         if resolved_buttons:
             kwargs["buttons"] = resolved_buttons
-        self._remember_outgoing_notification(title=title, text=text)
         self.post_message(
             mtype=NotificationType.Plugin,
             title=title,
             text=text,
             **kwargs,
         )
+        return {"success": True, "direct": False, "submitted": True}
 
     def _prompt_notification_candidate_tmdb(
             self,
@@ -6448,13 +6515,31 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 mode in ("parallel", "takeover")
                 and self._config.get("notification_plugin_enabled")
         ):
-            self._send_enhanced_notification(
+            delivery = self._send_enhanced_notification(
                 title=enhanced_title,
                 text=enhanced_text,
                 source_notice=notice,
                 **self._notification_target_kwargs(scene),
             )
-            action = "notified"
+            if delivery.get("direct"):
+                action = (
+                    "delivered"
+                    if delivery.get("success")
+                    else "delivery_failed"
+                )
+            else:
+                action = "notified"
+            context = {
+                **context,
+                "notification_service": (
+                    self._config.get("notification_failure_service")
+                    if scene == "failure"
+                    else self._config.get("notification_success_service")
+                ),
+                "message_id": delivery.get("message_id"),
+                "chat_id": delivery.get("chat_id"),
+                "delivery_error": delivery.get("error"),
+            }
         self._append_notification_record(build_record(
             scene=scene,
             title=title,

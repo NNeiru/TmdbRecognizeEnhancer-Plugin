@@ -706,6 +706,9 @@ onBeforeUnmount(() => {
               <div>
                 <strong>{{ item.title }}</strong>
                 <span>{{ item.created_at }} · {{ item.category?.label || '入库成功' }} · {{ recordActionText[item.action] || item.action }}</span>
+                <small v-if="item.action === 'delivery_failed'">
+                  {{ item.details?.delivery_error || '目标通知实例未返回成功结果' }}
+                </small>
               </div>
               <VChip size="x-small" variant="tonal">{{ item.policy }}</VChip>
             </article>
@@ -840,6 +843,12 @@ onBeforeUnmount(() => {
 .record-list { display: grid; gap: 7px; margin-top: 10px; }
 .record-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 11px; background: rgba(var(--v-theme-on-surface), .035); }
 .record-item div { flex: 1; }
+.record-item small {
+  display: block;
+  margin-top: 2px;
+  color: rgb(var(--v-theme-error));
+  font-size: .72rem;
+}
 @media (max-width: 900px) {
   .mode-grid, .policy-grid, .candidate-items, .delivery-grid, .notification-route-grid { grid-template-columns: 1fr; }
   .candidate-controls { grid-template-columns: 1fr 1fr; }

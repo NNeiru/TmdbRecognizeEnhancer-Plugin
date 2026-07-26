@@ -3810,6 +3810,145 @@ def test_notification_scenes_use_independent_service_instances(monkeypatch):
     )
 
 
+def test_real_notification_uses_same_direct_instance_path_as_test(monkeypatch):
+    module = _load_plugin(monkeypatch)
+
+    class NotificationType:
+        Plugin = "插件"
+
+    class Notification:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setattr(module, "NotificationType", NotificationType)
+    monkeypatch.setattr(module.schemas, "Notification", Notification, raising=False)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin.chain = SimpleNamespace(send_direct_message=Mock(return_value={
+        "success": True,
+        "message_id": 321,
+        "chat_id": "654",
+    }))
+    plugin.post_message = Mock()
+
+    delivery = plugin._send_enhanced_notification(
+        title="✅ 入库完成",
+        text="测试媒体 S01E01",
+        source_notice={
+            "image": "https://example.invalid/poster.jpg",
+            "buttons": [[{"text": "详情", "url": "https://example.invalid"}]],
+        },
+        channel="telegram",
+        service="入库成功通知",
+    )
+
+    assert delivery == {
+        "success": True,
+        "direct": True,
+        "message_id": 321,
+        "chat_id": "654",
+        "error": None,
+    }
+    notification = plugin.chain.send_direct_message.call_args.args[0]
+    assert notification.channel == "telegram"
+    assert notification.source == "入库成功通知"
+    assert notification.mtype == NotificationType.Plugin
+    assert notification.image == "https://example.invalid/poster.jpg"
+    assert notification.buttons[0][0]["text"] == "详情"
+    plugin.post_message.assert_not_called()
+
+
+def test_real_success_and_failure_records_use_channel_receipt(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_success_enabled": True,
+        "notification_failure_enabled": True,
+        "notification_success_service": "入库成功通知",
+        "notification_failure_service": "入库失败通知",
+    })
+    plugin._notification_active = Mock(return_value=True)
+    plugin._notification_target_kwargs = Mock(side_effect=lambda scene: {
+        "channel": "telegram",
+        "service": (
+            "入库失败通知" if scene == "failure" else "入库成功通知"
+        ),
+    })
+    plugin._send_enhanced_notification = Mock(side_effect=[
+        {
+            "success": True,
+            "direct": True,
+            "message_id": 1,
+            "chat_id": "chat-a",
+        },
+        {
+            "success": False,
+            "direct": True,
+            "error": "Telegram rejected message",
+        },
+    ])
+
+    plugin._handle_notice_message(SimpleNamespace(event_data={
+        "mtype": "整理入库",
+        "title": "示例动画 入库完成",
+        "text": "S01E01",
+    }))
+    plugin._handle_notice_message(SimpleNamespace(event_data={
+        "mtype": "手动处理",
+        "title": "示例动画 入库失败！",
+        "text": "原因：目标目录不可写",
+    }))
+
+    records = plugin.get_data(plugin.DATA_KEY_NOTIFICATION_RECORDS)
+    success = next(item for item in records if item["scene"] == "success")
+    failure = next(item for item in records if item["scene"] == "failure")
+    assert success["action"] == "delivered"
+    assert success["details"]["notification_service"] == "入库成功通知"
+    assert success["details"]["message_id"] == 1
+    assert failure["action"] == "delivery_failed"
+    assert failure["details"]["notification_service"] == "入库失败通知"
+    assert failure["details"]["delivery_error"] == "Telegram rejected message"
+
+
+def test_failed_digest_keeps_pending_records_when_direct_delivery_fails(
+        monkeypatch,
+):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_plugin_enabled": True,
+        "notification_failure_service": "入库失败通知",
+    })
+    plugin.save_data(plugin.DATA_KEY_NOTIFICATION_RECORDS, [{
+        "id": "failure-1",
+        "scene": "failure",
+        "title": "示例动画 入库失败",
+        "text": "目标目录不可写",
+        "category": {"label": "路径或存储异常"},
+        "policy": "digest",
+        "action": "digest_pending",
+    }])
+    plugin._notification_target_kwargs = Mock(return_value={
+        "channel": "telegram",
+        "service": "入库失败通知",
+    })
+    plugin._send_enhanced_notification = Mock(return_value={
+        "success": False,
+        "direct": True,
+        "error": "bad token",
+    })
+    plugin._notification_status_data = Mock(return_value={})
+
+    response = plugin.send_notification_digest_api()
+
+    assert response.success is False
+    assert "bad token" in response.message
+    records = plugin.get_data(plugin.DATA_KEY_NOTIFICATION_RECORDS)
+    assert records[0]["action"] == "digest_pending"
+
+
 def test_failed_notification_detail_offers_manual_tmdb_modes(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
