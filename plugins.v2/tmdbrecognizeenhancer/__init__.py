@@ -1504,7 +1504,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
             meta.tmdbid = str(tmdb_id)
             if season is not None:
                 meta.begin_season = season
-                meta.end_season = season
+                # episode_result 表示一个目标季坐标，并不是“起止季范围”。
+                # begin/end 同时写成同一季时，MP 会按范围渲染为
+                # S01-S01，随后再拼接 E04，最终形成错误的 S01-S01E04。
+                meta.end_season = None
                 mediainfo.season = season
             if episode is not None:
                 meta.begin_episode = episode

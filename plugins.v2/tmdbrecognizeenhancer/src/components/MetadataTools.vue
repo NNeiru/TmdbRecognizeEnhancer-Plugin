@@ -41,6 +41,7 @@ const strmSync = ref({
 })
 const strmTargetPath = ref('')
 const strmPreview = ref(null)
+const openStrmJobDetails = ref([])
 const dialog = ref(false)
 const form = ref({ id: '', source_rule_id: '', field: 'videoBit', pattern: '', value: '{match}', action: 'override', enabled: true, priority: 100, label: '' })
 const bulkPriorityDialog = ref(false)
@@ -145,6 +146,27 @@ const strmStatusText = computed(() => {
   if (strmSync.value.worker_running) return '正在监听整理入库'
   return strmSync.value.worker_error ? '后台工作器异常' : '后台工作器正在恢复'
 })
+const activeStrmJobs = computed(() => (
+  (strmSync.value.jobs || []).filter(job => job.status !== 'completed')
+))
+const completedStrmJobs = computed(() => (
+  (strmSync.value.jobs || []).filter(job => job.status === 'completed')
+))
+const strmJobStatusPresentation = status => ({
+  pending: { label: '等待入库', color: 'info', icon: 'mdi-clock-outline' },
+  running: { label: '正在推送', color: 'info', icon: 'mdi-progress-clock' },
+  completed: { label: '已完成', color: 'success', icon: 'mdi-check-circle-outline' },
+  timeout: { label: '等待超时', color: 'warning', icon: 'mdi-timer-alert-outline' },
+  failed: { label: '推送失败', color: 'error', icon: 'mdi-alert-circle-outline' },
+  attention: { label: '需要处理', color: 'warning', icon: 'mdi-alert-outline' },
+})[status] || { label: status || '未知状态', color: 'default', icon: 'mdi-help-circle-outline' }
+const strmJobDetailOpen = jobId => openStrmJobDetails.value.includes(String(jobId))
+function toggleStrmJobDetail(jobId) {
+  const key = String(jobId)
+  openStrmJobDetails.value = strmJobDetailOpen(key)
+    ? openStrmJobDetails.value.filter(item => item !== key)
+    : [...openStrmJobDetails.value, key]
+}
 const supplementFieldItems = [
   { key: 'resourceType', label: '资源类型', placeholder: 'WEB-DL' },
   { key: 'webSource', label: '流媒体平台', placeholder: 'Netflix / Bilibili' },
@@ -989,14 +1011,68 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
         </VCard>
 
         <VCard variant="flat" border class="workspace-card">
-          <VCardItem><template #prepend><VAvatar color="primary" variant="tonal" size="38"><VIcon icon="mdi-format-list-checks" size="20" /></VAvatar></template><VCardTitle class="text-subtitle-1">推送任务</VCardTitle><VCardSubtitle>后台等待 Emby 入库，最多保留 80 条已结束记录。</VCardSubtitle><template #append><div class="d-flex ga-1"><VBtn size="small" variant="text" prepend-icon="mdi-replay" @click="retryStrmJob()">重试未完成</VBtn><VBtn size="small" variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" @click="deleteStrmJob()">清理已结束</VBtn></div></template></VCardItem>
-          <VCardText v-if="strmSync.jobs?.length" class="strm-job-list">
-            <div v-for="job in strmSync.jobs" :key="job.id" class="strm-job-row">
-              <div class="min-w-0"><div class="font-weight-medium text-truncate">{{ job.title || job.target_path }}</div><div class="text-caption text-medium-emphasis text-truncate">{{ job.target_path }}</div><div class="text-caption">{{ job.reason }} · 尝试 {{ job.attempts || 0 }} 次</div></div>
-              <VChip size="small" :color="job.status === 'completed' ? 'success' : job.status === 'pending' || job.status === 'running' ? 'info' : 'warning'" variant="tonal">{{ job.status }}</VChip>
-              <VBtn icon="mdi-replay" size="small" variant="text" :disabled="job.status === 'completed'" @click="retryStrmJob(job.id)" />
-              <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="deleteStrmJob(job.id)" />
+          <VCardItem>
+            <template #prepend><VAvatar color="primary" variant="tonal" size="38"><VIcon icon="mdi-format-list-checks" size="20" /></VAvatar></template>
+            <VCardTitle class="text-subtitle-1">推送任务</VCardTitle>
+            <VCardSubtitle>未结束任务优先展示；已完成记录默认折叠，最多保留 80 条。</VCardSubtitle>
+            <template #append><VChip size="small" variant="tonal">{{ strmSync.jobs?.length || 0 }} 条</VChip></template>
+          </VCardItem>
+          <VCardText v-if="strmSync.jobs?.length" class="strm-job-area">
+            <div class="strm-job-toolbar">
+              <div class="strm-job-summary">
+                <VChip v-if="activeStrmJobs.length" size="small" color="warning" variant="tonal">{{ activeStrmJobs.length }} 条待处理</VChip>
+                <VChip size="small" color="success" variant="tonal">{{ completedStrmJobs.length }} 条已完成</VChip>
+              </div>
+              <div class="strm-job-actions">
+                <VBtn size="small" variant="text" prepend-icon="mdi-replay" :disabled="!activeStrmJobs.length" @click="retryStrmJob()">重试未完成</VBtn>
+                <VBtn size="small" variant="text" color="error" prepend-icon="mdi-delete-sweep-outline" :disabled="!completedStrmJobs.length" @click="deleteStrmJob()">清理已完成</VBtn>
+              </div>
             </div>
+
+            <section v-if="activeStrmJobs.length" class="strm-job-section">
+              <div class="strm-job-section-title"><VIcon icon="mdi-progress-clock" size="17" color="warning" /><span>进行中与需要处理</span></div>
+              <div class="strm-job-list">
+                <div v-for="job in activeStrmJobs" :key="job.id" class="strm-job-row">
+                  <VIcon :icon="strmJobStatusPresentation(job.status).icon" :color="strmJobStatusPresentation(job.status).color" size="20" />
+                  <button type="button" class="strm-job-main" @click="toggleStrmJobDetail(job.id)">
+                    <strong>{{ job.title || job.target_path }}</strong>
+                    <span>{{ job.reason || '等待后台处理' }}</span>
+                  </button>
+                  <VChip size="small" :color="strmJobStatusPresentation(job.status).color" variant="tonal">{{ strmJobStatusPresentation(job.status).label }}</VChip>
+                  <div class="strm-job-row-actions">
+                    <VBtn :icon="strmJobDetailOpen(job.id) ? 'mdi-chevron-up' : 'mdi-chevron-down'" size="small" variant="text" @click="toggleStrmJobDetail(job.id)" />
+                    <VBtn icon="mdi-replay" size="small" variant="text" @click="retryStrmJob(job.id)" />
+                    <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="deleteStrmJob(job.id)" />
+                  </div>
+                  <VExpandTransition><div v-if="strmJobDetailOpen(job.id)" class="strm-job-detail"><div><span>目标路径</span><code>{{ job.target_path || '未记录' }}</code></div><div><span>处理说明</span><strong>{{ job.reason || '暂无说明' }}</strong></div><div><span>尝试次数</span><strong>{{ job.attempts || 0 }} 次</strong></div></div></VExpandTransition>
+                </div>
+              </div>
+            </section>
+
+            <VExpansionPanels v-if="completedStrmJobs.length" variant="accordion" class="strm-completed-panel">
+              <VExpansionPanel>
+                <VExpansionPanelTitle>
+                  <div class="strm-completed-title"><div><VIcon icon="mdi-check-all" color="success" size="19" /><span>已完成记录</span></div><VChip size="x-small" color="success" variant="tonal">{{ completedStrmJobs.length }}</VChip></div>
+                </VExpansionPanelTitle>
+                <VExpansionPanelText>
+                  <div class="strm-job-list strm-completed-list">
+                    <div v-for="job in completedStrmJobs" :key="job.id" class="strm-job-row completed">
+                      <VIcon icon="mdi-check-circle-outline" color="success" size="20" />
+                      <button type="button" class="strm-job-main" @click="toggleStrmJobDetail(job.id)">
+                        <strong>{{ job.title || job.target_path }}</strong>
+                        <span>{{ job.reason || '推送完成' }}</span>
+                      </button>
+                      <VChip size="small" color="success" variant="tonal">已完成</VChip>
+                      <div class="strm-job-row-actions">
+                        <VBtn :icon="strmJobDetailOpen(job.id) ? 'mdi-chevron-up' : 'mdi-chevron-down'" size="small" variant="text" @click="toggleStrmJobDetail(job.id)" />
+                        <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="deleteStrmJob(job.id)" />
+                      </div>
+                      <VExpandTransition><div v-if="strmJobDetailOpen(job.id)" class="strm-job-detail"><div><span>目标路径</span><code>{{ job.target_path || '未记录' }}</code></div><div><span>处理说明</span><strong>{{ job.reason || '推送完成' }}</strong></div><div><span>尝试次数</span><strong>{{ job.attempts || 0 }} 次</strong></div></div></VExpandTransition>
+                    </div>
+                  </div>
+                </VExpansionPanelText>
+              </VExpansionPanel>
+            </VExpansionPanels>
           </VCardText>
           <VCardText v-else class="strm-empty"><VIcon icon="mdi-inbox-outline" size="34" /><span>暂无推送任务</span></VCardText>
         </VCard>
@@ -1283,7 +1359,7 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .strm-section-head strong { font-size: .9rem; }
 .strm-section-head span { color: rgba(var(--v-theme-on-surface), .55); font-size: .72rem; line-height: 1.4; }
 .strm-timing-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.strm-mapping-list, .strm-job-list { display: grid; gap: 8px; }
+.strm-mapping-list, .strm-job-list { display: grid; gap: 7px; }
 .strm-mapping-row { min-width: 0; display: grid; gap: 10px; padding: 12px; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
 .strm-mapping-meta { min-width: 0; display: grid; grid-template-columns: minmax(120px, .7fr) minmax(210px, 1.3fr) auto; gap: 8px; align-items: center; }
 .strm-path-pair { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 7px; align-items: center; }
@@ -1299,7 +1375,26 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .strm-preview-arrow { align-self: center; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: rgba(var(--v-theme-secondary), .09); color: rgb(var(--v-theme-secondary)); }
 .strm-preview-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 11px; border-top: 1px solid rgba(var(--v-border-color), calc(var(--v-border-opacity) * .75)); }
 .strm-preview-actions > span { min-width: 0; display: flex; align-items: center; gap: 6px; color: rgba(var(--v-theme-on-surface), .58); font-size: .73rem; }
-.strm-job-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px; align-items: center; padding: 9px 10px; border-radius: 9px; background: rgba(var(--v-theme-on-surface), .035); }
+.strm-job-area { display: grid; gap: 12px; padding-top: 8px !important; }
+.strm-job-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.strm-job-summary, .strm-job-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.strm-job-section { display: grid; gap: 7px; }
+.strm-job-section-title { display: flex; align-items: center; gap: 7px; color: rgba(var(--v-theme-on-surface), .68); font-size: .78rem; font-weight: 600; }
+.strm-job-row { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 8px 10px; border: 1px solid transparent; border-radius: 9px; background: rgba(var(--v-theme-on-surface), .035); }
+.strm-job-row.completed { background: rgba(var(--v-theme-success), .035); }
+.strm-job-main { min-width: 0; display: grid; gap: 1px; padding: 0; border: 0; outline: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.strm-job-main strong, .strm-job-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.strm-job-main strong { font-size: .83rem; font-weight: 600; }
+.strm-job-main span { color: rgba(var(--v-theme-on-surface), .55); font-size: .71rem; }
+.strm-job-row-actions { display: flex; align-items: center; gap: 0; }
+.strm-job-detail { grid-column: 2 / -1; display: grid; grid-template-columns: minmax(0, 2fr) minmax(180px, 1fr) auto; gap: 10px; padding: 9px 10px; border-top: 1px solid rgba(var(--v-border-color), calc(var(--v-border-opacity) * .75)); }
+.strm-job-detail > div { min-width: 0; display: grid; gap: 3px; }
+.strm-job-detail span { color: rgba(var(--v-theme-on-surface), .5); font-size: .68rem; }
+.strm-job-detail strong, .strm-job-detail code { min-width: 0; overflow-wrap: anywhere; color: rgba(var(--v-theme-on-surface), .76); font-size: .74rem; }
+.strm-completed-panel { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; overflow: hidden; }
+.strm-completed-title { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-right: 8px; }
+.strm-completed-title > div { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.strm-completed-list { max-height: 430px; padding-right: 4px; overflow-y: auto; }
 .strm-empty { min-height: 96px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: rgba(var(--v-theme-on-surface), .48); text-align: center; }
 .strm-empty.compact { min-height: 112px; border: 1px dashed rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; }
 .probe-config-body { display: grid; gap: 14px; padding-top: 10px !important; }
@@ -1398,7 +1493,11 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
   .strm-path-pair { grid-template-columns: 1fr; }
   .strm-path-pair > .v-icon { transform: rotate(90deg); justify-self: center; }
   .strm-job-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .strm-job-row > .v-btn { grid-row: 2; }
+  .strm-job-row > .v-icon { display: none; }
+  .strm-job-row > .v-chip { grid-column: 2; grid-row: 1; }
+  .strm-job-row-actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .strm-job-detail { grid-column: 1 / -1; grid-template-columns: 1fr; }
+  .strm-job-toolbar { align-items: flex-start; flex-direction: column; }
   .strm-save-row { align-items: flex-start; flex-direction: column; }
   .strm-preview-actions { align-items: stretch; flex-direction: column; }
   .strm-preview-actions > .v-btn { width: 100%; }

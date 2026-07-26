@@ -1355,6 +1355,7 @@ def test_final_name_preview_uses_moviepilot_template_with_adjusted_coordinates(m
     assert result["available"] is True
     assert result["output"].endswith("Example.S03E14.mkv")
     assert captured["meta"].begin_season == 3
+    assert captured["meta"].end_season is None
     assert captured["meta"].begin_episode == 14
     assert captured["meta"].end_episode is None
     assert captured["mediainfo"].season == 3
