@@ -427,6 +427,23 @@ onMounted(async () => {
           <small>首次开启以当前缓存为基线；之后新增或失败转成功时逐部推送。</small>
         </div>
       </div>
+      <div class="candidate-message-style">
+        <span>
+          <strong>候选通知样式</strong>
+          <small>经典消息沿用 MoviePilot 通知格式；Rich Message 使用新版 Telegram 富文本和媒体页面。</small>
+        </span>
+        <VBtnToggle
+          v-model="config.notification_candidate_message_style"
+          mandatory
+          density="compact"
+          color="primary"
+          variant="outlined"
+          divided
+        >
+          <VBtn value="classic" prepend-icon="mdi-message-text-outline">经典消息</VBtn>
+          <VBtn value="rich" prepend-icon="mdi-card-text-outline">Rich Message</VBtn>
+        </VBtnToggle>
+      </div>
       <VAlert type="info" variant="tonal" density="compact" class="mt-3">
         这里按 MoviePilot 的通知配置名称精确投递；即使有多个 Telegram，也只会发送到选中的实例。
         请确保该实例已启用“插件”通知类型。
@@ -613,6 +630,14 @@ onMounted(async () => {
 .delivery-mode .v-select { min-width: 118px; }
 .delivery-mode.realtime { align-items: flex-start; flex-direction: column; justify-content: center; gap: 0; }
 .delivery-mode small { color: rgba(var(--v-theme-on-surface), .58); font-size: .72rem; line-height: 1.45; }
+.candidate-message-style {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  margin-top: 10px; padding: 10px 12px;
+  border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 12px;
+  background: rgba(var(--v-theme-on-surface), .02);
+}
+.candidate-message-style > span { display: grid; min-width: 0; gap: 2px; }
+.candidate-message-style small { color: rgba(var(--v-theme-on-surface), .58); font-size: .72rem; }
 .candidate-controls { display: grid; grid-template-columns: minmax(130px, .7fr) minmax(130px, .7fr) minmax(190px, 1.1fr) auto auto; gap: 10px; margin-top: 14px; }
 .platform-select { max-width: 440px; min-width: 260px; }
 .candidate-list { margin-top: 14px; overflow: hidden; border: 1px solid rgba(var(--v-theme-on-surface), .09); border-radius: 13px; }
@@ -645,5 +670,8 @@ onMounted(async () => {
   .candidate-controls { grid-template-columns: 1fr; }
   .policy-card { align-items: flex-start; flex-wrap: wrap; }
   .policy-select { flex: 1 0 100%; }
+  .candidate-message-style { align-items: stretch; flex-direction: column; }
+  .candidate-message-style .v-btn-toggle { width: 100%; }
+  .candidate-message-style .v-btn { flex: 1; }
 }
 </style>

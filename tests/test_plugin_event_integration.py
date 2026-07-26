@@ -2629,20 +2629,19 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     assert "7 部" in summary["title"]
     assert "共 7 页" in summary["text"]
     assert summary["rich_markdown"].startswith("# 🎬 集数偏移候选")
-    assert "| 批次状态 | 数量 |" in summary["rich_markdown"]
-    assert "- [ ] 逐项核对海报与 TMDB 信息" in summary["rich_markdown"]
-    assert "<details><summary>批次说明与操作提示</summary>" in summary[
-        "rich_markdown"
-    ]
+    assert "**进度**" in summary["rich_markdown"]
+    assert "逐项查看海报" in summary["rich_markdown"]
+    assert "| 批次状态 | 数量 |" not in summary["rich_markdown"]
+    assert "- [ ]" not in summary["rich_markdown"]
     assert "<blockquote>" in summary["rich_text"]
     assert summary["image"].endswith("collage.jpg")
     assert second_page["page_item_ids"] == ["anime:4"]
     assert "番剧 4" in second_page["text"]
     assert second_page["rich_markdown"].startswith("# 🎞 番剧 4")
-    assert "| 项目 | 信息 |" in second_page["rich_markdown"]
-    assert "<details><summary>匹配依据与原始信息</summary>" in second_page[
-        "rich_markdown"
-    ]
+    assert "**TMDB 1004**" in second_page["rich_markdown"]
+    assert "TV" in second_page["rich_markdown"]
+    assert "| 项目 | 信息 |" not in second_page["rich_markdown"]
+    assert "<details>" not in second_page["rich_markdown"]
     assert "<b>4. 番剧 4</b>" in second_page["rich_text"]
     assert second_page["image"].endswith("/4.jpg")
     assert any(
@@ -2657,6 +2656,29 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     ]
     assert callbacks
     assert all(len(value.encode("utf-8")) <= 64 for value in callbacks)
+
+    no_poster = plugin._render_notification_candidate_page(
+        batch_id="123456789abc",
+        batch={
+            **batch,
+            "items": [{**items[0], "poster": ""}],
+            "collage": "http://127.0.0.1/collage.jpg",
+        },
+        page=0,
+    )
+    assert no_poster["image"] == ""
+
+
+def test_notification_candidate_message_style_is_normalized(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+
+    assert plugin._normalize_config({
+        "notification_candidate_message_style": "classic",
+    })["notification_candidate_message_style"] == "classic"
+    assert plugin._normalize_config({
+        "notification_candidate_message_style": "unsupported",
+    })["notification_candidate_message_style"] == "rich"
 
 
 def test_notification_candidate_page_action_only_handles_current_page(monkeypatch):

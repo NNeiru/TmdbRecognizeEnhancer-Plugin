@@ -113,7 +113,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.18"
+    plugin_version = "0.8.19"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -253,6 +253,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_candidate_platforms": ["TV", "TV SHORT"],
         "notification_candidate_sequel_only": True,
         "notification_candidate_preference": "group_preferred",
+        "notification_candidate_message_style": "rich",
     }
 
     # 这组配置由集数偏移页的独立接口维护。主设置页可能长期保留旧快照，
@@ -300,6 +301,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_candidate_platforms",
         "notification_candidate_sequel_only",
         "notification_candidate_preference",
+        "notification_candidate_message_style",
     )
 
     RENAME_SEPARATOR_FIELDS = {
@@ -3481,7 +3483,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 and callable(getattr(service_info.instance, "send_msg", None))
         ):
             instance = service_info.instance
-            if rich_markdown and not force_reply:
+            use_rich_messages = (
+                self._config.get(
+                    "notification_candidate_message_style", "rich",
+                ) == "rich"
+            )
+            if (
+                    rich_markdown
+                    and not force_reply
+                    and use_rich_messages
+            ):
                 rich_result = self._send_candidate_rich_telegram(
                     instance=instance,
                     rich_markdown=rich_markdown,
@@ -3523,7 +3534,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                             with local_image.open("rb") as image_file:
                                 result = instance.send_msg(
                                     title=title,
-                                    text=rich_text or html_utils.escape(text),
+                                    text=(
+                                        rich_text
+                                        if use_rich_messages and rich_text
+                                        else html_utils.escape(text)
+                                    ),
                                     image=image_file,
                                     buttons=buttons,
                                     force_reply=force_reply,
@@ -3535,7 +3550,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         else:
                             result = instance.send_msg(
                                 title=title,
-                                text=rich_text or html_utils.escape(text),
+                                text=(
+                                    rich_text
+                                    if use_rich_messages and rich_text
+                                    else html_utils.escape(text)
+                                ),
                                 image=image or None,
                                 buttons=buttons,
                                 force_reply=force_reply,
@@ -3594,10 +3613,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
         for character in ("\\", "`", "*", "_", "[", "]", "<", ">", "|", "~"):
             text = text.replace(character, f"\\{character}")
         return text
-
-    @classmethod
-    def _rich_markdown_table_cell(cls, value: Any) -> str:
-        return cls._rich_markdown_escape(value).replace("\n", " ")
 
     @staticmethod
     def _candidate_telegram_reply_markup(
@@ -3698,7 +3713,38 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     ),
                 }
             elif image_value.startswith(("https://", "http://")):
-                media_value = image_value
+                # Telegram 直连部分 AniList/TMDB CDN 时可能取图失败，导致
+                # editMessageText 回退并保留原组合图。优先由 MP 下载、统一转成
+                # JPEG 后作为附件上传，下载失败才让 Telegram 直接读取 URL。
+                content = self._fetch_candidate_poster(image_value)
+                if content:
+                    prepared = BytesIO()
+                    try:
+                        if Image is not None:
+                            with Image.open(BytesIO(content)) as source:
+                                source.convert("RGB").save(
+                                    prepared,
+                                    format="JPEG",
+                                    quality=90,
+                                )
+                        else:
+                            prepared.write(content)
+                        prepared.seek(0)
+                        image_handle = prepared
+                        media_value = "attach://candidate_cover_file"
+                        files = {
+                            "candidate_cover_file": (
+                                "candidate-cover.jpg",
+                                image_handle,
+                                "image/jpeg",
+                            ),
+                        }
+                    except Exception:  # noqa: BLE001 - 图片转换失败改由 TG 拉取。
+                        prepared.close()
+                        image_handle = None
+                        media_value = image_value
+                else:
+                    media_value = image_value
             else:
                 media_value = ""
             if media_value:
@@ -3875,6 +3921,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     @staticmethod
     def _fetch_candidate_poster(url: str) -> Optional[bytes]:
+        response = None
         try:
             response = RequestUtils(
                 proxies=settings.PROXY,
@@ -3886,6 +3933,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         except Exception as err:  # noqa: BLE001 - 单张海报失败不影响通知正文。
             logger.debug(f"[媒体整理增强] 候选海报下载失败：{url}，{err}")
             return None
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
 
     def _build_notification_candidate_collage(
             self,
@@ -4009,10 +4062,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "text": completed_text,
                 "rich_markdown": (
                     "# ✅ 批次处理完成\n\n"
-                    f"=={self._rich_markdown_escape(quarter)}==\n\n"
-                    "---\n\n"
-                    f"- [x] {rich_completed}\n"
-                    f"- [x] 共处理 **{total}** 部候选"
+                    f"=={self._rich_markdown_escape(quarter)} · {total} 部==\n\n"
+                    f"> {rich_completed}"
                 ),
                 "rich_text": (
                     f"<blockquote>{html_utils.escape(completed_text)}</blockquote>"
@@ -4059,29 +4110,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
             rich_notice = (
                 f"> {self._rich_markdown_escape(notice)}\n\n"
             )
+        source_text = self._rich_markdown_escape(
+            "实时新增" if batch.get("realtime") else "计划批次"
+        )
         rich_markdown = (
             f"# {'🎬' if candidate_type == 'ready' else '⚠️'} "
             f"{self._rich_markdown_escape(kind_text)}\n\n"
             f"{rich_notice}"
             f"=={self._rich_markdown_escape(quarter)} · "
             f"{len(pending)} 部待审批==\n\n"
-            "| 批次状态 | 数量 |\n"
-            "|:--|--:|\n"
-            f"| 尚待处理 | **{len(pending)}** |\n"
-            f"| 已处理 | {handled} / {total} |\n"
-            f"| 详情页 | {page_count} |\n\n"
-            "---\n\n"
-            f"- [{'x' if handled else ' '}] 已处理候选\n"
-            "- [ ] 逐项核对海报与 TMDB 信息\n"
-            f"- [ ] {'选择编集方式或忽略候选' if candidate_type == 'ready' else '重新扫描、人工指定 TMDB 或忽略'}\n\n"
-            "<details><summary>批次说明与操作提示</summary>\n\n"
-            f"- 来源：**{self._rich_markdown_escape(
-                '实时新增' if batch.get('realtime') else '计划批次'
-            )}**\n"
-            f"- 季度：`{self._rich_markdown_escape(quarter)}`\n"
-            "- 进入详情页后，每页只展示一个 TMDB 候选及其海报。\n"
-            "- 总览按钮可一次处理整批，详情按钮只处理当前条目。\n\n"
-            "</details>"
+            f"**进度**　{handled} / {total}\n"
+            f"**分页**　{page_count} 页\n"
+            f"**来源**　{source_text}\n\n"
+            "> 可逐项查看海报并处理，也可使用下方按钮处理整批。"
         )
         buttons = [[{
             "text": f"📋 查看详情 1/{page_count}",
@@ -4263,66 +4304,39 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 f" · 第 {page + 1}/{page_count} 页=="
             ),
             "",
-            "| 项目 | 信息 |",
-            "|:--|:--|",
-            (
-                f"| 状态 | **{self._rich_markdown_table_cell(rich_status)}** |"
+            f"**{self._rich_markdown_escape(rich_status)}**"
+            + (
+                f"　·　**{self._rich_markdown_escape(score)} 分**"
+                if score is not None else ""
             ),
             (
-                f"| 匹配分 | "
-                f"{self._rich_markdown_table_cell(
-                    f'{score} 分' if score is not None else '—'
-                )} |"
+                f"{self._rich_markdown_escape(platform)}　·　"
+                f"{self._rich_markdown_escape(date_value)}　·　"
+                f"{self._rich_markdown_escape(
+                    f'{episode_count} 集' if episode_count else '集数未提供'
+                )}"
             ),
-            f"| 载体 | {self._rich_markdown_table_cell(platform)} |",
-            f"| 开播 | {self._rich_markdown_table_cell(date_value)} |",
-            (
-                f"| 集数 | "
-                f"{self._rich_markdown_table_cell(
-                    f'{episode_count} 集' if episode_count else '未提供'
-                )} |"
-            ),
-            (
-                f"| 特征 | "
-                f"{self._rich_markdown_table_cell(' · '.join(traits) or '普通条目')} |"
-            ),
-            "",
-            "---",
-            "",
-            "- [ ] 当前条目尚未处理",
-            (
-                "- [ ] 选择 **TMDB 默认编集**、**优先剧集组** 或忽略"
-                if candidate_type == "ready"
-                else "- [ ] 重新扫描、人工指定 TMDB 或忽略"
-            ),
-            "",
-            "<details><summary>匹配依据与原始信息</summary>",
-            "",
         ])
-        if original_title:
+        if traits:
             rich_markdown_lines.append(
-                f"- 原始标题：{self._rich_markdown_escape(original_title)}"
+                f"=={self._rich_markdown_escape(' · '.join(traits))}=="
             )
-        if candidate_type == "ready":
+        if original_title:
             rich_markdown_lines.extend([
-                f"- TMDB ID：`{focus.get('tmdb_id') or '—'}`",
-                (
-                    f"- 匹配得分：**{self._rich_markdown_escape(
-                        score if score is not None else '未提供'
-                    )}**"
-                ),
+                "",
+                f"> 原名：{self._rich_markdown_escape(original_title)}",
             ])
-        else:
-            rich_markdown_lines.append(
-                "- 失败原因："
+        if candidate_type != "ready":
+            rich_markdown_lines.extend([
+                "",
+                "> 原因："
                 f"{self._rich_markdown_escape(
                     focus.get('scan_error') or '未匹配到可信 TMDB 候选'
-                )}"
-            )
+                )}",
+            ])
         rich_markdown_lines.extend([
-            f"- 批次剩余：**{len(pending)}** 部",
             "",
-            "</details>",
+            f"*本批次尚待处理 {len(pending)} 部*",
         ])
         rich_markdown = "\n".join(rich_markdown_lines)
 
@@ -4409,7 +4423,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     },
                 ],
             ])
-        image = str(page_items[0].get("poster") or batch.get("collage") or "")
+        # 详情页只能展示当前条目的单张海报；没有海报时宁可只显示文字，
+        # 也不能回退总览拼图造成“详情仍是组合图”的错觉。
+        image = str(page_items[0].get("poster") or "")
         return {
             "title": (
                 f"{'候选详情' if candidate_type == 'ready' else '失败详情'}"
@@ -9402,6 +9418,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidate_preference
             if candidate_preference in ("default", "group_preferred")
             else "group_preferred"
+        )
+        candidate_message_style = str(
+            merged.get("notification_candidate_message_style") or "rich"
+        ).strip().lower()
+        merged["notification_candidate_message_style"] = (
+            candidate_message_style
+            if candidate_message_style in ("classic", "rich")
+            else "rich"
         )
         candidate_lists: Dict[str, List[int]] = {}
         for key in ("tmdb_exclude_ids", "tmdb_prefer_ids"):
