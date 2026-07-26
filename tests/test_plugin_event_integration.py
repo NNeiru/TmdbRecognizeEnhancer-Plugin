@@ -2638,10 +2638,13 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     assert second_page["page_item_ids"] == ["anime:4"]
     assert "番剧 4" in second_page["text"]
     assert second_page["rich_markdown"].startswith("# 🎞 番剧 4")
-    assert "| TMDB | 1004 |" in second_page["rich_markdown"]
-    assert "| 匹配分 | 94 分 |" in second_page["rich_markdown"]
-    assert "| 作品特征 | 续作 · 多季 |" in second_page["rich_markdown"]
-    assert "| 待处理 | 7 部 |" in second_page["rich_markdown"]
+    assert (
+        "| TMDB | 🔗 [1004](https://www.themoviedb.org/tv/1004) |"
+        in second_page["rich_markdown"]
+    )
+    assert "| 匹配分 | 🟣 **94 分** |" in second_page["rich_markdown"]
+    assert "| 作品特征 | ==续作== · ==多季== |" in second_page["rich_markdown"]
+    assert "| 待处理 |" not in second_page["rich_markdown"]
     assert "TV" in second_page["rich_markdown"]
     assert "| 项目 | 信息 |" in second_page["rich_markdown"]
     assert "<details>" not in second_page["rich_markdown"]
@@ -2847,11 +2850,11 @@ def test_candidate_rich_telegram_changes_media_id_with_image(monkeypatch):
     captured = []
 
     class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
         def json(self):
-            return {
-                "ok": True,
-                "result": {"message_id": 321, "chat": {"id": 654}},
-            }
+            return self.payload
 
         def close(self):
             pass
@@ -2861,8 +2864,13 @@ def test_candidate_rich_telegram_changes_media_id_with_image(monkeypatch):
             pass
 
         def post_res(self, url, **kwargs):
-            captured.append(kwargs)
-            return FakeResponse()
+            captured.append((url, kwargs))
+            if url.endswith("/deleteMessage"):
+                return FakeResponse({"ok": True, "result": True})
+            return FakeResponse({
+                "ok": True,
+                "result": {"message_id": 322, "chat": {"id": 654}},
+            })
 
     monkeypatch.setattr(module, "RequestUtils", FakeRequestUtils)
     plugin._fetch_candidate_poster = Mock(return_value=None)
@@ -2882,10 +2890,18 @@ def test_candidate_rich_telegram_changes_media_id_with_image(monkeypatch):
         )
         assert result["success"] is True
 
-    first = captured[0]["json"]["rich_message"]
-    second = captured[1]["json"]["rich_message"]
+    sends = [
+        kwargs for url, kwargs in captured if url.endswith("/sendRichMessage")
+    ]
+    deletes = [
+        kwargs for url, kwargs in captured if url.endswith("/deleteMessage")
+    ]
+    first = sends[0]["json"]["rich_message"]
+    second = sends[1]["json"]["rich_message"]
     assert first["media"][0]["id"] != second["media"][0]["id"]
     assert "候选视觉" not in first["markdown"]
+    assert len(deletes) == 2
+    assert deletes[0]["json"] == {"chat_id": "654", "message_id": 321}
 
 
 def test_notification_candidate_collage_uses_local_versioned_endpoint(

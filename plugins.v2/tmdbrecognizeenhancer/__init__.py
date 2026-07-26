@@ -113,7 +113,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.20"
+    plugin_version = "0.8.21"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3475,8 +3475,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return {"success": False, "error": "notification instance unavailable"}
 
         # Telegram 的 MP 包装器尚未支持 Bot API 10.2 Rich Message。
-        # 候选页优先直接调用 sendRichMessage/editMessageText；旧 API、旧本地
-        # Bot API Server 或旧消息编辑失败时，再回退到 MP 原有 HTML 消息。
+        # 候选页优先直接调用 sendRichMessage；回调更新通过“新发成功后删除
+        # 旧消息”保证媒体块同步。旧 API 或旧本地 Bot API Server 不支持时，
+        # 再回退到 MP 原有 HTML 消息。
         if (
                 MessageChannel is not None
                 and channel == getattr(MessageChannel, "Telegram", None)
@@ -3671,14 +3672,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if chat_id in (None, ""):
             return {"success": False, "error": "Telegram Chat ID 为空"}
 
-        method = "editMessageText" if original_message_id else "sendRichMessage"
+        # Telegram 10.2 声称 editMessageText 可编辑 Rich Message，但实际客户端
+        # 对已存在的媒体块存在缓存/复用：正文已经翻到详情，图片仍停留在总览
+        # 拼图，连续编辑后还可能回退普通消息。带回调的候选页一律先发送完整的
+        # 新 Rich Message，成功后再删除旧消息，确保文本、媒体和键盘原子更新。
+        method = "sendRichMessage"
+        api_template = "https://api.telegram.org/bot{0}/{1}"
         try:
             from telebot import apihelper
 
             api_template = getattr(
                 apihelper,
                 "API_URL",
-                "https://api.telegram.org/bot{0}/{1}",
+                api_template,
             )
             api_url = str(api_template).format(token, method)
             proxies = getattr(apihelper, "proxy", None)
@@ -3772,10 +3778,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "rich_message": rich_message,
             "reply_markup": self._candidate_telegram_reply_markup(buttons),
         }
-        if original_message_id:
-            payload["message_id"] = int(original_message_id)
-
         response = None
+        requester = None
         try:
             requester = RequestUtils(
                 headers={
@@ -3825,11 +3829,50 @@ class TmdbRecognizeEnhancer(_PluginBase):
         message = message if isinstance(message, dict) else {}
         result_chat = message.get("chat")
         result_chat = result_chat if isinstance(result_chat, dict) else {}
+        result_chat_id = result_chat.get("id") or chat_id
+        if original_message_id and requester is not None:
+            delete_response = None
+            try:
+                delete_url = str(api_template).format(token, "deleteMessage")
+                delete_response = requester.post_res(
+                    delete_url,
+                    json={
+                        "chat_id": chat_id,
+                        "message_id": int(original_message_id),
+                    },
+                )
+                delete_result = (
+                    delete_response.json()
+                    if delete_response is not None else {}
+                )
+                if not (
+                        isinstance(delete_result, dict)
+                        and delete_result.get("ok")
+                ):
+                    logger.warning(
+                        "[媒体整理增强] 新 Rich Message 已发送，但旧候选消息"
+                        f"删除失败：{(
+                            delete_result.get('description')
+                            if isinstance(delete_result, dict)
+                            else 'Telegram 未返回有效结果'
+                        )}"
+                    )
+            except Exception as err:  # noqa: BLE001 - 新消息已成功，不应回退。
+                logger.warning(
+                    "[媒体整理增强] 新 Rich Message 已发送，但旧候选消息"
+                    f"删除异常：{err}"
+                )
+            finally:
+                if delete_response is not None:
+                    try:
+                        delete_response.close()
+                    except Exception:
+                        pass
         return {
             "success": True,
             "rich_message": True,
             "message_id": message.get("message_id") or original_message_id,
-            "chat_id": result_chat.get("id") or chat_id,
+            "chat_id": result_chat_id,
         }
 
     @staticmethod
@@ -4292,32 +4335,51 @@ class TmdbRecognizeEnhancer(_PluginBase):
         status_text = (
             "匹配完成" if candidate_type == "ready" else "扫描未通过"
         )
+        tmdb_id = self._safe_int(focus.get("tmdb_id"), 0)
+        tmdb_value = (
+            f"[{tmdb_id}](https://www.themoviedb.org/tv/{tmdb_id})"
+            if tmdb_id else "—"
+        )
         detail_rows = [
-            ("状态", f"{status_text} · 第 {page + 1}/{page_count} 页"),
-            ("TMDB", str(focus.get("tmdb_id") or "—")),
+            (
+                "状态",
+                f"🟢 =={status_text}== · 第 {page + 1}/{page_count} 页",
+            ),
+            ("TMDB", f"🔗 {tmdb_value}"),
         ]
         if score is not None:
-            detail_rows.append(("匹配分", f"{score} 分"))
+            detail_rows.append(("匹配分", f"🟣 **{score} 分**"))
         detail_rows.extend([
-            ("载体", platform),
-            ("开播日期", date_value),
-            ("集数", f"{episode_count} 集" if episode_count else "未提供"),
+            ("载体", f"🔵 {self._rich_markdown_escape(platform)}"),
+            ("开播日期", f"🟠 {self._rich_markdown_escape(date_value)}"),
+            ("集数", f"{episode_count} 集" if episode_count else "—"),
         ])
         if traits:
-            detail_rows.append(("作品特征", " · ".join(traits)))
+            detail_rows.append((
+                "作品特征",
+                " · ".join(
+                    f"=={self._rich_markdown_escape(value)}=="
+                    for value in traits
+                ),
+            ))
         if original_title:
-            detail_rows.append(("原名", original_title))
+            detail_rows.append((
+                "原名", self._rich_markdown_escape(original_title),
+            ))
         if candidate_type != "ready":
             detail_rows.append((
                 "失败原因",
-                self._notification_candidate_text(
-                    focus.get("scan_error") or "未匹配到可信 TMDB 候选",
-                    100,
+                self._rich_markdown_escape(
+                    self._notification_candidate_text(
+                        focus.get("scan_error") or "未匹配到可信 TMDB 候选",
+                        100,
+                    ),
                 ),
             ))
         if notice:
-            detail_rows.append(("操作结果", notice))
-        detail_rows.append(("待处理", f"{len(pending)} 部"))
+            detail_rows.append((
+                "操作结果", self._rich_markdown_escape(notice),
+            ))
         rich_markdown_lines = [
             f"# {'🎞' if candidate_type == 'ready' else '🔎'} "
             f"{self._rich_markdown_escape(focus_title)}",
@@ -4325,10 +4387,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "| 项目 | 信息 |",
             "|:--|:--|",
             *[
-                (
-                    f"| {self._rich_markdown_escape(label)} | "
-                    f"{self._rich_markdown_escape(value)} |"
-                )
+                f"| {self._rich_markdown_escape(label)} | {value} |"
                 for label, value in detail_rows
             ],
         ]
