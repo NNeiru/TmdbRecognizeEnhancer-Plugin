@@ -112,7 +112,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.16"
+    plugin_version = "0.8.17"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -376,6 +376,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._notification_recent: Dict[str, Dict[str, Any]] = {}
         self._notification_outgoing_lock = threading.RLock()
         self._notification_outgoing: Dict[str, float] = {}
+        self._notification_telegram_send_lock = threading.RLock()
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
         """加载配置并启停名称识别事件处理器。"""
@@ -3456,6 +3457,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             original_chat_id: Optional[str] = None,
             force_reply: bool = False,
             userid: Optional[str] = None,
+            rich_text: str = "",
     ) -> Dict[str, Any]:
         """绕过 MP 定时队列，向具体通知实例立即发送候选交互消息。"""
         if NotificationHelper is None:
@@ -3468,25 +3470,70 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not service_info or not getattr(service_info, "instance", None):
             return {"success": False, "error": "notification instance unavailable"}
 
-        # Telegram 的 MP direct-message 路径未传递 buttons；直接调用已选实例，
-        # 同时使用 HTML 并转义正文，避免番名中的 !、()、- 触发 MarkdownV2 解析失败。
+        # Telegram 的 MP direct-message 路径未传递 buttons；直接调用已选实例。
+        # 正文采用 Telegram HTML 富文本，避免 MarkdownV2 对番名标点的严格转义。
         if (
                 MessageChannel is not None
                 and channel == getattr(MessageChannel, "Telegram", None)
                 and callable(getattr(service_info.instance, "send_msg", None))
         ):
+            instance = service_info.instance
+            local_image = None
+            if image and original_message_id and original_chat_id:
+                try:
+                    candidate_path = Path(str(image))
+                    if candidate_path.is_file():
+                        local_image = candidate_path
+                except (OSError, ValueError):
+                    local_image = None
             try:
-                result = service_info.instance.send_msg(
-                    title=title,
-                    text=html_utils.escape(text),
-                    image=image or None,
-                    buttons=buttons,
-                    force_reply=force_reply,
-                    userid=userid,
-                    original_message_id=original_message_id,
-                    original_chat_id=original_chat_id,
-                    parse_mode="HTML",
-                )
+                # MoviePilot 当前 Telegram 包装器尚未透传 Bot API 新增的
+                # primary/success/danger 样式。仅在本次同步发送期间替换键盘工厂，
+                # 支持新版 pyTelegramBotAPI 时启用颜色，旧版自动忽略并保持可用。
+                keyboard_factory = self._build_candidate_telegram_keyboard
+                with self._notification_telegram_send_lock:
+                    had_factory = "_create_inline_keyboard" in getattr(
+                        instance, "__dict__", {},
+                    )
+                    previous_factory = getattr(
+                        instance, "__dict__", {},
+                    ).get("_create_inline_keyboard")
+                    setattr(instance, "_create_inline_keyboard", keyboard_factory)
+                    try:
+                        if local_image:
+                            with local_image.open("rb") as image_file:
+                                result = instance.send_msg(
+                                    title=title,
+                                    text=rich_text or html_utils.escape(text),
+                                    image=image_file,
+                                    buttons=buttons,
+                                    force_reply=force_reply,
+                                    userid=userid,
+                                    original_message_id=original_message_id,
+                                    original_chat_id=original_chat_id,
+                                    parse_mode="HTML",
+                                )
+                        else:
+                            result = instance.send_msg(
+                                title=title,
+                                text=rich_text or html_utils.escape(text),
+                                image=image or None,
+                                buttons=buttons,
+                                force_reply=force_reply,
+                                userid=userid,
+                                original_message_id=original_message_id,
+                                original_chat_id=original_chat_id,
+                                parse_mode="HTML",
+                            )
+                    finally:
+                        if had_factory:
+                            setattr(
+                                instance,
+                                "_create_inline_keyboard",
+                                previous_factory,
+                            )
+                        else:
+                            delattr(instance, "_create_inline_keyboard")
             except Exception as err:  # noqa: BLE001 - 渠道异常不能中断候选扫描。
                 logger.error(f"[媒体整理增强] Telegram 实例 {service} 发送候选失败：{err}")
                 return {"success": False, "error": str(err)}
@@ -3521,6 +3568,37 @@ class TmdbRecognizeEnhancer(_PluginBase):
             logger.error(f"[媒体整理增强] 通知实例 {service} 发送候选失败：{err}")
             return {"success": False, "error": str(err)}
 
+    @staticmethod
+    def _build_candidate_telegram_keyboard(
+            buttons: List[List[dict]],
+    ) -> Any:
+        """构造支持 Telegram 新按钮样式、同时兼容旧 SDK 的内联键盘。"""
+        from inspect import signature
+        from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        supported = set(signature(InlineKeyboardButton).parameters)
+        keyboard = []
+        for row in buttons:
+            button_row = []
+            for button in row:
+                kwargs = {"text": str(button.get("text") or "")}
+                if button.get("url"):
+                    kwargs["url"] = button["url"]
+                else:
+                    kwargs["callback_data"] = button.get("callback_data")
+                if button.get("style") and "style" in supported:
+                    kwargs["style"] = button["style"]
+                if (
+                        button.get("icon_custom_emoji_id")
+                        and "icon_custom_emoji_id" in supported
+                ):
+                    kwargs["icon_custom_emoji_id"] = button[
+                        "icon_custom_emoji_id"
+                    ]
+                button_row.append(InlineKeyboardButton(**kwargs))
+            keyboard.append(button_row)
+        return InlineKeyboardMarkup(keyboard)
+
     def _notification_candidate_delivery_active(self) -> bool:
         return bool(
             self._notification_active()
@@ -3543,6 +3621,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
             f"{self.__class__.__name__}/notification-enhancer/candidates/"
             f"collage/{batch_id}?{query}"
         )
+
+    def _notification_collage_edit_source(
+            self,
+            *,
+            batch_id: str,
+            batch: Dict[str, Any],
+    ) -> str:
+        """返回可由 Telegram 编辑接口直接上传的本地总览拼图。"""
+        path = self._notification_collage_path(batch_id)
+        if not path.is_file() and batch.get("items"):
+            self._build_notification_candidate_collage(
+                batch_id=batch_id,
+                candidates=list(batch.get("items") or []),
+            )
+        return str(path) if path.is_file() else ""
 
     def get_notification_candidate_collage_api(self, batch_id: str):
         """供 MoviePilot Telegram 模块读取本地候选海报拼图。"""
@@ -3699,9 +3792,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             // self.NOTIFICATION_CANDIDATE_PAGE_SIZE,
         )
         if not pending:
+            completed_text = notice or f"本批次 {total} 部候选均已处理。"
             return {
                 "title": f"批次处理完成 · {quarter}",
-                "text": notice or f"本批次 {total} 部候选均已处理。",
+                "text": completed_text,
+                "rich_text": (
+                    f"<blockquote>{html_utils.escape(completed_text)}</blockquote>"
+                ),
                 "buttons": [],
                 "image": str(batch.get("collage") or ""),
             }
@@ -3718,8 +3815,30 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if notice:
             lines.insert(0, notice)
         lines.append("进入详情页可查看番剧信息并处理当页；也可直接处理整批。")
+        rich_lines = []
+        if notice:
+            rich_lines.append(
+                f"<blockquote>{html_utils.escape(notice)}</blockquote>"
+            )
+        rich_lines.extend([
+            f"<b>{html_utils.escape(kind_text)} · {len(pending)} 部</b>",
+            (
+                f"已处理 <b>{handled}</b> / {total}"
+                f"　·　共 <b>{page_count}</b> 页"
+            ),
+            (
+                "<i>来源："
+                f"{html_utils.escape('实时新增' if batch.get('realtime') else '计划批次')}"
+                f" · {html_utils.escape(quarter)}</i>"
+            ),
+            (
+                "<blockquote>进入详情页可逐项查看海报、匹配证据并处理；"
+                "也可在总览直接处理整批。</blockquote>"
+            ),
+        ])
         buttons = [[{
-            "text": f"查看详情 1/{page_count}",
+            "text": f"📋 查看详情 1/{page_count}",
+            "style": "primary",
             "callback_data": self._notification_candidate_callback(
                 "p", batch_id, 0,
             ),
@@ -3728,20 +3847,23 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons.extend([
                 [
                     {
-                        "text": "整批按 TMDB 默认加入",
+                        "text": "✅ 整批按 TMDB 默认加入",
+                        "style": "success",
                         "callback_data": self._notification_candidate_callback(
                             "D", batch_id,
                         ),
                     },
                     {
-                        "text": "整批优先剧集组加入",
+                        "text": "🎞 整批优先剧集组加入",
+                        "style": "success",
                         "callback_data": self._notification_candidate_callback(
                             "G", batch_id,
                         ),
                     },
                 ],
                 [{
-                    "text": "忽略整批",
+                    "text": "🗑 忽略整批",
+                    "style": "danger",
                     "callback_data": self._notification_candidate_callback(
                         "I", batch_id,
                     ),
@@ -3750,13 +3872,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
         else:
             buttons.append([
                 {
-                    "text": "整批重新扫描",
+                    "text": "🔄 整批重新扫描",
+                    "style": "primary",
                     "callback_data": self._notification_candidate_callback(
                         "R", batch_id,
                     ),
                 },
                 {
-                    "text": "忽略整批",
+                    "text": "🗑 忽略整批",
+                    "style": "danger",
                     "callback_data": self._notification_candidate_callback(
                         "I", batch_id,
                     ),
@@ -3765,6 +3889,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return {
             "title": f"待审批 · {quarter} · {len(pending)} 部",
             "text": "\n".join(lines),
+            "rich_text": "\n".join(rich_lines),
             "buttons": buttons,
             "image": str(batch.get("collage") or ""),
         }
@@ -3788,6 +3913,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         page_items = pending[page * page_size:(page + 1) * page_size]
         candidate_type = str(batch.get("candidate_type") or "ready")
         lines = [notice] if notice else []
+        rich_lines = (
+            [f"<blockquote>{html_utils.escape(notice)}</blockquote>"]
+            if notice else []
+        )
         for offset, item in enumerate(page_items, start=page * page_size + 1):
             title = self._notification_candidate_text(
                 item.get("title") or item.get("original_title") or "未命名",
@@ -3797,21 +3926,35 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 item.get("original_title"), 90,
             )
             lines.append(f"{offset}. {title}")
+            rich_lines.append(
+                f"<b>{offset}. {html_utils.escape(title)}</b>"
+            )
             if original and original.casefold() != title.casefold():
                 lines.append(f"   原名：{original}")
+                rich_lines.append(
+                    f"<i>原名：{html_utils.escape(original)}</i>"
+                )
             if candidate_type == "ready":
                 score = item.get("score")
                 evidence = f"TMDB {item.get('tmdb_id')}"
                 if score is not None:
                     evidence += f" · 匹配 {score} 分"
                 lines.append(f"   {evidence}")
+                rich_lines.append(
+                    f"<code>{html_utils.escape(evidence)}</code>"
+                )
             else:
+                failure_reason = self._notification_candidate_text(
+                    item.get("scan_error") or "未匹配到可信 TMDB 候选",
+                    120,
+                )
                 lines.append(
                     "   原因："
-                    f"{self._notification_candidate_text(
-                        item.get('scan_error') or '未匹配到可信 TMDB 候选',
-                        120,
-                    )}"
+                    f"{failure_reason}"
+                )
+                rich_lines.append(
+                    "<blockquote expandable>扫描原因："
+                    f"{html_utils.escape(failure_reason)}</blockquote>"
                 )
             facts = [
                 str(item.get("platform") or "").replace("_", " "),
@@ -3823,26 +3966,34 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 facts.append("续作")
             if item.get("is_multi_season"):
                 facts.append("多季")
-            lines.append(f"   {' · '.join(value for value in facts if value)}")
+            fact_text = " · ".join(value for value in facts if value)
+            lines.append(f"   {fact_text}")
+            if fact_text:
+                rich_lines.append(f"<i>{html_utils.escape(fact_text)}</i>")
         lines.append(f"第 {page + 1} / {page_count} 页 · 尚待处理 {len(pending)} 部")
+        rich_lines.append(
+            f"<blockquote>第 <b>{page + 1}</b> / {page_count} 页"
+            f"　·　尚待处理 <b>{len(pending)}</b> 部</blockquote>"
+        )
 
         nav = []
         if page > 0:
             nav.append({
-                "text": "上一页",
+                "text": "⬅️ 上一页",
                 "callback_data": self._notification_candidate_callback(
                     "p", batch_id, page - 1,
                 ),
             })
         nav.append({
-            "text": "返回总览",
+            "text": "🏠 返回总览",
+            "style": "primary",
             "callback_data": self._notification_candidate_callback(
                 "o", batch_id,
             ),
         })
         if page + 1 < page_count:
             nav.append({
-                "text": "下一页",
+                "text": "下一页 ➡️",
                 "callback_data": self._notification_candidate_callback(
                     "p", batch_id, page + 1,
                 ),
@@ -3852,20 +4003,23 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons.extend([
                 [
                     {
-                        "text": "按 TMDB 默认加入",
+                        "text": "✅ 按 TMDB 默认加入",
+                        "style": "success",
                         "callback_data": self._notification_candidate_callback(
                             "d", batch_id, page,
                         ),
                     },
                     {
-                        "text": "优先剧集组加入",
+                        "text": "🎞 优先剧集组加入",
+                        "style": "success",
                         "callback_data": self._notification_candidate_callback(
                             "g", batch_id, page,
                         ),
                     },
                 ],
                 [{
-                    "text": "忽略此项",
+                    "text": "🗑 忽略此项",
+                    "style": "danger",
                     "callback_data": self._notification_candidate_callback(
                         "i", batch_id, page,
                     ),
@@ -3875,13 +4029,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons.extend([
                 [
                     {
-                        "text": "指定 TMDB · 默认编集",
+                        "text": "✍️ 指定 TMDB · 默认编集",
+                        "style": "primary",
                         "callback_data": self._notification_candidate_callback(
                             "m", batch_id, page,
                         ),
                     },
                     {
-                        "text": "指定 TMDB · 优先剧集组",
+                        "text": "✍️ 指定 TMDB · 优先剧集组",
+                        "style": "primary",
                         "callback_data": self._notification_candidate_callback(
                             "M", batch_id, page,
                         ),
@@ -3889,13 +4045,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 ],
                 [
                     {
-                        "text": "重新扫描此项",
+                        "text": "🔄 重新扫描此项",
                         "callback_data": self._notification_candidate_callback(
                             "r", batch_id, page,
                         ),
                     },
                     {
-                        "text": "忽略此项",
+                        "text": "🗑 忽略此项",
+                        "style": "danger",
                         "callback_data": self._notification_candidate_callback(
                             "i", batch_id, page,
                         ),
@@ -3909,6 +4066,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 f" · {page + 1}/{page_count}"
             ),
             "text": "\n".join(lines),
+            "rich_text": "\n".join(rich_lines),
             "buttons": buttons,
             "image": image,
             "page_item_ids": [
@@ -4036,6 +4194,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             channel=target[0],
             service=target[1],
             image=view["image"],
+            rich_text=view.get("rich_text", ""),
         )
         if not delivery.get("success"):
             logger.error(
@@ -4467,6 +4626,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             userid=str(userid),
             original_message_id=event_data.get("original_message_id"),
             original_chat_id=str(chat_id),
+            rich_text=(
+                f"<b>{html_utils.escape(str(
+                    item.get('title') or item.get('original_title') or item_id
+                ))}</b>\n"
+                f"目标：<code>{html_utils.escape(target_text)}</code>\n"
+                "<blockquote>请直接回复纯数字 TMDBID；回复“取消”可退出。</blockquote>"
+            ),
         )
         if not prompt.get("success") or not prompt.get("message_id"):
             return False
@@ -4576,6 +4742,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             service=service,
             original_message_id=payload.get("original_message_id"),
             original_chat_id=payload.get("original_chat_id"),
+            rich_text=view.get("rich_text", ""),
         )
 
     @staticmethod
@@ -4908,6 +5075,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     service=service,
                     original_message_id=data.get("original_message_id"),
                     original_chat_id=data.get("original_chat_id"),
+                    rich_text=view.get("rich_text", ""),
                 )
             return
 
@@ -4925,13 +5093,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 title=view["title"],
                 text=view["text"],
                 buttons=view["buttons"],
-                # 详情页切换为该候选的公网海报；返回总览时只更新文字，
-                # 避免 Telegram 尝试从容器 127.0.0.1 拉取本地拼图。
-                image=view["image"] if action == "p" else "",
+                # 详情使用公网单张海报；返回总览时直接上传容器内拼图文件，
+                # 避免 Telegram 无法访问 127.0.0.1 导致仅文字更新。
+                image=(
+                    view["image"]
+                    if action == "p"
+                    else self._notification_collage_edit_source(
+                        batch_id=batch_id,
+                        batch=batch,
+                    )
+                ),
                 channel=channel,
                 service=service,
                 original_message_id=data.get("original_message_id"),
                 original_chat_id=data.get("original_chat_id"),
+                rich_text=view.get("rich_text", ""),
             )
             return
 
@@ -4959,6 +5135,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 service=service,
                 original_message_id=data.get("original_message_id"),
                 original_chat_id=data.get("original_chat_id"),
+                rich_text=view.get("rich_text", ""),
             )
             return
 
@@ -5032,6 +5209,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             service=service,
             original_message_id=data.get("original_message_id"),
             original_chat_id=data.get("original_chat_id"),
+            rich_text=view.get("rich_text", ""),
         )
         if not delivery.get("success"):
             logger.warning(

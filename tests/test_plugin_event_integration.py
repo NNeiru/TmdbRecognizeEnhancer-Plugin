@@ -2627,10 +2627,17 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
 
     assert "7 部" in summary["title"]
     assert "共 7 页" in summary["text"]
+    assert "<blockquote>" in summary["rich_text"]
     assert summary["image"].endswith("collage.jpg")
     assert second_page["page_item_ids"] == ["anime:4"]
     assert "番剧 4" in second_page["text"]
+    assert "<b>4. 番剧 4</b>" in second_page["rich_text"]
     assert second_page["image"].endswith("/4.jpg")
+    assert any(
+        button.get("style") == "success"
+        for row in summary["buttons"]
+        for button in row
+    )
     callbacks = [
         button["callback_data"]
         for row in [*summary["buttons"], *second_page["buttons"]]
@@ -2686,6 +2693,54 @@ def test_notification_candidate_page_action_only_handles_current_page(monkeypatc
     assert plugin._send_candidate_instance_notification.call_args.kwargs[
         "original_message_id"
     ] == 123
+
+
+def test_notification_candidate_overview_restores_local_collage(
+        monkeypatch, tmp_path,
+):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin.get_data_path = lambda: tmp_path
+    item = {
+        "id": "anime:1",
+        "title": "番剧 1",
+        "tmdb_id": 1001,
+        "poster": "https://image/1.jpg",
+    }
+    plugin._data[plugin.DATA_KEY_NOTIFICATION_APPROVALS] = {
+        "batches": {
+            "123456789abc": {
+                "quarter": "2026-Q3",
+                "candidate_type": "ready",
+                "items": [item],
+                "item_ids": [item["id"]],
+                "handled_ids": [],
+                "collage": "http://127.0.0.1/collage.jpg",
+            }
+        }
+    }
+    collage_path = plugin._notification_collage_path("123456789abc")
+    collage_path.parent.mkdir(parents=True, exist_ok=True)
+    collage_path.write_bytes(b"jpeg")
+    plugin._notification_candidate_target = Mock(
+        return_value=("telegram", "候选通知"),
+    )
+    plugin._send_candidate_instance_notification = Mock(
+        return_value={"success": True},
+    )
+
+    plugin.on_notification_message_action(SimpleNamespace(event_data={
+        "plugin_id": plugin.__class__.__name__,
+        "text": "nc:o:123456789abc:0",
+        "channel": "telegram",
+        "source": "候选通知",
+        "original_message_id": 123,
+        "original_chat_id": "456",
+    }))
+
+    sent = plugin._send_candidate_instance_notification.call_args.kwargs
+    assert sent["image"] == str(collage_path)
+    assert "<blockquote>" in sent["rich_text"]
 
 
 def test_notification_candidate_collage_uses_local_versioned_endpoint(
@@ -2846,7 +2901,7 @@ def test_failed_notification_detail_offers_manual_tmdb_modes(monkeypatch):
     buttons = [button for row in view["buttons"] for button in row]
     labels = {button["text"] for button in buttons}
     callbacks = {button["callback_data"] for button in buttons}
-    assert "指定 TMDB · 默认编集" in labels
-    assert "指定 TMDB · 优先剧集组" in labels
+    assert any(label.endswith("指定 TMDB · 默认编集") for label in labels)
+    assert any(label.endswith("指定 TMDB · 优先剧集组") for label in labels)
     assert any(value.endswith("nc:m:123456789abc:0") for value in callbacks)
     assert any(value.endswith("nc:M:123456789abc:0") for value in callbacks)
