@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import ModuleHeader from './ModuleHeader.vue'
 import { unwrapResponse } from '../utils'
 
@@ -13,6 +13,7 @@ const loading = ref(false)
 const saving = ref(false)
 const testing = ref(false)
 const candidateLoading = ref(false)
+const candidateSyncing = ref(false)
 const actionLoading = ref(false)
 const error = ref('')
 const notice = ref('')
@@ -155,11 +156,16 @@ async function sendTest(scene) {
   }
 }
 
-async function queryCandidates() {
-  candidateLoading.value = true
+async function queryCandidates(options = {}) {
+  const silent = options?.silent === true
+  if (candidateLoading.value || candidateSyncing.value) return
+  if (silent) candidateSyncing.value = true
+  else candidateLoading.value = true
   error.value = ''
-  selectedReadyIds.value = []
-  selectedFailedIds.value = []
+  if (!silent) {
+    selectedReadyIds.value = []
+    selectedFailedIds.value = []
+  }
   try {
     const result = unwrapResponse(await props.api.post(
       `${props.pluginBase}/notification-enhancer/candidates`,
@@ -174,10 +180,17 @@ async function queryCandidates() {
       ready: result.ready || result.items || [],
       failed: result.failed || [],
     }
+    if (silent) {
+      const readyIds = new Set(data.value.candidates.ready.map(item => item.id))
+      const failedIds = new Set(data.value.candidates.failed.map(item => item.id))
+      selectedReadyIds.value = selectedReadyIds.value.filter(id => readyIds.has(id))
+      selectedFailedIds.value = selectedFailedIds.value.filter(id => failedIds.has(id))
+    }
   } catch (err) {
-    error.value = err?.message || '候选查询失败'
+    if (!silent) error.value = err?.message || '候选查询失败'
   } finally {
-    candidateLoading.value = false
+    if (silent) candidateSyncing.value = false
+    else candidateLoading.value = false
   }
 }
 
@@ -303,9 +316,30 @@ async function sendDigest() {
   }
 }
 
+let candidateRefreshTimer = null
+
+function refreshCandidatesWhenVisible() {
+  if (
+    document.visibilityState === 'visible'
+    && !actionLoading.value
+    && !manualCandidateDialog.value
+  ) {
+    queryCandidates({ silent: true })
+  }
+}
+
 onMounted(async () => {
   await load()
   await queryCandidates()
+  candidateRefreshTimer = window.setInterval(refreshCandidatesWhenVisible, 15000)
+  document.addEventListener('visibilitychange', refreshCandidatesWhenVisible)
+  window.addEventListener('focus', refreshCandidatesWhenVisible)
+})
+
+onBeforeUnmount(() => {
+  if (candidateRefreshTimer) window.clearInterval(candidateRefreshTimer)
+  document.removeEventListener('visibilitychange', refreshCandidatesWhenVisible)
+  window.removeEventListener('focus', refreshCandidatesWhenVisible)
 })
 </script>
 
@@ -539,6 +573,9 @@ onMounted(async () => {
           <label v-for="item in readyCandidates" :key="item.id" class="candidate-item">
             <VCheckboxBtn v-model="selectedReadyIds" :value="item.id" />
             <VImg v-if="item.poster" :src="item.poster" width="48" height="68" cover class="candidate-poster" />
+            <div v-else class="candidate-poster candidate-poster-placeholder">
+              <VIcon icon="mdi-image-off-outline" size="20" />
+            </div>
             <div class="candidate-copy">
               <strong>{{ item.title }}</strong>
               <span>TMDB {{ item.tmdb_id }} · {{ item.platform }}<template v-if="item.has_prequel"> · 续作</template></span>
@@ -561,6 +598,9 @@ onMounted(async () => {
           <div v-for="item in failedCandidates" :key="item.id" class="candidate-item failed-candidate-item">
             <VCheckboxBtn v-model="selectedFailedIds" :value="item.id" />
             <VImg v-if="item.poster" :src="item.poster" width="48" height="68" cover class="candidate-poster" />
+            <div v-else class="candidate-poster candidate-poster-placeholder">
+              <VIcon icon="mdi-image-off-outline" size="20" />
+            </div>
             <div class="candidate-copy">
               <strong>{{ item.title }}</strong>
               <span>{{ item.scan_error || '未匹配到可信 TMDB 条目' }}</span>
@@ -759,8 +799,10 @@ onMounted(async () => {
   padding: 10px;
 }
 .candidate-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px 48px minmax(0, 1fr) max-content;
   align-items: center;
+  justify-items: start;
   gap: 11px;
   min-width: 0;
   min-height: 92px;
@@ -769,9 +811,24 @@ onMounted(async () => {
   border-radius: 12px;
   background: rgba(var(--v-theme-surface), .82);
   cursor: pointer;
+  text-align: left;
 }
-.candidate-poster { flex: 0 0 auto; border-radius: 8px; }
-.candidate-copy { flex: 1; overflow: hidden; }
+.candidate-item > .v-checkbox-btn { grid-column: 1; justify-self: start; }
+.candidate-poster {
+  grid-column: 2;
+  width: 48px;
+  height: 68px;
+  border-radius: 8px;
+}
+.candidate-poster-placeholder {
+  display: grid;
+  place-items: center;
+  color: rgba(var(--v-theme-on-surface), .38);
+  background: rgba(var(--v-theme-on-surface), .055);
+}
+.candidate-copy { grid-column: 3; width: 100%; overflow: hidden; }
+.candidate-item > .v-chip,
+.candidate-item > .v-btn { grid-column: 4; justify-self: end; }
 .candidate-copy strong { overflow-wrap: anywhere; line-height: 1.4; }
 .candidate-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .failed-candidate-item { cursor: default; }
@@ -801,6 +858,13 @@ onMounted(async () => {
   .premium-emoji-field { flex-basis: auto; width: 100%; }
   .candidate-actions { padding-left: 0; }
   .candidate-actions .v-btn { flex: 1; }
+  .candidate-item { grid-template-columns: 32px 48px minmax(0, 1fr); }
+  .candidate-item > .v-chip { grid-column: 3; justify-self: start; }
+  .candidate-item > .v-btn {
+    grid-column: 2 / -1;
+    justify-self: stretch;
+    width: 100%;
+  }
   .manual-candidate-actions .v-btn { flex: 1 0 100%; }
 }
 </style>
