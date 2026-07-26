@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html as html_utils
 import re
 import threading
 import time
@@ -98,7 +99,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.11"
+    plugin_version = "0.8.12"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3351,6 +3352,69 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "chat_id": getattr(response, "chat_id", None),
         }
 
+    def _send_candidate_instance_notification(
+            self,
+            *,
+            title: str,
+            text: str,
+            buttons: List[List[dict]],
+            channel: Any,
+            service: str,
+    ) -> Dict[str, Any]:
+        """绕过 MP 定时队列，向具体通知实例立即发送候选交互消息。"""
+        if NotificationHelper is None:
+            return {"success": False, "error": "NotificationHelper unavailable"}
+        try:
+            service_info = NotificationHelper().get_service(name=service)
+        except Exception as err:  # noqa: BLE001 - 实例解析失败需反馈给调用方。
+            logger.error(f"[媒体整理增强] 读取通知实例 {service} 失败：{err}")
+            return {"success": False, "error": str(err)}
+        if not service_info or not getattr(service_info, "instance", None):
+            return {"success": False, "error": "notification instance unavailable"}
+
+        # Telegram 的 MP direct-message 路径未传递 buttons；直接调用已选实例，
+        # 同时使用 HTML 并转义正文，避免番名中的 !、()、- 触发 MarkdownV2 解析失败。
+        if (
+                MessageChannel is not None
+                and channel == getattr(MessageChannel, "Telegram", None)
+                and callable(getattr(service_info.instance, "send_msg", None))
+        ):
+            try:
+                result = service_info.instance.send_msg(
+                    title=title,
+                    text=html_utils.escape(text),
+                    buttons=buttons,
+                    parse_mode="HTML",
+                )
+            except Exception as err:  # noqa: BLE001 - 渠道异常不能中断候选扫描。
+                logger.error(f"[媒体整理增强] Telegram 实例 {service} 发送候选失败：{err}")
+                return {"success": False, "error": str(err)}
+            return {
+                "success": bool(result and result.get("success")),
+                "message_id": result.get("message_id") if isinstance(result, dict) else None,
+                "chat_id": result.get("chat_id") if isinstance(result, dict) else None,
+            }
+
+        # 其它渠道通过其运行模块立即投递。部分渠道没有同步回执，只能确认模块已接受。
+        notification_cls = getattr(schemas, "Notification", None)
+        module = getattr(service_info, "module", None)
+        if notification_cls is None or not callable(getattr(module, "post_message", None)):
+            return {"success": False, "error": "notification module cannot post"}
+        try:
+            module.post_message(notification_cls(
+                channel=channel,
+                source=service,
+                mtype=NotificationType.Plugin if NotificationType is not None else None,
+                title=title,
+                text=text,
+                buttons=buttons,
+                save_history=False,
+            ))
+            return {"success": True, "confirmed": False}
+        except Exception as err:  # noqa: BLE001 - 渠道异常不能中断候选扫描。
+            logger.error(f"[媒体整理增强] 通知实例 {service} 发送候选失败：{err}")
+            return {"success": False, "error": str(err)}
+
     def _notification_candidate_delivery_active(self) -> bool:
         return bool(
             self._notification_active()
@@ -3386,14 +3450,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             quarter: str,
             candidate_type: str,
             candidates: List[Dict[str, Any]],
+            batch_id: str = "",
     ) -> str:
         item_ids = [str(item.get("id")) for item in candidates if item.get("id")]
-        batch_id = hashlib.sha1(
-            (
-                f"{quarter}|{candidate_type}|{time.time_ns()}|"
-                f"{'|'.join(item_ids)}"
-            ).encode("utf-8", errors="ignore")
-        ).hexdigest()[:12]
+        batch_id = batch_id or self._new_notification_candidate_batch_id(
+            quarter=quarter,
+            candidate_type=candidate_type,
+            candidates=candidates,
+        )
         approvals = self._read_notification_approvals()
         batches = approvals.get("batches") if isinstance(approvals.get("batches"), dict) else {}
         batches[batch_id] = {
@@ -3411,6 +3475,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._save_notification_approvals(approvals)
         return batch_id
 
+    @staticmethod
+    def _new_notification_candidate_batch_id(
+            *,
+            quarter: str,
+            candidate_type: str,
+            candidates: List[Dict[str, Any]],
+    ) -> str:
+        item_ids = [str(item.get("id")) for item in candidates if item.get("id")]
+        return hashlib.sha1(
+            (
+                f"{quarter}|{candidate_type}|{time.time_ns()}|"
+                f"{'|'.join(item_ids)}"
+            ).encode("utf-8", errors="ignore")
+        ).hexdigest()[:12]
+
     def _send_notification_candidate_group(
             self,
             *,
@@ -3418,11 +3497,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidate_type: str,
             candidates: List[Dict[str, Any]],
             realtime: bool = False,
-    ) -> None:
-        """向候选专用频道发送一批或一条交互通知。"""
+    ) -> bool:
+        """向候选专用实例立即发送一批或一条交互通知。"""
         if not candidates or not self._notification_candidate_delivery_active():
-            return
-        batch_id = self._store_notification_candidate_batch(
+            return False
+        batch_id = self._new_notification_candidate_batch_id(
             quarter=quarter,
             candidate_type=candidate_type,
             candidates=candidates,
@@ -3472,18 +3551,30 @@ class TmdbRecognizeEnhancer(_PluginBase):
         target = self._notification_candidate_target()
         if not target:
             logger.warning("[媒体整理增强] 未选择可接收“插件”通知的候选专用实例")
-            return
-        self._send_enhanced_notification(
+            return False
+        delivery = self._send_candidate_instance_notification(
             title=title,
             text=(
                 f"{preview}\n\n来源："
                 f"{'实时新增' if realtime else '计划批次'} · {quarter}"
             ),
-            source_notice={},
             buttons=buttons,
             channel=target[0],
             service=target[1],
         )
+        if not delivery.get("success"):
+            logger.error(
+                f"[媒体整理增强] 候选通知发送失败：实例={target[1]}，"
+                f"季度={quarter}，类型={candidate_type}"
+            )
+            return False
+        self._store_notification_candidate_batch(
+            quarter=quarter,
+            candidate_type=candidate_type,
+            candidates=candidates,
+            batch_id=batch_id,
+        )
+        return True
 
     def _monitor_notification_candidates(self, quarter: str) -> None:
         """扫描后仅推送相对基线新增的候选，每个条目单独通知。"""
@@ -3587,19 +3678,25 @@ class TmdbRecognizeEnhancer(_PluginBase):
             else f"{now.year}-Q{((now.month - 1) // 3) + 1}"
         )
         snapshot = self._notification_candidate_snapshot(quarter)
+        ready_sent = False
+        failed_sent = False
         if self._notification_candidate_delivery_active():
-            self._send_notification_candidate_group(
-                quarter=quarter,
-                candidate_type="ready",
-                candidates=snapshot["ready"],
-            )
-            self._send_notification_candidate_group(
-                quarter=quarter,
-                candidate_type="failed",
-                candidates=snapshot["failed"],
-            )
+            if snapshot["ready"]:
+                ready_sent = self._send_notification_candidate_group(
+                    quarter=quarter,
+                    candidate_type="ready",
+                    candidates=snapshot["ready"],
+                )
+            if snapshot["failed"]:
+                failed_sent = self._send_notification_candidate_group(
+                    quarter=quarter,
+                    candidate_type="failed",
+                    candidates=snapshot["failed"],
+                )
+        attempted = int(bool(snapshot["ready"])) + int(bool(snapshot["failed"]))
+        delivered = int(ready_sent) + int(failed_sent)
         # 手工“立即生成”仅用于试发和临时审批，不占用计划任务本周期配额。
-        if not force and (snapshot["ready"] or snapshot["failed"]):
+        if not force and attempted and delivered == attempted:
             approvals = self._read_notification_approvals()
             approvals["last_batch_periods"] = {
                 **(approvals.get("last_batch_periods") or {}),
@@ -3607,7 +3704,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
             }
             self._save_notification_approvals(approvals)
         return {
-            "sent": bool(snapshot["ready"] or snapshot["failed"]),
+            "sent": bool(delivered),
+            "delivery_attempted": attempted,
+            "delivery_succeeded": delivered,
+            "delivery_failed": max(0, attempted - delivered),
             "period": period,
             "quarter": quarter,
             "ready": len(snapshot["ready"]),
@@ -3627,10 +3727,26 @@ class TmdbRecognizeEnhancer(_PluginBase):
             force=True,
             quarter_override=str((payload or {}).get("quarter") or ""),
         )
+        delivery_failed = self._safe_int(result.get("delivery_failed"), 0)
+        if delivery_failed:
+            return schemas.Response(
+                success=False,
+                message=(
+                    f"候选批次发送失败：{delivery_failed} 条通知未获得渠道成功结果。"
+                    "请检查所选实例的 Token、Chat ID 和 MoviePilot 日志"
+                ),
+                data={
+                    **result,
+                    "snapshot": self._notification_candidate_snapshot(
+                        result["quarter"]
+                    ),
+                    "candidate_schedule": self._notification_candidate_schedule_status(),
+                },
+            )
         return schemas.Response(
             success=True,
             message=(
-                f"批次已生成：可加入 {result['ready']} 部，"
+                f"批次已发送：可加入 {result['ready']} 部，"
                 f"扫描失败 {result['failed']} 部"
             ),
             data={
