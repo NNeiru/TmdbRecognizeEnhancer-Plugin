@@ -31,6 +31,8 @@ const now = new Date()
 const selectedQuarter = ref(`${now.getFullYear()}-Q${Math.floor(now.getMonth() / 3) + 1}`)
 const selectedReadyIds = ref([])
 const selectedFailedIds = ref([])
+const failedTmdbIds = ref({})
+const manualCandidateBusy = ref('')
 const recordFilter = ref('all')
 const showRecords = ref(false)
 
@@ -207,6 +209,43 @@ async function candidateAction(action, candidateType = 'ready') {
     error.value = err?.message || '候选处理失败'
   } finally {
     actionLoading.value = false
+  }
+}
+
+async function addFailedCandidate(item, action) {
+  const tmdbId = Number(failedTmdbIds.value[item.id] || 0)
+  if (!tmdbId) {
+    error.value = `请先为“${item.title}”填写 TMDBID`
+    return
+  }
+  manualCandidateBusy.value = item.id
+  error.value = ''
+  try {
+    const result = unwrapResponse(await props.api.post(
+      `${props.pluginBase}/notification-enhancer/candidates/action`,
+      {
+        quarter: selectedQuarter.value,
+        item_ids: [item.id],
+        action,
+        tmdb_id_overrides: { [item.id]: tmdbId },
+        region: config.value.notification_candidate_region,
+        platforms: config.value.notification_candidate_platforms,
+        sequel_only: config.value.notification_candidate_sequel_only,
+      },
+    )) || {}
+    data.value.candidates = {
+      ready: result.ready || result.items || [],
+      failed: result.failed || [],
+    }
+    if (result.operation_failures?.length) {
+      throw new Error(result.operation_failures[0]?.reason || '规则添加失败')
+    }
+    delete failedTmdbIds.value[item.id]
+    notice.value = `已按 TMDB ${tmdbId} 建立维护规则`
+  } catch (err) {
+    error.value = err?.message || '补充 TMDBID 失败'
+  } finally {
+    manualCandidateBusy.value = ''
   }
 }
 
@@ -449,14 +488,31 @@ onMounted(async () => {
           <VBtn color="warning" variant="tonal" prepend-icon="mdi-refresh" :loading="actionLoading" :disabled="!selectedFailedIds.length" @click="candidateAction('retry', 'failed')">重新扫描</VBtn>
         </div>
         <div class="candidate-items">
-          <label v-for="item in failedCandidates" :key="item.id" class="candidate-item">
+          <div v-for="item in failedCandidates" :key="item.id" class="candidate-item failed-candidate-item">
             <VCheckboxBtn v-model="selectedFailedIds" :value="item.id" />
             <VImg v-if="item.poster" :src="item.poster" width="42" height="58" cover class="candidate-poster" />
             <div class="candidate-copy">
               <strong>{{ item.title }}</strong>
               <span>{{ item.scan_error || '未匹配到可信 TMDB 条目' }}</span>
             </div>
-          </label>
+            <VTextField
+              v-model="failedTmdbIds[item.id]" label="TMDBID" type="number"
+              density="compact" variant="outlined" hide-details class="candidate-tmdb-input"
+            />
+            <VMenu>
+              <template #activator="{ props: menuProps }">
+                <VBtn
+                  v-bind="menuProps" color="primary" variant="tonal"
+                  append-icon="mdi-menu-down" :loading="manualCandidateBusy === item.id"
+                  :disabled="!Number(failedTmdbIds[item.id] || 0)"
+                >补充并加入</VBtn>
+              </template>
+              <VList density="compact">
+                <VListItem title="使用 TMDB 默认编集" prepend-icon="mdi-database-outline" @click="addFailedCandidate(item, 'add_default')" />
+                <VListItem title="优先 Production/Season 剧集组" prepend-icon="mdi-animation-outline" @click="addFailedCandidate(item, 'add_group')" />
+              </VList>
+            </VMenu>
+          </div>
         </div>
       </div>
       <div v-if="!readyCandidates.length && !failedCandidates.length" class="empty-inline">
@@ -569,6 +625,8 @@ onMounted(async () => {
 .candidate-item:nth-child(odd) { border-right: 1px solid rgba(var(--v-theme-on-surface), .07); }
 .candidate-poster { flex: 0 0 auto; border-radius: 7px; }
 .candidate-copy { flex: 1; }
+.failed-candidate-item { cursor: default; flex-wrap: wrap; }
+.candidate-tmdb-input { flex: 0 0 118px; max-width: 118px; }
 .empty-inline { display: flex; align-items: center; justify-content: center; gap: 9px; min-height: 86px; color: rgba(var(--v-theme-on-surface), .55); font-size: .82rem; }
 .records-heading { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 0; color: inherit; text-align: left; border: 0; background: transparent; cursor: pointer; }
 .record-toolbar { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
@@ -578,6 +636,7 @@ onMounted(async () => {
 @media (max-width: 900px) {
   .mode-grid, .policy-grid, .candidate-items, .delivery-grid { grid-template-columns: 1fr; }
   .candidate-item:nth-child(odd) { border-right: 0; }
+  .candidate-tmdb-input { flex-basis: 105px; max-width: 105px; }
   .candidate-controls { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 600px) {

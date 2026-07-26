@@ -61,6 +61,11 @@ except ImportError:  # pragma: no cover - 旧版 MP 不能枚举具体通知实�
     NotificationHelper = None
 
 try:
+    from app.helper.interaction import plugin_input_interaction_manager
+except ImportError:  # pragma: no cover - 旧版 MP 不支持插件文本输入会话。
+    plugin_input_interaction_manager = None
+
+try:
     from app.schemas.types import EventType
 except ImportError:  # pragma: no cover - 仅用于兼容缺少异步事件枚举的旧版 MP。
     EventType = None
@@ -107,7 +112,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.15"
+    plugin_version = "0.8.16"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -2348,11 +2353,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if any(str(item.get("scan_status") or "") == "scanning" for item in catalog or []):
             self._start_catalog_scan(quarter_key)
 
-        rules = {self._safe_int(item.get("tmdb_id"), 0): item for item in self._read_episode_rules()}
+        episode_rules = self._read_episode_rules()
         view = []
         for item in deepcopy(catalog or []):
-            matched_id = self._safe_int(((item.get("tmdb_match") or {}).get("best") or {}).get("tmdb_id"), 0)
-            item["maintained"] = matched_id in rules if matched_id else False
+            maintained_tmdb_id = self._catalog_maintained_tmdb_id(
+                item, episode_rules,
+            )
+            item["maintained"] = bool(maintained_tmdb_id)
+            item["maintained_tmdb_id"] = maintained_tmdb_id or None
             view.append(item)
         scanning_count = sum(1 for item in view if item.get("scan_status") == "scanning")
         matched_count = sum(1 for item in view if item.get("scan_status") == "matched")
@@ -3189,10 +3197,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         items = cached.get("items") if isinstance(cached, dict) else []
         approvals = self._read_notification_approvals()
         ignored = set(str(value) for value in approvals.get("ignored") or [])
-        maintained = {
-            self._safe_int(rule.get("tmdb_id"), 0)
-            for rule in self._read_episode_rules()
-        }
+        rules = self._read_episode_rules()
         options = options if isinstance(options, dict) else {}
         region = str(
             options.get("region")
@@ -3219,9 +3224,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
             match = item.get("tmdb_match") or {}
             best = match.get("best") or {}
             tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
+            maintained_tmdb_id = self._catalog_maintained_tmdb_id(item, rules)
             if not item_id or item_id in ignored:
                 continue
-            if tmdb_id and tmdb_id in maintained:
+            if maintained_tmdb_id:
                 continue
             if region != "all" and str(item.get("region") or "") != region:
                 continue
@@ -3257,6 +3263,71 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 candidate["candidate_type"] = "failed"
                 failed.append(candidate)
         return {"ready": ready, "failed": failed}
+
+    def _catalog_maintained_tmdb_id(
+            self,
+            item: Dict[str, Any],
+            rules: Optional[List[Dict[str, Any]]] = None,
+    ) -> int:
+        """识别看板条目是否已被维护，包括没有自动匹配 ID 的手动规则。
+
+        优先使用明确 TMDBID 和 catalog:<item_id> 片段；对于看板外手工添加的
+        规则，只接受去季号后标题的唯一精确命中，避免同名作品误关联。
+        """
+        rules = rules if isinstance(rules, list) else self._read_episode_rules()
+        best = ((item.get("tmdb_match") or {}).get("best") or {})
+        matched_tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
+        maintained_ids = {
+            self._safe_int(rule.get("tmdb_id"), 0)
+            for rule in rules if self._safe_int(rule.get("tmdb_id"), 0)
+        }
+        if matched_tmdb_id in maintained_ids:
+            return matched_tmdb_id
+
+        item_id = str(item.get("id") or "")
+        segment_id = f"catalog:{item_id}" if item_id else ""
+        for rule in rules:
+            if segment_id and any(
+                    str(segment.get("id") or "") == segment_id
+                    for segment in rule.get("installments") or []
+                    if isinstance(segment, dict)
+            ):
+                return self._safe_int(rule.get("tmdb_id"), 0)
+
+        item_titles = {
+            self._normalize_text(value)
+            for value in self._catalog_search_titles(item)
+            if self._normalize_text(value)
+        }
+        if not item_titles:
+            return 0
+        matches = set()
+        item_quarter = str(item.get("quarter") or "")
+        for rule in rules:
+            values = [rule.get("title")]
+            for segment in rule.get("installments") or []:
+                if not isinstance(segment, dict):
+                    continue
+                segment_quarter = str(segment.get("quarter") or "")
+                if item_quarter and segment_quarter and segment_quarter != item_quarter:
+                    continue
+                values.extend([
+                    segment.get("title"),
+                    *(segment.get("aliases") or []),
+                ])
+            rule_titles = {
+                self._normalize_text(value)
+                for value in self._catalog_search_titles({
+                    "name": rule.get("title"),
+                    "aliases": values,
+                })
+                if self._normalize_text(value)
+            }
+            if item_titles.intersection(rule_titles):
+                tmdb_id = self._safe_int(rule.get("tmdb_id"), 0)
+                if tmdb_id:
+                    matches.add(tmdb_id)
+        return next(iter(matches)) if len(matches) == 1 else 0
 
     def _notification_candidates(
             self,
@@ -3383,6 +3454,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             image: str = "",
             original_message_id: Optional[int] = None,
             original_chat_id: Optional[str] = None,
+            force_reply: bool = False,
+            userid: Optional[str] = None,
     ) -> Dict[str, Any]:
         """绕过 MP 定时队列，向具体通知实例立即发送候选交互消息。"""
         if NotificationHelper is None:
@@ -3408,6 +3481,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     text=html_utils.escape(text),
                     image=image or None,
                     buttons=buttons,
+                    force_reply=force_reply,
+                    userid=userid,
                     original_message_id=original_message_id,
                     original_chat_id=original_chat_id,
                     parse_mode="HTML",
@@ -3435,6 +3510,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 text=text,
                 image=image or None,
                 buttons=buttons,
+                force_reply=force_reply,
+                userid=userid,
+                original_message_id=original_message_id,
+                original_chat_id=original_chat_id,
                 save_history=False,
             ))
             return {"success": True, "confirmed": False}
@@ -3793,19 +3872,35 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 }],
             ])
         else:
-            buttons.append([
-                {
-                    "text": "重新扫描此项",
-                    "callback_data": self._notification_candidate_callback(
-                        "r", batch_id, page,
-                    ),
-                },
-                {
-                    "text": "忽略此项",
-                    "callback_data": self._notification_candidate_callback(
-                        "i", batch_id, page,
-                    ),
-                },
+            buttons.extend([
+                [
+                    {
+                        "text": "指定 TMDB · 默认编集",
+                        "callback_data": self._notification_candidate_callback(
+                            "m", batch_id, page,
+                        ),
+                    },
+                    {
+                        "text": "指定 TMDB · 优先剧集组",
+                        "callback_data": self._notification_candidate_callback(
+                            "M", batch_id, page,
+                        ),
+                    },
+                ],
+                [
+                    {
+                        "text": "重新扫描此项",
+                        "callback_data": self._notification_candidate_callback(
+                            "r", batch_id, page,
+                        ),
+                    },
+                    {
+                        "text": "忽略此项",
+                        "callback_data": self._notification_candidate_callback(
+                            "i", batch_id, page,
+                        ),
+                    },
+                ],
             ])
         image = str(page_items[0].get("poster") or batch.get("collage") or "")
         return {
@@ -4224,6 +4319,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         cached = self._read_season_catalog_cache().get(quarter) or {}
         catalog = cached.get("items") if isinstance(cached, dict) else []
         index = {str(item.get("id")): item for item in catalog or []}
+        raw_overrides = payload.get("tmdb_id_overrides") or {}
+        tmdb_id_overrides = {
+            str(key): self._safe_int(value, 0)
+            for key, value in raw_overrides.items()
+            if self._safe_int(value, 0)
+        } if isinstance(raw_overrides, dict) else {}
         preference = "group_preferred" if action == "add_group" else "default"
         rules = self._read_episode_rules()
         added, failed = [], []
@@ -4233,11 +4334,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 failed.append({"id": item_id, "reason": "季度缓存中不存在"})
                 continue
             try:
-                added.append(self._add_catalog_item_to_rules(item, preference, rules))
+                added.append(self._add_catalog_item_to_rules(
+                    item,
+                    preference,
+                    rules,
+                    tmdb_id_override=tmdb_id_overrides.get(item_id, 0),
+                ))
             except Exception as err:  # noqa: BLE001 - 批量审批逐条报告
                 failed.append({"id": item_id, "reason": str(err)})
         if added:
             self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
+            # 人工补充 TMDBID 会同步改写 item 的匹配状态；必须持久化回季度
+            # 缓存，否则下一次刷新仍会把同一条目列入“扫描失败”。
+            self._save_season_catalog_quarter(quarter, catalog)
         snapshot = self._notification_candidate_snapshot(
             quarter, candidate_options,
         )
@@ -4259,12 +4368,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
             quarter: str,
             items: List[Dict[str, Any]],
     ) -> None:
-        """后台逐条重试失败项；成功状态变化会进入实时监控。"""
+        """后台逐条全新重试；不复用旧失败结果，并重新应用跨站 ID 数据库。"""
         for item in items:
             try:
+                item["tmdb_match"] = {}
+                item.pop("tmdb_candidates", None)
                 item["scan_status"] = "scanning"
                 item.pop("scan_error", None)
                 self._merge_catalog_scan_item(quarter, item)
+                self._enrich_cross_id_catalog_mappings([item])
                 updated = self._scan_catalog_item(item)
             except Exception as err:  # noqa: BLE001 - 批量重试逐条保留错误
                 item["scan_status"] = "failed"
@@ -4304,6 +4416,166 @@ class TmdbRecognizeEnhancer(_PluginBase):
             title=title,
             text=text,
             **kwargs,
+        )
+
+    def _prompt_notification_candidate_tmdb(
+            self,
+            *,
+            event_data: Dict[str, Any],
+            batch_id: str,
+            batch: Dict[str, Any],
+            page: int,
+            preference: str,
+            channel: Any,
+            service: str,
+    ) -> bool:
+        """通过 MoviePilot 插件输入会话向 Telegram 用户索取一个 TMDBID。"""
+        if plugin_input_interaction_manager is None:
+            return False
+        view = self._render_notification_candidate_page(
+            batch_id=batch_id, batch=batch, page=page,
+        )
+        item_ids = view.get("page_item_ids") or []
+        if not item_ids:
+            return False
+        item_id = str(item_ids[0])
+        item = next(
+            (
+                value for value in batch.get("items") or []
+                if str(value.get("id") or "") == item_id
+            ),
+            {},
+        )
+        userid = event_data.get("userid")
+        chat_id = event_data.get("original_chat_id") or event_data.get("chat_id")
+        if userid in (None, "") or chat_id in (None, ""):
+            return False
+        target_text = (
+            "优先剧集组" if preference == "group_preferred" else "TMDB 默认编集"
+        )
+        prompt = self._send_candidate_instance_notification(
+            title="补充 TMDBID",
+            text=(
+                f"{item.get('title') or item.get('original_title') or item_id}\n"
+                f"目标：{target_text}\n"
+                "请直接回复纯数字 TMDBID；回复“取消”可退出。"
+            ),
+            buttons=[],
+            channel=channel,
+            service=service,
+            force_reply=True,
+            userid=str(userid),
+            original_message_id=event_data.get("original_message_id"),
+            original_chat_id=str(chat_id),
+        )
+        if not prompt.get("success") or not prompt.get("message_id"):
+            return False
+        plugin_input_interaction_manager.create_or_replace(
+            user_id=userid,
+            plugin_id=self.__class__.__name__,
+            channel=channel,
+            source=service,
+            username=event_data.get("username"),
+            chat_id=prompt.get("chat_id") or chat_id,
+            prompt_message_id=prompt.get("message_id"),
+            prompt_id=f"candidate-tmdb:{batch_id}:{item_id}",
+            timeout_seconds=180,
+            payload={
+                "kind": "notification_candidate_tmdb",
+                "batch_id": batch_id,
+                "item_id": item_id,
+                "page": page,
+                "preference": preference,
+                "original_message_id": event_data.get("original_message_id"),
+                "original_chat_id": str(chat_id),
+            },
+        )
+        return True
+
+    def _handle_notification_candidate_tmdb_input(
+            self, data: Dict[str, Any],
+    ) -> None:
+        """把 Telegram 文本回复作为失败候选的人工 TMDB 纠错并立即建规则。"""
+        payload = data.get("payload") or {}
+        if not isinstance(payload, dict) or payload.get("kind") != "notification_candidate_tmdb":
+            return
+        batch_id = str(payload.get("batch_id") or "")
+        item_id = str(payload.get("item_id") or "")
+        tmdb_text = str(data.get("input_text") or "").strip()
+        tmdb_id = self._safe_int(tmdb_text, 0) if re.fullmatch(r"\d{1,9}", tmdb_text) else 0
+        target = self._notification_candidate_target()
+        channel = data.get("channel") or (target[0] if target else None)
+        service = str(data.get("source") or (target[1] if target else ""))
+        approvals = self._read_notification_approvals()
+        batch = (approvals.get("batches") or {}).get(batch_id) or {}
+        if not batch or not item_id:
+            return
+
+        if not tmdb_id:
+            self._send_candidate_instance_notification(
+                title="TMDBID 格式不正确",
+                text="请输入纯数字 TMDBID。当前输入已取消，请在候选详情中重新点击“指定 TMDB”。",
+                buttons=[],
+                channel=channel,
+                service=service,
+                userid=str(data.get("userid") or "") or None,
+                original_chat_id=str(data.get("chat_id") or "") or None,
+            )
+            return
+
+        preference = str(payload.get("preference") or "default")
+        api_action = "add_group" if preference == "group_preferred" else "add_default"
+        result = self.action_notification_candidates_api({
+            "quarter": batch.get("quarter"),
+            "item_ids": [item_id],
+            "action": api_action,
+            "tmdb_id_overrides": {item_id: tmdb_id},
+        })
+        result_data = getattr(result, "data", None)
+        failures = (
+            result_data.get("operation_failures") or []
+            if isinstance(result_data, dict) else []
+        )
+        succeeded = bool(getattr(result, "success", False)) and not failures
+        if succeeded:
+            batch["handled_ids"] = list(dict.fromkeys([
+                *(batch.get("handled_ids") or []), item_id,
+            ]))
+            batches = approvals.get("batches") or {}
+            batches[batch_id] = batch
+            approvals["batches"] = batches
+            self._save_notification_approvals(approvals)
+            notice = f"已按 TMDB {tmdb_id} 建立维护规则。"
+        else:
+            reason = (
+                failures[0].get("reason")
+                if failures and isinstance(failures[0], dict)
+                else getattr(result, "message", None)
+            )
+            notice = f"TMDB {tmdb_id} 添加失败：{reason or '未知错误'}"
+
+        page = self._safe_int(payload.get("page"), 0)
+        view = (
+            self._render_notification_candidate_page(
+                batch_id=batch_id, batch=batch, page=page, notice=notice,
+            )
+            if self._notification_batch_pending_items(batch)
+            else self._render_notification_candidate_summary(
+                batch_id=batch_id, batch=batch, notice=notice,
+            )
+        )
+        self._send_candidate_instance_notification(
+            title=view["title"],
+            text=view["text"],
+            buttons=view["buttons"],
+            image=(
+                view["image"]
+                if self._notification_batch_pending_items(batch) else ""
+            ),
+            channel=channel,
+            service=service,
+            original_message_id=payload.get("original_message_id"),
+            original_chat_id=payload.get("original_chat_id"),
         )
 
     @staticmethod
@@ -4549,8 +4821,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if str(data.get("plugin_id") or "") != self.__class__.__name__:
             return
         content = str(data.get("text") or "")
+        if content.startswith("plugin_input|"):
+            self._handle_notification_candidate_tmdb_input(data)
+            return
+        if content.startswith("plugin_input_cancel|") or content.startswith("plugin_input_expired|"):
+            return
         match = re.fullmatch(
-            r"nc:([opdgiDGIrR]):([0-9a-f]{12}):(\d{1,3})",
+            r"nc:([opdgimMDGIrR]):([0-9a-f]{12}):(\d{1,3})",
             content,
         )
         if match:
@@ -4604,6 +4881,35 @@ class TmdbRecognizeEnhancer(_PluginBase):
         target = self._notification_candidate_target()
         channel = data.get("channel") or (target[0] if target else None)
         service = str(data.get("source") or (target[1] if target else ""))
+
+        if action in ("m", "M"):
+            prompted = self._prompt_notification_candidate_tmdb(
+                event_data=data,
+                batch_id=batch_id,
+                batch=batch,
+                page=page,
+                preference="group_preferred" if action == "M" else "default",
+                channel=channel,
+                service=service,
+            )
+            if not prompted:
+                view = self._render_notification_candidate_page(
+                    batch_id=batch_id,
+                    batch=batch,
+                    page=page,
+                    notice="当前通知渠道无法接收文本输入，请到插件季度看板补充 TMDBID。",
+                )
+                self._send_candidate_instance_notification(
+                    title=view["title"],
+                    text=view["text"],
+                    buttons=view["buttons"],
+                    image="",
+                    channel=channel,
+                    service=service,
+                    original_message_id=data.get("original_message_id"),
+                    original_chat_id=data.get("original_chat_id"),
+                )
+            return
 
         if action in ("o", "p"):
             view = (

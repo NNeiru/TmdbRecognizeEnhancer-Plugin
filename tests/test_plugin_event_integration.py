@@ -2715,3 +2715,138 @@ def test_notification_candidate_collage_uses_local_versioned_endpoint(
     assert "notification-enhancer/candidates/collage/123456789abc" in url
     assert "apikey=test-token" in url
     assert module.Image.open(path).size == (752, 744)
+
+
+def test_notification_retry_clears_old_failure_and_rechecks_cross_id(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    item = {
+        "id": "anilist:1",
+        "quarter": "2026-Q3",
+        "scan_status": "failed",
+        "scan_error": "旧版未匹配",
+        "tmdb_match": {
+            "accepted": False,
+            "attempted": True,
+            "reason": "旧版未匹配",
+        },
+    }
+    plugin._data[plugin.DATA_KEY_SEASON_CATALOG] = {
+        "2026-Q3": {"items": [dict(item)], "schema_version": plugin.CATALOG_SCHEMA_VERSION},
+    }
+
+    def apply_cross_id(items):
+        assert items[0]["tmdb_match"] == {}
+        items[0]["tmdb_match"] = {
+            "accepted": True,
+            "best": {
+                "tmdb_id": 123,
+                "name": "示例",
+                "media_type": module.MediaType.TV.value,
+            },
+        }
+        return 1
+
+    plugin._enrich_cross_id_catalog_mappings = Mock(side_effect=apply_cross_id)
+    plugin._scan_catalog_item = Mock(side_effect=lambda value: {
+        **value, "scan_status": "matched",
+    })
+    plugin._monitor_notification_candidates = Mock()
+
+    plugin._retry_notification_candidates_worker("2026-Q3", [dict(item)])
+
+    plugin._enrich_cross_id_catalog_mappings.assert_called_once()
+    stored = plugin._data[plugin.DATA_KEY_SEASON_CATALOG]["2026-Q3"]["items"][0]
+    assert stored["scan_status"] == "matched"
+    assert stored["tmdb_match"]["best"]["tmdb_id"] == 123
+    assert "scan_error" not in stored
+
+
+def test_failed_catalog_item_is_recognized_as_maintained_by_unique_rule_title(
+        monkeypatch,
+):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    item = {
+        "id": "anilist:2",
+        "quarter": "2026-Q3",
+        "name": "Kimi no Koto ga Daidaidaidaidaisuki na 100-nin no Kanojo 3rd Season",
+        "aliases": ["超超超超超喜欢你的100个女朋友 第三季"],
+        "scan_status": "failed",
+        "tmdb_match": {"accepted": False, "attempted": True},
+    }
+    rules = [{
+        "tmdb_id": 223564,
+        "title": "超超超超超喜欢你的100个女朋友",
+        "installments": [],
+    }]
+
+    assert plugin._catalog_maintained_tmdb_id(item, rules) == 223564
+
+
+def test_notification_manual_tmdb_override_persists_catalog_match(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    item = {
+        "id": "anilist:3",
+        "quarter": "2026-Q3",
+        "name": "Example Season 2",
+        "display_name": "示例 第二季",
+        "scan_status": "failed",
+        "tmdb_match": {"accepted": False, "attempted": True},
+    }
+    plugin._data[plugin.DATA_KEY_SEASON_CATALOG] = {
+        "2026-Q3": {"items": [item], "schema_version": plugin.CATALOG_SCHEMA_VERSION},
+    }
+    plugin._data[plugin.DATA_KEY_EPISODE_RULES] = []
+
+    def add_rule(value, preference, rules, tmdb_id_override=0):
+        assert tmdb_id_override == 456
+        value["tmdb_match"] = {
+            "accepted": True,
+            "best": {
+                "tmdb_id": 456,
+                "name": "示例",
+                "media_type": module.MediaType.TV.value,
+            },
+        }
+        value["scan_status"] = "matched"
+        rules.append({"tmdb_id": 456, "title": "示例"})
+        return {"id": value["id"], "tmdb_id": 456}
+
+    plugin._add_catalog_item_to_rules = Mock(side_effect=add_rule)
+
+    response = plugin.action_notification_candidates_api({
+        "quarter": "2026-Q3",
+        "item_ids": ["anilist:3"],
+        "action": "add_group",
+        "tmdb_id_overrides": {"anilist:3": 456},
+    })
+
+    assert response.success is True
+    stored = plugin._data[plugin.DATA_KEY_SEASON_CATALOG]["2026-Q3"]["items"][0]
+    assert stored["scan_status"] == "matched"
+    assert stored["tmdb_match"]["best"]["tmdb_id"] == 456
+
+
+def test_failed_notification_detail_offers_manual_tmdb_modes(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    view = plugin._render_notification_candidate_page(
+        batch_id="123456789abc",
+        batch={
+            "quarter": "2026-Q3",
+            "candidate_type": "failed",
+            "items": [{"id": "anime:1", "title": "示例", "scan_error": "未匹配"}],
+            "handled_ids": [],
+        },
+        page=0,
+    )
+
+    buttons = [button for row in view["buttons"] for button in row]
+    labels = {button["text"] for button in buttons}
+    callbacks = {button["callback_data"] for button in buttons}
+    assert "指定 TMDB · 默认编集" in labels
+    assert "指定 TMDB · 优先剧集组" in labels
+    assert any(value.endswith("nc:m:123456789abc:0") for value in callbacks)
+    assert any(value.endswith("nc:M:123456789abc:0") for value in callbacks)

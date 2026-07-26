@@ -836,11 +836,11 @@ onMounted(async () => {
                   <VChip v-if="item.scan_status === 'scanning'" size="x-small" color="info" variant="tonal">
                     <VProgressCircular indeterminate size="11" width="2" class="me-1" />正在扫描
                   </VChip>
-                  <VChip v-else-if="item.scan_status === 'failed'" size="x-small" color="warning" variant="tonal">匹配待补充</VChip>
+                  <VChip v-else-if="item.scan_status === 'failed' && !item.maintained" size="x-small" color="warning" variant="tonal">匹配待补充</VChip>
                   <VChip v-if="item.maintained" size="x-small" color="success" prepend-icon="mdi-check">已维护</VChip>
                 </div>
-                <div v-if="item.tmdb_match?.best" class="text-caption text-medium-emphasis mt-2 text-truncate" :title="`TMDB ${item.tmdb_match.best.tmdb_id} · ${item.tmdb_match.best.name}`">
-                  TMDB {{ item.tmdb_match.best.tmdb_id }} · {{ item.tmdb_match.best.name }}
+                <div v-if="item.tmdb_match?.best || item.maintained_tmdb_id" class="text-caption text-medium-emphasis mt-2 text-truncate" :title="`TMDB ${item.tmdb_match?.best?.tmdb_id || item.maintained_tmdb_id} · ${item.tmdb_match?.best?.name || '已维护规则'}`">
+                  TMDB {{ item.tmdb_match?.best?.tmdb_id || item.maintained_tmdb_id }} · {{ item.tmdb_match?.best?.name || '已维护规则' }}
                 </div>
               </VCardText>
               <VCardActions class="catalog-actions">
@@ -854,9 +854,9 @@ onMounted(async () => {
                   </VList>
                 </VMenu>
                 <VBtn v-else-if="item.rule_eligible === false" variant="text" disabled prepend-icon="mdi-movie-open-outline">电影条目无需集数规则</VBtn>
-                <VBtn
+                  <VBtn
                   v-else variant="text" prepend-icon="mdi-pencil-outline"
-                  @click="openEditor(ruleByTmdbId.get(Number(item.tmdb_match?.best?.tmdb_id)))"
+                  @click="openEditor(ruleByTmdbId.get(Number(item.tmdb_match?.best?.tmdb_id || item.maintained_tmdb_id)))"
                 >编辑规则</VBtn>
               </VCardActions>
             </div>
