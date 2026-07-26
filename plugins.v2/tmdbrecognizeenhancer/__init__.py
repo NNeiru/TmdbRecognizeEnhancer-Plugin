@@ -107,7 +107,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.14"
+    plugin_version = "0.8.15"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -131,7 +131,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
     CATALOG_SCHEMA_VERSION = 3
-    NOTIFICATION_CANDIDATE_PAGE_SIZE = 3
+    NOTIFICATION_CANDIDATE_PAGE_SIZE = 1
     NOTIFICATION_COLLAGE_LIMIT = 9
     DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": False,
@@ -3773,20 +3773,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons.extend([
                 [
                     {
-                        "text": "本页按 TMDB 默认加入",
+                        "text": "按 TMDB 默认加入",
                         "callback_data": self._notification_candidate_callback(
                             "d", batch_id, page,
                         ),
                     },
                     {
-                        "text": "本页优先剧集组加入",
+                        "text": "优先剧集组加入",
                         "callback_data": self._notification_candidate_callback(
                             "g", batch_id, page,
                         ),
                     },
                 ],
                 [{
-                    "text": "忽略本页",
+                    "text": "忽略此项",
                     "callback_data": self._notification_candidate_callback(
                         "i", batch_id, page,
                     ),
@@ -3795,13 +3795,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
         else:
             buttons.append([
                 {
-                    "text": "重新扫描本页",
+                    "text": "重新扫描此项",
                     "callback_data": self._notification_candidate_callback(
                         "r", batch_id, page,
                     ),
                 },
                 {
-                    "text": "忽略本页",
+                    "text": "忽略此项",
                     "callback_data": self._notification_candidate_callback(
                         "i", batch_id, page,
                     ),
@@ -4619,9 +4619,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 title=view["title"],
                 text=view["text"],
                 buttons=view["buttons"],
-                # 编辑时保留初始总览拼图，避免 Telegram 尝试从容器
-                # 127.0.0.1 重新拉取本地图片。
-                image="",
+                # 详情页切换为该候选的公网海报；返回总览时只更新文字，
+                # 避免 Telegram 尝试从容器 127.0.0.1 拉取本地拼图。
+                image=view["image"] if action == "p" else "",
                 channel=channel,
                 service=service,
                 original_message_id=data.get("original_message_id"),
@@ -4717,7 +4717,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             title=view["title"],
             text=view["text"],
             buttons=view["buttons"],
-            image="",
+            image=(
+                view["image"]
+                if self._notification_batch_pending_items(batch)
+                else ""
+            ),
             channel=channel,
             service=service,
             original_message_id=data.get("original_message_id"),

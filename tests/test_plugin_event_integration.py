@@ -2622,14 +2622,15 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     second_page = plugin._render_notification_candidate_page(
         batch_id="123456789abc",
         batch=batch,
-        page=1,
+        page=3,
     )
 
     assert "7 部" in summary["title"]
-    assert "共 3 页" in summary["text"]
+    assert "共 7 页" in summary["text"]
     assert summary["image"].endswith("collage.jpg")
-    assert second_page["page_item_ids"] == ["anime:4", "anime:5", "anime:6"]
+    assert second_page["page_item_ids"] == ["anime:4"]
     assert "番剧 4" in second_page["text"]
+    assert second_page["image"].endswith("/4.jpg")
     callbacks = [
         button["callback_data"]
         for row in [*summary["buttons"], *second_page["buttons"]]
@@ -2677,11 +2678,11 @@ def test_notification_candidate_page_action_only_handles_current_page(monkeypatc
 
     payload = plugin.action_notification_candidates_api.call_args.args[0]
     assert payload["action"] == "add_default"
-    assert payload["item_ids"] == ["anime:4", "anime:5"]
+    assert payload["item_ids"] == ["anime:2"]
     stored = plugin._data[plugin.DATA_KEY_NOTIFICATION_APPROVALS]["batches"][
         "123456789abc"
     ]
-    assert set(stored["handled_ids"]) == {"anime:4", "anime:5"}
+    assert set(stored["handled_ids"]) == {"anime:2"}
     assert plugin._send_candidate_instance_notification.call_args.kwargs[
         "original_message_id"
     ] == 123
