@@ -22,11 +22,14 @@ const data = ref({
   failure_categories: [],
   records: [],
   record_counts: {},
-  candidates: [],
+  candidates: { ready: [], failed: [] },
+  notification_channels: [],
+  candidate_schedule: {},
 })
 const now = new Date()
 const selectedQuarter = ref(`${now.getFullYear()}-Q${Math.floor(now.getMonth() / 3) + 1}`)
-const selectedCandidateIds = ref([])
+const selectedReadyIds = ref([])
+const selectedFailedIds = ref([])
 const recordFilter = ref('all')
 const showRecords = ref(false)
 
@@ -54,14 +57,26 @@ const records = computed(() => (data.value.records || []).filter(item => {
   if (recordFilter.value === 'all') return true
   return item.scene === recordFilter.value
 }))
-const allCandidatesSelected = computed(() => (
-  (data.value.candidates || []).length > 0
-  && selectedCandidateIds.value.length === data.value.candidates.length
+const readyCandidates = computed(() => data.value.candidates?.ready || [])
+const failedCandidates = computed(() => data.value.candidates?.failed || [])
+const allReadySelected = computed(() => (
+  readyCandidates.value.length > 0
+  && selectedReadyIds.value.length === readyCandidates.value.length
+))
+const allFailedSelected = computed(() => (
+  failedCandidates.value.length > 0
+  && selectedFailedIds.value.length === failedCandidates.value.length
 ))
 
-function setAllCandidates(value) {
-  selectedCandidateIds.value = value
-    ? (data.value.candidates || []).map(item => item.id)
+function setAllReady(value) {
+  selectedReadyIds.value = value
+    ? readyCandidates.value.map(item => item.id)
+    : []
+}
+
+function setAllFailed(value) {
+  selectedFailedIds.value = value
+    ? failedCandidates.value.map(item => item.id)
     : []
 }
 
@@ -117,7 +132,8 @@ async function sendTest(scene) {
 async function queryCandidates() {
   candidateLoading.value = true
   error.value = ''
-  selectedCandidateIds.value = []
+  selectedReadyIds.value = []
+  selectedFailedIds.value = []
   try {
     const result = unwrapResponse(await props.api.post(
       `${props.pluginBase}/notification-enhancer/candidates`,
@@ -128,7 +144,10 @@ async function queryCandidates() {
         sequel_only: config.value.notification_candidate_sequel_only,
       },
     )) || {}
-    data.value.candidates = result.items || []
+    data.value.candidates = {
+      ready: result.ready || result.items || [],
+      failed: result.failed || [],
+    }
   } catch (err) {
     error.value = err?.message || '候选查询失败'
   } finally {
@@ -136,8 +155,9 @@ async function queryCandidates() {
   }
 }
 
-async function candidateAction(action) {
-  if (!selectedCandidateIds.value.length) return
+async function candidateAction(action, candidateType = 'ready') {
+  const ids = candidateType === 'failed' ? selectedFailedIds.value : selectedReadyIds.value
+  if (!ids.length) return
   actionLoading.value = true
   error.value = ''
   try {
@@ -145,20 +165,42 @@ async function candidateAction(action) {
       `${props.pluginBase}/notification-enhancer/candidates/action`,
       {
         quarter: selectedQuarter.value,
-        item_ids: selectedCandidateIds.value,
+        item_ids: ids,
         action,
         region: config.value.notification_candidate_region,
         platforms: config.value.notification_candidate_platforms,
         sequel_only: config.value.notification_candidate_sequel_only,
       },
     )) || {}
-    data.value.candidates = result.items || []
-    selectedCandidateIds.value = []
-    notice.value = action === 'ignore'
-      ? '已忽略所选候选'
-      : `候选已提交到集数偏移维护规则${result.failed?.length ? `，${result.failed.length} 条失败` : ''}`
+    data.value.candidates = {
+      ready: result.ready || result.items || [],
+      failed: result.failed || [],
+    }
+    selectedReadyIds.value = []
+    selectedFailedIds.value = []
+    if (action === 'ignore') notice.value = '已忽略所选候选'
+    else if (action === 'retry') notice.value = '已在后台重新扫描所选失败条目'
+    else notice.value = `候选已提交到集数偏移维护规则${result.operation_failures?.length ? `，${result.operation_failures.length} 条失败` : ''}`
   } catch (err) {
     error.value = err?.message || '候选处理失败'
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+async function sendCandidateBatch() {
+  actionLoading.value = true
+  error.value = ''
+  try {
+    const result = unwrapResponse(await props.api.post(
+      `${props.pluginBase}/notification-enhancer/candidates/batch/send`,
+      { quarter: selectedQuarter.value },
+    )) || {}
+    if (result.snapshot) data.value.candidates = result.snapshot
+    if (result.candidate_schedule) data.value.candidate_schedule = result.candidate_schedule
+    notice.value = `计划批次已发送：可加入 ${result.ready || 0} 部，扫描失败 ${result.failed || 0} 部`
+  } catch (err) {
+    error.value = err?.message || '发送计划批次失败'
   } finally {
     actionLoading.value = false
   }
@@ -281,11 +323,52 @@ onMounted(async () => {
     <section class="section-shell">
       <div class="section-heading responsive">
         <div>
-          <h3>集数偏移候选审批</h3>
-          <p>复用季度看板已完成的 TMDB 匹配，只列出尚未维护且符合筛选条件的作品。</p>
+          <h3>集数偏移通知与审批</h3>
+          <p>存量按月或季度汇总；基线之后新增的匹配及失败条目逐部通知。</p>
         </div>
-        <VSwitch v-model="config.notification_episode_candidates_enabled" color="success" hide-details label="扫描完成后通知新候选" />
+        <VSwitch v-model="config.notification_episode_candidates_enabled" color="success" hide-details label="启用集数候选通知" />
       </div>
+      <div class="delivery-grid">
+        <VSelect
+          v-model="config.notification_candidate_channel"
+          :items="data.notification_channels || []"
+          label="候选专用通知频道"
+          placeholder="请选择一个频道"
+          density="comfortable"
+          variant="outlined"
+          clearable
+          hide-details
+        />
+        <div class="delivery-mode">
+          <VSwitch v-model="config.notification_candidate_batch_enabled" color="primary" hide-details label="定时批量" />
+          <VSelect
+            v-model="config.notification_candidate_batch_frequency"
+            :items="[
+              { title: '每月月初', value: 'monthly' },
+              { title: '每季度首月月初', value: 'quarterly' },
+            ]"
+            density="compact"
+            variant="outlined"
+            hide-details
+            :disabled="!config.notification_candidate_batch_enabled"
+          />
+          <VSelect
+            v-model="config.notification_candidate_batch_hour"
+            :items="Array.from({ length: 24 }, (_, value) => ({ title: `${String(value).padStart(2, '0')}:00`, value }))"
+            density="compact"
+            variant="outlined"
+            hide-details
+            :disabled="!config.notification_candidate_batch_enabled"
+          />
+        </div>
+        <div class="delivery-mode realtime">
+          <VSwitch v-model="config.notification_candidate_realtime_enabled" color="success" hide-details label="实时监控新增" />
+          <small>首次开启以当前缓存为基线；之后新增或失败转成功时逐部推送。</small>
+        </div>
+      </div>
+      <VAlert type="info" variant="tonal" density="compact" class="mt-3">
+        专用频道只发送集数偏移候选。请先在 MoviePilot 通知设置中配置该频道，并允许接收“插件”类型通知。
+      </VAlert>
       <div class="candidate-controls">
         <VSelect v-model="selectedQuarter" :items="quarterItems" label="季度" density="comfortable" variant="outlined" hide-details @update:model-value="queryCandidates" />
         <VSelect v-model="config.notification_candidate_region" :items="[
@@ -297,23 +380,24 @@ onMounted(async () => {
           { title: 'TMDB 默认编集', value: 'default' },
         ]" label="通知一键审批目标" density="comfortable" variant="outlined" hide-details />
         <VBtn variant="tonal" prepend-icon="mdi-refresh" :loading="candidateLoading" @click="queryCandidates">刷新</VBtn>
+        <VBtn color="primary" variant="tonal" prepend-icon="mdi-send-clock" :loading="actionLoading" @click="sendCandidateBatch">立即生成批次</VBtn>
       </div>
       <div class="option-row compact">
         <VSwitch v-model="config.notification_candidate_sequel_only" color="primary" hide-details label="仅续作或多季作品" />
         <VSelect v-model="config.notification_candidate_platforms" :items="['TV', 'TV SHORT', 'ONA', 'OVA']" multiple chips closable-chips label="载体" density="compact" variant="outlined" hide-details class="platform-select" />
       </div>
-      <div v-if="data.candidates?.length" class="candidate-list">
+      <div v-if="readyCandidates.length" class="candidate-list">
         <div class="candidate-toolbar">
-          <VCheckboxBtn :model-value="allCandidatesSelected" @update:model-value="setAllCandidates" />
-          <span>待审批 {{ data.candidates.length }} 部</span>
+          <VCheckboxBtn :model-value="allReadySelected" @update:model-value="setAllReady" />
+          <span><strong>匹配完成</strong><small>{{ readyCandidates.length }} 部可直接加入维护规则</small></span>
           <VSpacer />
-          <VBtn variant="text" color="default" :disabled="!selectedCandidateIds.length" @click="candidateAction('ignore')">忽略所选</VBtn>
-          <VBtn variant="tonal" color="primary" :loading="actionLoading" :disabled="!selectedCandidateIds.length" @click="candidateAction('add_default')">按 TMDB 默认加入</VBtn>
-          <VBtn color="primary" :loading="actionLoading" :disabled="!selectedCandidateIds.length" @click="candidateAction('add_group')">优先剧集组加入</VBtn>
+          <VBtn variant="text" color="default" :disabled="!selectedReadyIds.length" @click="candidateAction('ignore')">忽略所选</VBtn>
+          <VBtn variant="tonal" color="primary" :loading="actionLoading" :disabled="!selectedReadyIds.length" @click="candidateAction('add_default')">按 TMDB 默认加入</VBtn>
+          <VBtn color="primary" :loading="actionLoading" :disabled="!selectedReadyIds.length" @click="candidateAction('add_group')">优先剧集组加入</VBtn>
         </div>
         <div class="candidate-items">
-          <label v-for="item in data.candidates" :key="item.id" class="candidate-item">
-            <VCheckboxBtn v-model="selectedCandidateIds" :value="item.id" />
+          <label v-for="item in readyCandidates" :key="item.id" class="candidate-item">
+            <VCheckboxBtn v-model="selectedReadyIds" :value="item.id" />
             <VImg v-if="item.poster" :src="item.poster" width="42" height="58" cover class="candidate-poster" />
             <div class="candidate-copy">
               <strong>{{ item.title }}</strong>
@@ -323,9 +407,28 @@ onMounted(async () => {
           </label>
         </div>
       </div>
-      <div v-else class="empty-inline">
+      <div v-if="failedCandidates.length" class="candidate-list failed-list">
+        <div class="candidate-toolbar">
+          <VCheckboxBtn :model-value="allFailedSelected" @update:model-value="setAllFailed" />
+          <span><strong>扫描失败</strong><small>{{ failedCandidates.length }} 部可批量重试或忽略</small></span>
+          <VSpacer />
+          <VBtn variant="text" color="default" :disabled="!selectedFailedIds.length" @click="candidateAction('ignore', 'failed')">忽略所选</VBtn>
+          <VBtn color="warning" variant="tonal" prepend-icon="mdi-refresh" :loading="actionLoading" :disabled="!selectedFailedIds.length" @click="candidateAction('retry', 'failed')">重新扫描</VBtn>
+        </div>
+        <div class="candidate-items">
+          <label v-for="item in failedCandidates" :key="item.id" class="candidate-item">
+            <VCheckboxBtn v-model="selectedFailedIds" :value="item.id" />
+            <VImg v-if="item.poster" :src="item.poster" width="42" height="58" cover class="candidate-poster" />
+            <div class="candidate-copy">
+              <strong>{{ item.title }}</strong>
+              <span>{{ item.scan_error || '未匹配到可信 TMDB 条目' }}</span>
+            </div>
+          </label>
+        </div>
+      </div>
+      <div v-if="!readyCandidates.length && !failedCandidates.length" class="empty-inline">
         <VIcon icon="mdi-check-decagram-outline" />
-        <span>{{ candidateLoading ? '正在读取季度缓存…' : '当前筛选没有待审批候选；请先在“集数偏移”中加载并扫描该季度看板。' }}</span>
+        <span>{{ candidateLoading ? '正在读取季度缓存…' : '当前筛选没有待处理条目；请先在“集数偏移”中加载并扫描该季度看板。' }}</span>
       </div>
     </section>
 
@@ -403,11 +506,22 @@ onMounted(async () => {
   border-radius: 12px; background: rgba(var(--v-theme-on-surface), .035);
 }
 .policy-copy { flex: 1; }
-.policy-select { flex: 0 0 126px; }
-.candidate-controls { display: grid; grid-template-columns: minmax(150px, .8fr) minmax(150px, .8fr) minmax(210px, 1.2fr) auto; gap: 10px; }
+.policy-select { flex: 0 0 158px; }
+.delivery-grid { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(360px, 1.2fr) minmax(260px, 1fr); gap: 10px; }
+.delivery-mode {
+  display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 7px 11px;
+  border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 12px;
+}
+.delivery-mode .v-select { min-width: 118px; }
+.delivery-mode.realtime { align-items: flex-start; flex-direction: column; justify-content: center; gap: 0; }
+.delivery-mode small { color: rgba(var(--v-theme-on-surface), .58); font-size: .72rem; line-height: 1.45; }
+.candidate-controls { display: grid; grid-template-columns: minmax(130px, .7fr) minmax(130px, .7fr) minmax(190px, 1.1fr) auto auto; gap: 10px; margin-top: 14px; }
 .platform-select { max-width: 440px; min-width: 260px; }
 .candidate-list { margin-top: 14px; overflow: hidden; border: 1px solid rgba(var(--v-theme-on-surface), .09); border-radius: 13px; }
-.candidate-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 54px; padding: 7px 12px; background: rgba(var(--v-theme-primary), .045); }
+.candidate-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 58px; padding: 7px 12px; background: rgba(var(--v-theme-primary), .045); }
+.candidate-toolbar > span { display: grid; gap: 1px; }
+.candidate-toolbar > span small { color: rgba(var(--v-theme-on-surface), .55); font-size: .72rem; }
+.failed-list .candidate-toolbar { background: rgba(var(--v-theme-warning), .055); }
 .candidate-items { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .candidate-item { display: flex; align-items: center; gap: 10px; min-height: 78px; padding: 10px 12px; border-top: 1px solid rgba(var(--v-theme-on-surface), .07); cursor: pointer; }
 .candidate-item:nth-child(odd) { border-right: 1px solid rgba(var(--v-theme-on-surface), .07); }
@@ -420,7 +534,7 @@ onMounted(async () => {
 .record-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 11px; background: rgba(var(--v-theme-on-surface), .035); }
 .record-item div { flex: 1; }
 @media (max-width: 900px) {
-  .mode-grid, .policy-grid, .candidate-items { grid-template-columns: 1fr; }
+  .mode-grid, .policy-grid, .candidate-items, .delivery-grid { grid-template-columns: 1fr; }
   .candidate-item:nth-child(odd) { border-right: 0; }
   .candidate-controls { grid-template-columns: 1fr 1fr; }
 }

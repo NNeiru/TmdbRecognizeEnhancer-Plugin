@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import Body
 
 from app import schemas
@@ -51,8 +52,9 @@ except ImportError:  # pragma: no cover - 仅用于兼容缺少异步事件枚�
     EventType = None
 
 try:
-    from app.schemas.types import NotificationType
+    from app.schemas.types import MessageChannel, NotificationType
 except ImportError:  # pragma: no cover - 旧版 MP 可继续记录，但不能重发增强通知。
+    MessageChannel = None
     NotificationType = None
 
 from .emby_episode_group_sync import EmbyEpisodeGroupSynchronizer
@@ -91,7 +93,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.8"
+    plugin_version = "0.8.9"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -219,6 +221,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             item["key"]: "notify" for item in FAILURE_CATEGORIES
         },
         "notification_episode_candidates_enabled": False,
+        "notification_candidate_channel": "",
+        "notification_candidate_batch_enabled": True,
+        "notification_candidate_batch_frequency": "monthly",
+        "notification_candidate_batch_hour": 9,
+        "notification_candidate_realtime_enabled": True,
         "notification_candidate_region": "japan",
         "notification_candidate_platforms": ["TV", "TV SHORT"],
         "notification_candidate_sequel_only": True,
@@ -260,6 +267,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_record_limit",
         "notification_failure_policies",
         "notification_episode_candidates_enabled",
+        "notification_candidate_channel",
+        "notification_candidate_batch_enabled",
+        "notification_candidate_batch_frequency",
+        "notification_candidate_batch_hour",
+        "notification_candidate_realtime_enabled",
         "notification_candidate_region",
         "notification_candidate_platforms",
         "notification_candidate_sequel_only",
@@ -427,6 +439,22 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def get_command() -> List[Dict[str, Any]]:
         """插件当前不注册远程命令。"""
         return []
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        """每小时检查一次候选批次是否到达计划发送时间。
+
+        使用固定服务而不是按用户配置动态重建 CronTrigger，这样用户保存
+        月度/季度策略后可立即生效，无需重启 MoviePilot。
+        """
+        if not self.get_state():
+            return []
+        return [{
+            "id": "TmdbRecognizeEnhancerCandidateBatch",
+            "name": "集数偏移候选定时批次",
+            "trigger": CronTrigger(minute=7),
+            "func": self._scheduled_notification_candidate_tick,
+            "kwargs": {},
+        }]
 
     @classmethod
     def get_render_mode(cls) -> Tuple[str, str]:
@@ -854,6 +882,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "加入或忽略季度集数规则候选",
+            },
+            {
+                "path": "/notification-enhancer/candidates/batch/send",
+                "endpoint": self.send_notification_candidate_batch_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "立即生成并发送集数偏移候选批次",
             },
             {
                 "path": "/diagnostics",
@@ -2613,7 +2648,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         item["scan_error"] = str(err)
                         updated = item
                     self._merge_catalog_scan_item(quarter, updated)
-            self._maybe_notify_episode_candidates(quarter)
+            # 季度扫描只负责刷新缓存。存量候选由计划批次汇总，只有基线之后
+            # 新增或由失败转为成功的条目才走实时单条通知。
+            self._monitor_notification_candidates(quarter)
         finally:
             with self._catalog_lock:
                 self._catalog_scans.discard(quarter)
@@ -2808,16 +2845,30 @@ class TmdbRecognizeEnhancer(_PluginBase):
             stored = {}
         stored.setdefault("ignored", [])
         stored.setdefault("notified", [])
+        stored.setdefault("realtime_seen", [])
+        stored.setdefault("realtime_initialized", False)
+        stored.setdefault("last_batch_periods", {})
         stored.setdefault("batches", {})
         return deepcopy(stored)
 
     def _save_notification_approvals(self, value: Dict[str, Any]) -> None:
         ignored = list(dict.fromkeys(str(item) for item in value.get("ignored") or []))[-1000:]
         notified = list(dict.fromkeys(str(item) for item in value.get("notified") or []))[-1000:]
+        realtime_seen = list(dict.fromkeys(
+            str(item) for item in value.get("realtime_seen") or []
+        ))[-3000:]
         batches = value.get("batches") if isinstance(value.get("batches"), dict) else {}
+        last_batch_periods = (
+            value.get("last_batch_periods")
+            if isinstance(value.get("last_batch_periods"), dict)
+            else {}
+        )
         value.update({
             "ignored": ignored,
             "notified": notified,
+            "realtime_seen": realtime_seen,
+            "realtime_initialized": bool(value.get("realtime_initialized")),
+            "last_batch_periods": last_batch_periods,
             "batches": dict(list(batches.items())[-100:]),
         })
         self.save_data(self.DATA_KEY_NOTIFICATION_APPROVALS, value)
@@ -2854,6 +2905,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "suppressed": sum(1 for item in records if item.get("action") == "suppressed"),
                 "digest": summarize_digest(records).get("total", 0),
             },
+            "notification_channels": [
+                {"title": channel.value, "value": channel.value}
+                for channel in (list(MessageChannel) if MessageChannel is not None else [])
+                if channel.value not in ("Web", "WebAgent")
+            ],
+            "candidate_schedule": self._notification_candidate_schedule_status(),
             "takeover_note": (
                 "接管模式会用“插件”通知重新发送整理消息。请在 MoviePilot 通知渠道中"
                 "关闭原生“整理入库”；如需接管失败通知，再关闭“手动处理”。"
@@ -2863,7 +2920,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def get_notification_enhancer_api(self) -> schemas.Response:
         """获取通知模块配置、运行记录和当前季度候选。"""
         data = self._notification_status_data()
-        data["candidates"] = self._notification_candidates(
+        data["candidates"] = self._notification_candidate_snapshot(
             self._current_quarter_key()
         )
         return schemas.Response(success=True, data=data)
@@ -2873,6 +2930,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
     ) -> schemas.Response:
         """独立保存通知配置，避免其它页面旧快照覆盖。"""
         submitted = dict(payload or {})
+        previous_realtime = bool(
+            self._config.get("notification_candidate_realtime_enabled")
+        )
         with self._config_lock:
             merged = self._current_config()
             for key in self.NOTIFICATION_CONFIG_KEYS:
@@ -2880,6 +2940,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     merged[key] = deepcopy(submitted[key])
             self._config = self._normalize_config(merged)
             self.update_config(self._current_config())
+        if (
+                self._config.get("notification_candidate_realtime_enabled")
+                and not previous_realtime
+        ):
+            self._initialize_notification_candidate_realtime_baseline()
         return schemas.Response(
             success=True,
             message="入库通知增强设置已保存",
@@ -2974,12 +3039,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
             data=self._notification_status_data(),
         )
 
-    def _notification_candidates(
+    def _notification_candidate_snapshot(
             self,
             quarter: str,
             options: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
-        """从已有季度看板筛出需要用户审批、且尚未维护的 TV 续作。"""
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """将季度缓存拆成“可加入”和“扫描失败”两条审批队列。"""
         cached = self._read_season_catalog_cache().get(quarter) or {}
         items = cached.get("items") if isinstance(cached, dict) else []
         approvals = self._read_notification_approvals()
@@ -3007,15 +3072,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
             if options.get("sequel_only") is not None
             else bool(self._config.get("notification_candidate_sequel_only"))
         )
-        candidates: List[Dict[str, Any]] = []
+        ready: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
         for item in items or []:
             item_id = str(item.get("id") or "")
             match = item.get("tmdb_match") or {}
             best = match.get("best") or {}
             tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
-            if not item_id or item_id in ignored or not match.get("accepted") or not tmdb_id:
+            if not item_id or item_id in ignored:
                 continue
-            if tmdb_id in maintained:
+            if tmdb_id and tmdb_id in maintained:
                 continue
             if region != "all" and str(item.get("region") or "") != region:
                 continue
@@ -3026,7 +3092,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     and not (item.get("has_prequel") or item.get("is_multi_season"))
             ):
                 continue
-            candidates.append({
+            candidate = {
                 "id": item_id,
                 "quarter": quarter,
                 "title": item.get("display_name") or item.get("name_cn") or item.get("name"),
@@ -3038,64 +3104,323 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "has_prequel": bool(item.get("has_prequel")),
                 "is_multi_season": bool(item.get("is_multi_season")),
                 "score": best.get("score"),
-            })
-        return candidates
+                "scan_status": str(item.get("scan_status") or ""),
+                "scan_error": str(item.get("scan_error") or ""),
+            }
+            if match.get("accepted") and tmdb_id:
+                candidate["candidate_type"] = "ready"
+                ready.append(candidate)
+            elif str(item.get("scan_status") or "").lower() == "failed":
+                candidate["candidate_type"] = "failed"
+                failed.append(candidate)
+        return {"ready": ready, "failed": failed}
 
-    def _maybe_notify_episode_candidates(self, quarter: str) -> None:
-        """季度扫描完成后，只为首次出现的新候选发送一条可审批通知。"""
-        if not (
-                self._notification_active()
-                and self._config.get("notification_plugin_enabled")
-                and self._config.get("notification_episode_candidates_enabled")
-                and self._config.get("notification_mode") in ("parallel", "takeover")
-        ):
-            return
-        candidates = self._notification_candidates(quarter)
-        if not candidates:
-            return
+    def _notification_candidates(
+            self,
+            quarter: str,
+            options: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """兼容旧调用：只返回已经匹配成功、可直接加入规则的候选。"""
+        return self._notification_candidate_snapshot(quarter, options)["ready"]
+
+    def _notification_candidate_channel(self) -> Any:
+        """将保存的显示值还原为 MessageChannel；未选择时不广播。"""
+        if MessageChannel is None:
+            return None
+        configured = str(
+            self._config.get("notification_candidate_channel") or ""
+        ).strip()
+        if not configured:
+            return None
+        return next(
+            (channel for channel in MessageChannel if channel.value == configured),
+            None,
+        )
+
+    def _notification_candidate_delivery_active(self) -> bool:
+        return bool(
+            self._notification_active()
+            and self._config.get("notification_plugin_enabled")
+            and self._config.get("notification_episode_candidates_enabled")
+            and self._notification_candidate_channel() is not None
+        )
+
+    @staticmethod
+    def _candidate_seen_key(candidate: Dict[str, Any]) -> str:
+        return (
+            f"{candidate.get('candidate_type') or 'ready'}:"
+            f"{candidate.get('quarter')}:{candidate.get('id')}"
+        )
+
+    def _initialize_notification_candidate_realtime_baseline(self) -> None:
+        """以当前缓存为基线，开启监控时不逐条推送全部存量。"""
         approvals = self._read_notification_approvals()
-        notified = set(str(value) for value in approvals.get("notified") or [])
-        fresh = [item for item in candidates if str(item.get("id")) not in notified]
-        if not fresh:
-            return
-        item_ids = [str(item.get("id")) for item in fresh]
+        snapshot = self._notification_candidate_snapshot(self._current_quarter_key())
+        approvals["realtime_seen"] = [
+            *(approvals.get("realtime_seen") or []),
+            *[
+                self._candidate_seen_key(item)
+                for item in [*snapshot["ready"], *snapshot["failed"]]
+            ],
+        ]
+        approvals["realtime_initialized"] = True
+        self._save_notification_approvals(approvals)
+
+    def _store_notification_candidate_batch(
+            self,
+            *,
+            quarter: str,
+            candidate_type: str,
+            candidates: List[Dict[str, Any]],
+    ) -> str:
+        item_ids = [str(item.get("id")) for item in candidates if item.get("id")]
         batch_id = hashlib.sha1(
-            f"{quarter}|{'|'.join(item_ids)}".encode("utf-8", errors="ignore")
+            (
+                f"{quarter}|{candidate_type}|{time.time_ns()}|"
+                f"{'|'.join(item_ids)}"
+            ).encode("utf-8", errors="ignore")
         ).hexdigest()[:12]
+        approvals = self._read_notification_approvals()
         batches = approvals.get("batches") if isinstance(approvals.get("batches"), dict) else {}
         batches[batch_id] = {
             "quarter": quarter,
+            "candidate_type": candidate_type,
             "item_ids": item_ids,
             "preference": self._config.get("notification_candidate_preference"),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         approvals["batches"] = batches
-        approvals["notified"] = [*(approvals.get("notified") or []), *item_ids]
+        approvals["realtime_seen"] = [
+            *(approvals.get("realtime_seen") or []),
+            *[self._candidate_seen_key(item) for item in candidates],
+        ]
         self._save_notification_approvals(approvals)
-        preview = "\n".join(
-            f"• {item.get('title')} · TMDB {item.get('tmdb_id')}"
-            for item in fresh[:8]
+        return batch_id
+
+    def _send_notification_candidate_group(
+            self,
+            *,
+            quarter: str,
+            candidate_type: str,
+            candidates: List[Dict[str, Any]],
+            realtime: bool = False,
+    ) -> None:
+        """向候选专用频道发送一批或一条交互通知。"""
+        if not candidates or not self._notification_candidate_delivery_active():
+            return
+        batch_id = self._store_notification_candidate_batch(
+            quarter=quarter,
+            candidate_type=candidate_type,
+            candidates=candidates,
         )
-        if len(fresh) > 8:
-            preview += f"\n…另有 {len(fresh) - 8} 部"
         plugin_id = self.__class__.__name__
-        self._send_enhanced_notification(
-            title=f"待审批：{quarter} 集数偏移候选 {len(fresh)} 部",
-            text=(
-                f"{preview}\n\n默认目标："
-                f"{'优先剧集组' if self._config.get('notification_candidate_preference') == 'group_preferred' else 'TMDB 默认编集'}"
-            ),
-            source_notice={},
-            buttons=[[
+        single = len(candidates) == 1
+        if candidate_type == "failed":
+            preview = "\n".join(
+                f"• {item.get('title')}：{item.get('scan_error') or '未匹配到 TMDB'}"
+                for item in candidates[:8]
+            )
+            title = (
+                f"扫描失败：{candidates[0].get('title')}"
+                if single else f"待处理：{quarter} 扫描失败 {len(candidates)} 部"
+            )
+            buttons = [[
                 {
-                    "text": "按推荐批量加入",
+                    "text": "重新扫描" if single else "批量重新扫描",
+                    "callback_data": f"[PLUGIN]{plugin_id}|notify-candidates:retry:{batch_id}",
+                },
+                {
+                    "text": "忽略",
+                    "callback_data": f"[PLUGIN]{plugin_id}|notify-candidates:ignore:{batch_id}",
+                },
+            ]]
+        else:
+            preview = "\n".join(
+                f"• {item.get('title')} · TMDB {item.get('tmdb_id')}"
+                for item in candidates[:8]
+            )
+            title = (
+                f"新增候选：{candidates[0].get('title')}"
+                if single else f"待审批：{quarter} 集数偏移候选 {len(candidates)} 部"
+            )
+            buttons = [[
+                {
+                    "text": "按推荐加入" if single else "按推荐批量加入",
                     "callback_data": f"[PLUGIN]{plugin_id}|notify-candidates:approve:{batch_id}",
                 },
                 {
-                    "text": "忽略本批",
+                    "text": "忽略",
                     "callback_data": f"[PLUGIN]{plugin_id}|notify-candidates:ignore:{batch_id}",
                 },
-            ]],
+            ]]
+        if len(candidates) > 8:
+            preview += f"\n…另有 {len(candidates) - 8} 部"
+        self._send_enhanced_notification(
+            title=title,
+            text=(
+                f"{preview}\n\n来源："
+                f"{'实时新增' if realtime else '计划批次'} · {quarter}"
+            ),
+            source_notice={},
+            buttons=buttons,
+            channel=self._notification_candidate_channel(),
+        )
+
+    def _monitor_notification_candidates(self, quarter: str) -> None:
+        """扫描后仅推送相对基线新增的候选，每个条目单独通知。"""
+        if not (
+                self._notification_candidate_delivery_active()
+                and self._config.get("notification_candidate_realtime_enabled")
+        ):
+            return
+        snapshot = self._notification_candidate_snapshot(quarter)
+        candidates = [*snapshot["ready"], *snapshot["failed"]]
+        approvals = self._read_notification_approvals()
+        if not approvals.get("realtime_initialized"):
+            approvals["realtime_seen"] = [
+                *(approvals.get("realtime_seen") or []),
+                *[self._candidate_seen_key(item) for item in candidates],
+            ]
+            approvals["realtime_initialized"] = True
+            self._save_notification_approvals(approvals)
+            return
+        seen = set(str(value) for value in approvals.get("realtime_seen") or [])
+        for candidate in candidates:
+            if self._candidate_seen_key(candidate) in seen:
+                continue
+            self._send_notification_candidate_group(
+                quarter=quarter,
+                candidate_type=str(candidate.get("candidate_type") or "ready"),
+                candidates=[candidate],
+                realtime=True,
+            )
+
+    def _notification_candidate_batch_period(
+            self, now: Optional[datetime] = None,
+    ) -> str:
+        now = now or datetime.now()
+        frequency = str(
+            self._config.get("notification_candidate_batch_frequency") or "monthly"
+        )
+        if frequency == "quarterly":
+            return f"{now.year}-Q{((now.month - 1) // 3) + 1}"
+        return now.strftime("%Y-%m")
+
+    def _notification_candidate_schedule_status(self) -> Dict[str, Any]:
+        frequency = str(
+            self._config.get("notification_candidate_batch_frequency") or "monthly"
+        )
+        approvals = self._read_notification_approvals()
+        return {
+            "frequency": frequency,
+            "hour": self._safe_int(
+                self._config.get("notification_candidate_batch_hour"), 9,
+            ),
+            "last_period": str(
+                (approvals.get("last_batch_periods") or {}).get(frequency) or ""
+            ),
+            "current_period": self._notification_candidate_batch_period(),
+        }
+
+    def _scheduled_notification_candidate_tick(self) -> None:
+        """小时服务：月初或季度首月月初生成一次存量审批批次。"""
+        now = datetime.now()
+        if not (
+                self._notification_candidate_delivery_active()
+                and self._config.get("notification_candidate_batch_enabled")
+        ):
+            return
+        frequency = str(
+            self._config.get("notification_candidate_batch_frequency") or "monthly"
+        )
+        hour = self._safe_int(
+            self._config.get("notification_candidate_batch_hour"), 9,
+        )
+        if now.day > 3 or now.hour < hour:
+            return
+        if frequency == "quarterly" and now.month not in (1, 4, 7, 10):
+            return
+        self._send_notification_candidate_batch(force=False, now=now)
+
+    def _send_notification_candidate_batch(
+            self,
+            *,
+            force: bool,
+            now: Optional[datetime] = None,
+            quarter_override: str = "",
+    ) -> Dict[str, Any]:
+        now = now or datetime.now()
+        frequency = str(
+            self._config.get("notification_candidate_batch_frequency") or "monthly"
+        )
+        period = self._notification_candidate_batch_period(now)
+        approvals = self._read_notification_approvals()
+        periods = (
+            approvals.get("last_batch_periods")
+            if isinstance(approvals.get("last_batch_periods"), dict)
+            else {}
+        )
+        if not force and str(periods.get(frequency) or "") == period:
+            return {"sent": False, "reason": "本周期已发送", "period": period}
+        quarter = (
+            quarter_override
+            if re.fullmatch(r"\d{4}-Q[1-4]", quarter_override or "")
+            else f"{now.year}-Q{((now.month - 1) // 3) + 1}"
+        )
+        snapshot = self._notification_candidate_snapshot(quarter)
+        if self._notification_candidate_delivery_active():
+            self._send_notification_candidate_group(
+                quarter=quarter,
+                candidate_type="ready",
+                candidates=snapshot["ready"],
+            )
+            self._send_notification_candidate_group(
+                quarter=quarter,
+                candidate_type="failed",
+                candidates=snapshot["failed"],
+            )
+        # 手工“立即生成”仅用于试发和临时审批，不占用计划任务本周期配额。
+        if not force and (snapshot["ready"] or snapshot["failed"]):
+            approvals = self._read_notification_approvals()
+            approvals["last_batch_periods"] = {
+                **(approvals.get("last_batch_periods") or {}),
+                frequency: period,
+            }
+            self._save_notification_approvals(approvals)
+        return {
+            "sent": bool(snapshot["ready"] or snapshot["failed"]),
+            "period": period,
+            "quarter": quarter,
+            "ready": len(snapshot["ready"]),
+            "failed": len(snapshot["failed"]),
+        }
+
+    def send_notification_candidate_batch_api(
+            self, payload: dict = Body(default={}),
+    ) -> schemas.Response:
+        """立即生成一批，用于验证筛选和专用通知频道。"""
+        if not self._notification_candidate_delivery_active():
+            return schemas.Response(
+                success=False,
+                message="请先启用候选通知、允许插件发送，并选择专用通知频道",
+            )
+        result = self._send_notification_candidate_batch(
+            force=True,
+            quarter_override=str((payload or {}).get("quarter") or ""),
+        )
+        return schemas.Response(
+            success=True,
+            message=(
+                f"批次已生成：可加入 {result['ready']} 部，"
+                f"扫描失败 {result['failed']} 部"
+            ),
+            data={
+                **result,
+                "snapshot": self._notification_candidate_snapshot(
+                    result["quarter"]
+                ),
+                "candidate_schedule": self._notification_candidate_schedule_status(),
+            },
         )
 
     def query_notification_candidates_api(
@@ -3104,22 +3429,22 @@ class TmdbRecognizeEnhancer(_PluginBase):
         quarter = str((payload or {}).get("quarter") or self._current_quarter_key())
         if not re.fullmatch(r"\d{4}-Q[1-4]", quarter):
             return schemas.Response(success=False, message="季度格式应为 2026-Q3")
-        return schemas.Response(
-            success=True,
-            data={
-                "quarter": quarter,
-                "items": self._notification_candidates(quarter, {
-                    "region": (payload or {}).get("region"),
-                    "platforms": (payload or {}).get("platforms"),
-                    "sequel_only": (payload or {}).get("sequel_only"),
-                }),
-            },
-        )
+        snapshot = self._notification_candidate_snapshot(quarter, {
+            "region": (payload or {}).get("region"),
+            "platforms": (payload or {}).get("platforms"),
+            "sequel_only": (payload or {}).get("sequel_only"),
+        })
+        return schemas.Response(success=True, data={
+            "quarter": quarter,
+            "items": snapshot["ready"],
+            "ready": snapshot["ready"],
+            "failed": snapshot["failed"],
+        })
 
     def action_notification_candidates_api(
             self, payload: dict = Body(...),
     ) -> schemas.Response:
-        """批量加入或忽略当前季度候选。"""
+        """批量加入、重试或忽略当前季度候选。"""
         payload = payload or {}
         quarter = str(payload.get("quarter") or self._current_quarter_key())
         action = str(payload.get("action") or "").strip().lower()
@@ -3137,11 +3462,43 @@ class TmdbRecognizeEnhancer(_PluginBase):
             approvals = self._read_notification_approvals()
             approvals["ignored"] = [*(approvals.get("ignored") or []), *item_ids]
             self._save_notification_approvals(approvals)
+            snapshot = self._notification_candidate_snapshot(
+                quarter, candidate_options,
+            )
             return schemas.Response(
                 success=True, message=f"已忽略 {len(item_ids)} 条候选",
                 data={
                     "quarter": quarter,
-                    "items": self._notification_candidates(quarter, candidate_options),
+                    "items": snapshot["ready"],
+                    "ready": snapshot["ready"],
+                    "failed": snapshot["failed"],
+                },
+            )
+        if action == "retry":
+            cached = self._read_season_catalog_cache().get(quarter) or {}
+            catalog = cached.get("items") if isinstance(cached, dict) else []
+            index = {str(item.get("id")): item for item in catalog or []}
+            selected = [deepcopy(index[item_id]) for item_id in item_ids if item_id in index]
+            if not selected:
+                return schemas.Response(success=False, message="季度缓存中没有这些失败条目")
+            threading.Thread(
+                target=self._retry_notification_candidates_worker,
+                args=(quarter, selected),
+                name="notification-candidate-retry",
+                daemon=True,
+            ).start()
+            snapshot = self._notification_candidate_snapshot(
+                quarter, candidate_options,
+            )
+            return schemas.Response(
+                success=True,
+                message=f"已开始重新扫描 {len(selected)} 条失败候选",
+                data={
+                    "quarter": quarter,
+                    "items": snapshot["ready"],
+                    "ready": snapshot["ready"],
+                    "failed": snapshot["failed"],
+                    "retrying": [str(item.get("id")) for item in selected],
                 },
             )
         if action not in ("add_default", "add_group"):
@@ -3163,16 +3520,40 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 failed.append({"id": item_id, "reason": str(err)})
         if added:
             self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
+        snapshot = self._notification_candidate_snapshot(
+            quarter, candidate_options,
+        )
         return schemas.Response(
             success=True,
             message=f"已加入 {len(added)} 条，失败 {len(failed)} 条",
             data={
                 "quarter": quarter,
                 "added": added,
-                "failed": failed,
-                "items": self._notification_candidates(quarter, candidate_options),
+                "operation_failures": failed,
+                "items": snapshot["ready"],
+                "ready": snapshot["ready"],
+                "failed": snapshot["failed"],
             },
         )
+
+    def _retry_notification_candidates_worker(
+            self,
+            quarter: str,
+            items: List[Dict[str, Any]],
+    ) -> None:
+        """后台逐条重试失败项；成功状态变化会进入实时监控。"""
+        for item in items:
+            try:
+                item["scan_status"] = "scanning"
+                item.pop("scan_error", None)
+                self._merge_catalog_scan_item(quarter, item)
+                updated = self._scan_catalog_item(item)
+            except Exception as err:  # noqa: BLE001 - 批量重试逐条保留错误
+                item["scan_status"] = "failed"
+                item["scan_error"] = str(err)
+                updated = item
+            self._merge_catalog_scan_item(quarter, updated)
+        self._monitor_notification_candidates(quarter)
 
     def _send_enhanced_notification(
             self,
@@ -3181,6 +3562,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             text: str,
             source_notice: Dict[str, Any],
             buttons: Optional[List[List[dict]]] = None,
+            channel: Any = None,
     ) -> None:
         """统一使用 Plugin 类型发送，避免递归接管自身通知。"""
         if NotificationType is None:
@@ -3192,6 +3574,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         for key in ("image", "link", "userid", "username", "channel", "targets"):
             if source_notice.get(key):
                 kwargs[key] = source_notice[key]
+        if channel is not None:
+            kwargs["channel"] = channel
         resolved_buttons = buttons if buttons is not None else source_notice.get("buttons")
         if resolved_buttons:
             kwargs["buttons"] = resolved_buttons
@@ -3399,7 +3783,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if str(data.get("plugin_id") or "") != self.__class__.__name__:
             return
         content = str(data.get("text") or "")
-        match = re.fullmatch(r"notify-candidates:(approve|ignore):([0-9a-f]{12})", content)
+        match = re.fullmatch(
+            r"notify-candidates:(approve|retry|ignore):([0-9a-f]{12})",
+            content,
+        )
         if not match:
             return
         action, batch_id = match.groups()
@@ -3414,6 +3801,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "quarter": quarter, "item_ids": item_ids, "action": "ignore",
             })
             message = result.message or "候选已忽略"
+        elif action == "retry":
+            result = self.action_notification_candidates_api({
+                "quarter": quarter, "item_ids": item_ids, "action": "retry",
+            })
+            message = result.message or "候选已开始重新扫描"
         else:
             preference = str(batch.get("preference") or "group_preferred")
             result = self.action_notification_candidates_api({
@@ -3429,6 +3821,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "userid": data.get("userid"),
                 "channel": data.get("channel"),
             },
+            channel=data.get("channel"),
         )
 
     def _maybe_enqueue_strm_sync(self, data: Any) -> None:
@@ -7136,6 +7529,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "notification_failure_enabled", "notification_plugin_enabled",
             "notification_include_paths", "notification_passthrough_manual",
             "notification_episode_candidates_enabled",
+            "notification_candidate_batch_enabled",
+            "notification_candidate_realtime_enabled",
             "notification_candidate_sequel_only",
         )
         for key in bool_keys:
@@ -7160,6 +7555,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "media_probe_timeout": (3, 30),
             "anime_cross_id_update_interval_hours": (1, 168),
             "notification_record_limit": (20, 500),
+            "notification_candidate_batch_hour": (0, 23),
         }
         for key, (minimum, maximum) in ranges.items():
             merged[key] = max(minimum, min(maximum, self._safe_int(merged.get(key), int(self.DEFAULT_CONFIG[key]))))
@@ -7205,6 +7601,24 @@ class TmdbRecognizeEnhancer(_PluginBase):
         )
         merged["notification_failure_policies"] = normalize_failure_policies(
             merged.get("notification_failure_policies")
+        )
+        candidate_channel = str(
+            merged.get("notification_candidate_channel") or ""
+        ).strip()
+        valid_channels = (
+            {channel.value for channel in MessageChannel}
+            if MessageChannel is not None else set()
+        )
+        merged["notification_candidate_channel"] = (
+            candidate_channel if candidate_channel in valid_channels else ""
+        )
+        candidate_frequency = str(
+            merged.get("notification_candidate_batch_frequency") or "monthly"
+        ).strip().lower()
+        merged["notification_candidate_batch_frequency"] = (
+            candidate_frequency
+            if candidate_frequency in ("monthly", "quarterly")
+            else "monthly"
         )
         candidate_region = str(
             merged.get("notification_candidate_region") or "japan"

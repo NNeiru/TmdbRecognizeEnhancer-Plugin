@@ -36,7 +36,7 @@ FAILURE_CATEGORIES: tuple[Dict[str, Any], ...] = (
         "key": "metadata",
         "label": "分类或元数据异常",
         "description": "分类、刮削、命名元数据或目录模板不完整",
-        "icon": "mdi-tag-alert-outline",
+        "icon": "mdi-tag-outline",
         "patterns": (
             r"分类", r"元数据", r"刮削", r"模板", r"命名", r"category", r"metadata",
             r"render", r"jinja",
