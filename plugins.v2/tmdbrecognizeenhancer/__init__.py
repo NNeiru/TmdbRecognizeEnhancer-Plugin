@@ -114,7 +114,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.31"
+    plugin_version = "0.8.32"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -243,6 +243,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_failure_policies": {
             item["key"]: "notify" for item in FAILURE_CATEGORIES
         },
+        "notification_success_service": "",
+        "notification_failure_service": "",
         "notification_episode_candidates_enabled": False,
         "notification_candidate_service": "",
         "notification_candidate_channel": "",
@@ -292,6 +294,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_passthrough_manual",
         "notification_record_limit",
         "notification_failure_policies",
+        "notification_success_service",
+        "notification_failure_service",
         "notification_episode_candidates_enabled",
         "notification_candidate_service",
         "notification_candidate_channel",
@@ -2892,6 +2896,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not isinstance(stored, dict):
             stored = {}
         stored.setdefault("ignored", [])
+        stored.setdefault("ignored_keys", [])
         stored.setdefault("notified", [])
         stored.setdefault("realtime_seen", [])
         stored.setdefault("realtime_initialized", False)
@@ -2901,6 +2906,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def _save_notification_approvals(self, value: Dict[str, Any]) -> None:
         ignored = list(dict.fromkeys(str(item) for item in value.get("ignored") or []))[-1000:]
+        ignored_keys = list(dict.fromkeys(
+            str(item) for item in value.get("ignored_keys") or []
+        ))[-3000:]
         notified = list(dict.fromkeys(str(item) for item in value.get("notified") or []))[-1000:]
         realtime_seen = list(dict.fromkeys(
             str(item) for item in value.get("realtime_seen") or []
@@ -2913,6 +2921,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         )
         value.update({
             "ignored": ignored,
+            "ignored_keys": ignored_keys,
             "notified": notified,
             "realtime_seen": realtime_seen,
             "realtime_initialized": bool(value.get("realtime_initialized")),
@@ -2920,6 +2929,34 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "batches": dict(list(batches.items())[-100:]),
         })
         self.save_data(self.DATA_KEY_NOTIFICATION_APPROVALS, value)
+
+    def _notification_candidate_identity_keys(
+            self, item: Dict[str, Any],
+    ) -> set[str]:
+        """生成跨刷新稳定的候选身份，避免用户忽略后因缓存重建再次出现。"""
+        keys: set[str] = set()
+        item_id = str(item.get("id") or "").strip()
+        if item_id:
+            keys.add(f"id:{item_id}")
+        for field, prefix in (
+            ("anilist_id", "anilist"),
+            ("bangumi_id", "bangumi"),
+            ("anidb_id", "anidb"),
+            ("mal_id", "mal"),
+        ):
+            value = str(item.get(field) or "").strip()
+            if value:
+                keys.add(f"{prefix}:{value}")
+        title = self._normalize_text(
+            item.get("name")
+            or item.get("original_title")
+            or item.get("display_name")
+            or item.get("title")
+        )
+        quarter = str(item.get("quarter") or "").strip()
+        if title:
+            keys.add(f"title:{quarter}:{title}")
+        return keys
 
     def _notification_config_data(self) -> Dict[str, Any]:
         config = {
@@ -3128,6 +3165,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 title=f"入库失败摘要 · {len(pending)} 条",
                 text="\n".join(lines),
                 source_notice={},
+                **self._notification_target_kwargs("failure"),
             )
             pending_ids = {str(item.get("id")) for item in pending}
             for item in records:
@@ -3159,12 +3197,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             category = {}
             title = "✅ 入库完成 · 通知增强测试"
             text = "测试媒体 S01E01\n这是一条测试消息，没有执行文件操作。"
-        target = self._notification_test_target()
+        target = self._notification_test_target(scene)
         if not target:
             return schemas.Response(
                 success=False,
                 message=(
-                    "请选择候选专用通知实例；如果只有一个可用实例，"
+                    f"请选择{'入库失败' if scene == 'failure' else '入库成功'}"
+                    "通知实例；如果只有一个可用实例，"
                     "请确认它已启用“插件”通知类型"
                 ),
                 data=self._notification_status_data(),
@@ -3210,6 +3249,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         items = cached.get("items") if isinstance(cached, dict) else []
         approvals = self._read_notification_approvals()
         ignored = set(str(value) for value in approvals.get("ignored") or [])
+        ignored_keys = set(
+            str(value) for value in approvals.get("ignored_keys") or []
+        )
         rules = self._read_episode_rules()
         options = options if isinstance(options, dict) else {}
         region = str(
@@ -3234,11 +3276,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
         failed: List[Dict[str, Any]] = []
         for item in items or []:
             item_id = str(item.get("id") or "")
+            identity_item = {**item, "quarter": item.get("quarter") or quarter}
             match = item.get("tmdb_match") or {}
             best = match.get("best") or {}
             tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
             maintained_tmdb_id = self._catalog_maintained_tmdb_id(item, rules)
-            if not item_id or item_id in ignored:
+            if (
+                    not item_id
+                    or item_id in ignored
+                    or self._notification_candidate_identity_keys(
+                        identity_item,
+                    ).intersection(ignored_keys)
+            ):
                 continue
             if maintained_tmdb_id:
                 continue
@@ -3254,7 +3303,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
             candidate = {
                 "id": item_id,
                 "quarter": quarter,
+                "anilist_id": item.get("anilist_id"),
+                "bangumi_id": item.get("bangumi_id"),
+                "anidb_id": item.get("anidb_id"),
+                "mal_id": item.get("mal_id"),
                 "title": item.get("display_name") or item.get("name_cn") or item.get("name"),
+                "name": item.get("name") or "",
                 "original_title": item.get("name") or "",
                 "tmdb_id": tmdb_id,
                 "poster": item.get("poster") or "",
@@ -3350,11 +3404,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """兼容旧调用：只返回已经匹配成功、可直接加入规则的候选。"""
         return self._notification_candidate_snapshot(quarter, options)["ready"]
 
-    def _notification_candidate_target(self) -> Optional[Tuple[Any, str]]:
-        """解析候选通知目标为“渠道枚举 + 具体配置实例名”。"""
-        configured_service = str(
-            self._config.get("notification_candidate_service") or ""
-        ).strip()
+    def _notification_service_target(
+            self, configured_service: Any,
+    ) -> Optional[Tuple[Any, str]]:
+        """把具体通知配置名解析为“渠道枚举 + 实例名”目标。"""
+        configured_service = str(configured_service or "").strip()
         options = self._notification_service_options()
         if configured_service:
             selected = next(
@@ -3375,6 +3429,17 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 None,
             ) if MessageChannel is not None else None
             return (channel, configured_service) if channel is not None else None
+        return None
+
+    def _notification_candidate_target(self) -> Optional[Tuple[Any, str]]:
+        """解析候选通知目标为“渠道枚举 + 具体配置实例名”。"""
+        options = self._notification_service_options()
+        configured_service = str(
+            self._config.get("notification_candidate_service") or ""
+        ).strip()
+        selected_target = self._notification_service_target(configured_service)
+        if configured_service:
+            return selected_target
 
         # 兼容 0.8.9：旧配置只保存渠道类型。仅在恰好存在一个同类可用实例时迁移，
         # 多个 Telegram 等情况必须由用户明确选择，避免误发到所有实例。
@@ -3393,14 +3458,34 @@ class TmdbRecognizeEnhancer(_PluginBase):
         )
         return (channel, matches[0]["value"]) if channel is not None else None
 
+    def _notification_scene_target(
+            self, scene: str,
+    ) -> Optional[Tuple[Any, str]]:
+        """分别解析入库成功与失败通知目标；留空表示沿用 MP 的全部插件渠道。"""
+        key = (
+            "notification_failure_service"
+            if str(scene or "").lower() == "failure"
+            else "notification_success_service"
+        )
+        return self._notification_service_target(self._config.get(key))
+
+    def _notification_target_kwargs(self, scene: str) -> Dict[str, Any]:
+        target = self._notification_scene_target(scene)
+        return (
+            {"channel": target[0], "service": target[1]}
+            if target else {}
+        )
+
     def _notification_candidate_channel(self) -> Any:
         """兼容旧内部调用，仅返回已选实例对应的渠道枚举。"""
         target = self._notification_candidate_target()
         return target[0] if target else None
 
-    def _notification_test_target(self) -> Optional[Tuple[Any, str]]:
-        """优先使用用户选择的实例；只有一个可用实例时允许免选择测试。"""
-        target = self._notification_candidate_target()
+    def _notification_test_target(
+            self, scene: str = "success",
+    ) -> Optional[Tuple[Any, str]]:
+        """优先使用对应入库场景实例；只有一个可用实例时允许免选择测试。"""
+        target = self._notification_scene_target(scene)
         if target:
             return target
         available = [
@@ -5069,14 +5154,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons.extend([
                 [
                     {
-                        "text": "✍️ 指定 TMDB · 默认编集",
+                        "text": "填写 TMDB · 默认编集",
                         "style": "primary",
                         "callback_data": self._notification_candidate_callback(
                             "m", batch_id, page,
                         ),
                     },
                     {
-                        "text": "✍️ 指定 TMDB · 优先剧集组",
+                        "text": "填写 TMDB · 选择剧集组",
                         "style": "primary",
                         "callback_data": self._notification_candidate_callback(
                             "M", batch_id, page,
@@ -5763,8 +5848,28 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "sequel_only": payload.get("sequel_only"),
         }
         if action == "ignore":
+            cached = self._read_season_catalog_cache().get(quarter) or {}
+            catalog = cached.get("items") if isinstance(cached, dict) else []
+            index = {
+                str(item.get("id")): item for item in catalog or []
+                if item.get("id")
+            }
+            ignored_identity_keys = []
+            for item_id in item_ids:
+                item = index.get(item_id)
+                if item:
+                    ignored_identity_keys.extend(
+                        self._notification_candidate_identity_keys({
+                            **item,
+                            "quarter": item.get("quarter") or quarter,
+                        })
+                    )
             approvals = self._read_notification_approvals()
             approvals["ignored"] = [*(approvals.get("ignored") or []), *item_ids]
+            approvals["ignored_keys"] = [
+                *(approvals.get("ignored_keys") or []),
+                *ignored_identity_keys,
+            ]
             self._save_notification_approvals(approvals)
             snapshot = self._notification_candidate_snapshot(
                 quarter, candidate_options,
@@ -5955,11 +6060,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "优先剧集组" if preference == "group_preferred" else "TMDB 默认编集"
         )
         prompt = self._send_candidate_instance_notification(
-            title="补充 TMDBID",
+            title=(
+                "补充 TMDBID · 选择剧集组"
+                if preference == "group_preferred"
+                else "补充 TMDBID · 默认编集"
+            ),
             text=(
                 f"{item.get('title') or item.get('original_title') or item_id}\n"
                 f"目标：{target_text}\n"
-                "请直接回复纯数字 TMDBID；回复“取消”可退出。"
+                "请回复纯数字 TMDBID。"
+                + (
+                    "\n收到后会打开该 TMDB 条目的剧集组列表，"
+                    "由你选择具体剧集组。"
+                    if preference == "group_preferred" else ""
+                )
+                + "\n回复“取消”可退出。"
             ),
             buttons=[],
             channel=channel,
@@ -5973,7 +6088,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     item.get('title') or item.get('original_title') or item_id
                 ))}</b>\n"
                 f"目标：<code>{html_utils.escape(target_text)}</code>\n"
-                "<blockquote>请直接回复纯数字 TMDBID；回复“取消”可退出。</blockquote>"
+                "<blockquote>请回复纯数字 TMDBID。"
+                + (
+                    "收到后会打开剧集组列表供你选择。"
+                    if preference == "group_preferred" else ""
+                )
+                + "回复“取消”可退出。</blockquote>"
             ),
         )
         if not prompt.get("success") or not prompt.get("message_id"):
@@ -6022,7 +6142,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not tmdb_id:
             delivery = self._send_candidate_instance_notification(
                 title="TMDBID 格式不正确",
-                text="请输入纯数字 TMDBID。当前输入已取消，请在候选详情中重新点击“指定 TMDB”。",
+                text="请输入纯数字 TMDBID。当前输入已取消，请在候选详情中重新点击“填写 TMDB”。",
                 buttons=[],
                 channel=channel,
                 service=service,
@@ -6032,6 +6152,66 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return
 
         preference = str(payload.get("preference") or "default")
+        if preference == "group_preferred":
+            for item in batch.get("items") or []:
+                if str(item.get("id") or "") == item_id:
+                    item["tmdb_id"] = tmdb_id
+                    break
+            manual_overrides = (
+                batch.get("tmdb_id_overrides")
+                if isinstance(batch.get("tmdb_id_overrides"), dict)
+                else {}
+            )
+            manual_overrides[item_id] = tmdb_id
+            batch["tmdb_id_overrides"] = manual_overrides
+            inspections = (
+                batch.get("episode_group_inspections")
+                if isinstance(batch.get("episode_group_inspections"), dict)
+                else {}
+            )
+            inspections.pop(str(tmdb_id), None)
+            batch["episode_group_inspections"] = inspections
+            view = self._render_notification_candidate_groups(
+                batch_id=batch_id,
+                batch=batch,
+                page=self._safe_int(payload.get("page"), 0),
+                notice=f"已指定 TMDB {tmdb_id}，请选择确切剧集组。",
+            )
+            batches = (
+                approvals.get("batches")
+                if isinstance(approvals.get("batches"), dict)
+                else {}
+            )
+            batches[batch_id] = batch
+            approvals["batches"] = batches
+            self._save_notification_approvals(approvals)
+            delivery = self._send_candidate_instance_notification(
+                title=view["title"],
+                text=view["text"],
+                buttons=view["buttons"],
+                image=view.get("image", ""),
+                channel=channel,
+                service=service,
+                original_message_id=payload.get("original_message_id"),
+                original_media_message_id=batch.get("media_message_id"),
+                original_photo_unique_id=batch.get("rich_photo_unique_id", ""),
+                original_image_digest=batch.get("rich_image_digest", ""),
+                original_chat_id=(
+                    payload.get("original_chat_id")
+                    or data.get("chat_id")
+                ),
+                rich_markdown=view.get("rich_markdown", ""),
+                rich_text=view.get("rich_text", ""),
+                rich_blocks=view.get("rich_blocks"),
+            )
+            if delivery.get("success"):
+                self._remember_notification_candidate_media_message(
+                    batch_id=batch_id,
+                    batch=batch,
+                    delivery=delivery,
+                )
+            return
+
         api_action = "add_group" if preference == "group_preferred" else "add_default"
         result = self.action_notification_candidates_api({
             "quarter": batch.get("quarter"),
@@ -6272,6 +6452,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 title=enhanced_title,
                 text=enhanced_text,
                 source_notice=notice,
+                **self._notification_target_kwargs(scene),
             )
             action = "notified"
         self._append_notification_record(build_record(
@@ -6603,6 +6784,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
             api_payload["episode_group_overrides"] = {
                 item_ids[0]: selected_group_id,
             }
+        manual_tmdb_overrides = (
+            batch.get("tmdb_id_overrides")
+            if isinstance(batch.get("tmdb_id_overrides"), dict)
+            else {}
+        )
+        selected_tmdb_overrides = {
+            item_id: self._safe_int(manual_tmdb_overrides.get(item_id), 0)
+            for item_id in item_ids
+            if self._safe_int(manual_tmdb_overrides.get(item_id), 0)
+        }
+        if selected_tmdb_overrides:
+            api_payload["tmdb_id_overrides"] = selected_tmdb_overrides
         result = self.action_notification_candidates_api(api_payload)
         result_data = getattr(result, "data", None)
         result_data = result_data if isinstance(result_data, dict) else {}
@@ -10453,6 +10646,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged["notification_failure_policies"] = normalize_failure_policies(
             merged.get("notification_failure_policies")
         )
+        merged["notification_success_service"] = str(
+            merged.get("notification_success_service") or ""
+        ).strip()[:160]
+        merged["notification_failure_service"] = str(
+            merged.get("notification_failure_service") or ""
+        ).strip()[:160]
         merged["notification_candidate_service"] = str(
             merged.get("notification_candidate_service") or ""
         ).strip()[:160]

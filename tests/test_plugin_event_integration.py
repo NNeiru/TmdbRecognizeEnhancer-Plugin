@@ -2835,6 +2835,7 @@ def test_notification_candidate_selected_group_is_passed_to_rule_api(monkeypatch
                 "items": [item],
                 "item_ids": ["anime:1"],
                 "handled_ids": [],
+                "tmdb_id_overrides": {"anime:1": 1001},
                 "episode_group_inspections": {
                     "1001": {
                         "tmdb_id": 1001,
@@ -2881,6 +2882,74 @@ def test_notification_candidate_selected_group_is_passed_to_rule_api(monkeypatch
     assert payload["episode_group_overrides"] == {
         "anime:1": "chosen-group",
     }
+    assert payload["tmdb_id_overrides"] == {"anime:1": 1001}
+
+
+def test_notification_candidate_manual_tmdb_opens_exact_group_picker(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._data[plugin.DATA_KEY_NOTIFICATION_APPROVALS] = {
+        "batches": {
+            "123456789abc": {
+                "quarter": "2026-Q3",
+                "candidate_type": "failed",
+                "items": [{"id": "anime:1", "title": "示例", "tmdb_id": 0}],
+                "item_ids": ["anime:1"],
+                "handled_ids": [],
+            },
+        },
+    }
+    plugin._normalizer = Mock(return_value=SimpleNamespace(
+        inspect=Mock(return_value={
+            "tmdb_id": 456,
+            "title": "示例",
+            "default": {},
+            "groups": [{
+                "id": "group-1",
+                "name": "Seasons",
+                "type": 6,
+                "seasons": [],
+            }],
+            "recommendation": {},
+        }),
+    ))
+    plugin._notification_candidate_target = Mock(
+        return_value=("telegram", "候选通知"),
+    )
+    plugin._send_candidate_instance_notification = Mock(
+        return_value={"success": True},
+    )
+    plugin.action_notification_candidates_api = Mock()
+
+    plugin._handle_notification_candidate_tmdb_input({
+        "input_text": "456",
+        "channel": "telegram",
+        "source": "候选通知",
+        "chat_id": "789",
+        "payload": {
+            "kind": "notification_candidate_tmdb",
+            "batch_id": "123456789abc",
+            "item_id": "anime:1",
+            "page": 0,
+            "preference": "group_preferred",
+            "original_message_id": 123,
+            "original_chat_id": "789",
+        },
+    })
+
+    plugin.action_notification_candidates_api.assert_not_called()
+    stored = plugin._data[plugin.DATA_KEY_NOTIFICATION_APPROVALS]["batches"][
+        "123456789abc"
+    ]
+    assert stored["tmdb_id_overrides"] == {"anime:1": 456}
+    delivery = plugin._send_candidate_instance_notification.call_args.kwargs
+    assert "请选择确切剧集组" in json.dumps(
+        delivery["rich_blocks"], ensure_ascii=False,
+    )
+    assert any(
+        block.get("type") == "details"
+        for block in delivery["rich_blocks"]
+    )
 
 
 def test_notification_candidate_custom_emoji_has_plain_fallback(monkeypatch):
@@ -3657,6 +3726,90 @@ def test_notification_manual_tmdb_override_persists_catalog_match(monkeypatch):
     assert stored["tmdb_match"]["best"]["tmdb_id"] == 456
 
 
+def test_ignored_candidate_stays_ignored_after_catalog_id_changes(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_candidate_region": "japan",
+        "notification_candidate_platforms": ["TV"],
+        "notification_candidate_sequel_only": False,
+    })
+    original = {
+        "id": "source:old",
+        "quarter": "2026-Q3",
+        "anilist_id": 12345,
+        "name": "Example Anime",
+        "display_name": "示例动画",
+        "region": "japan",
+        "platform": "TV",
+        "scan_status": "failed",
+        "tmdb_match": {"accepted": False, "attempted": True},
+    }
+    plugin._data[plugin.DATA_KEY_SEASON_CATALOG] = {
+        "2026-Q3": {
+            "items": [original],
+            "schema_version": plugin.CATALOG_SCHEMA_VERSION,
+        },
+    }
+    plugin._data[plugin.DATA_KEY_EPISODE_RULES] = []
+
+    result = plugin.action_notification_candidates_api({
+        "quarter": "2026-Q3",
+        "item_ids": ["source:old"],
+        "action": "ignore",
+    })
+    assert result.success is True
+
+    plugin._data[plugin.DATA_KEY_SEASON_CATALOG]["2026-Q3"]["items"] = [{
+        **original,
+        "id": "source:new",
+    }]
+    snapshot = plugin._notification_candidate_snapshot("2026-Q3")
+    assert snapshot == {"ready": [], "failed": []}
+
+
+def test_notification_scenes_use_independent_service_instances(monkeypatch):
+    module = _load_plugin(monkeypatch)
+
+    class MessageChannel(Enum):
+        Telegram = "telegram"
+
+    monkeypatch.setattr(module, "MessageChannel", MessageChannel)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_success_service": "入库成功通知",
+        "notification_failure_service": "入库失败通知",
+        "notification_candidate_service": "集数偏移审批",
+    })
+    plugin._notification_service_options = Mock(return_value=[
+        {
+            "value": "入库成功通知",
+            "channel": "telegram",
+            "accepts_plugin": True,
+        },
+        {
+            "value": "入库失败通知",
+            "channel": "telegram",
+            "accepts_plugin": True,
+        },
+        {
+            "value": "集数偏移审批",
+            "channel": "telegram",
+            "accepts_plugin": True,
+        },
+    ])
+
+    assert plugin._notification_scene_target("success") == (
+        MessageChannel.Telegram, "入库成功通知",
+    )
+    assert plugin._notification_scene_target("failure") == (
+        MessageChannel.Telegram, "入库失败通知",
+    )
+    assert plugin._notification_candidate_target() == (
+        MessageChannel.Telegram, "集数偏移审批",
+    )
+
+
 def test_failed_notification_detail_offers_manual_tmdb_modes(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
@@ -3674,7 +3827,7 @@ def test_failed_notification_detail_offers_manual_tmdb_modes(monkeypatch):
     buttons = [button for row in view["buttons"] for button in row]
     labels = {button["text"] for button in buttons}
     callbacks = {button["callback_data"] for button in buttons}
-    assert any(label.endswith("指定 TMDB · 默认编集") for label in labels)
-    assert any(label.endswith("指定 TMDB · 优先剧集组") for label in labels)
+    assert any(label.endswith("填写 TMDB · 默认编集") for label in labels)
+    assert any(label.endswith("填写 TMDB · 选择剧集组") for label in labels)
     assert any(value.endswith("nc:m:123456789abc:0") for value in callbacks)
     assert any(value.endswith("nc:M:123456789abc:0") for value in callbacks)

@@ -31,8 +31,10 @@ const now = new Date()
 const selectedQuarter = ref(`${now.getFullYear()}-Q${Math.floor(now.getMonth() / 3) + 1}`)
 const selectedReadyIds = ref([])
 const selectedFailedIds = ref([])
-const failedTmdbIds = ref({})
 const manualCandidateBusy = ref('')
+const manualCandidateDialog = ref(false)
+const manualCandidateItem = ref(null)
+const manualCandidateTmdbId = ref('')
 const recordFilter = ref('all')
 const showRecords = ref(false)
 
@@ -212,8 +214,17 @@ async function candidateAction(action, candidateType = 'ready') {
   }
 }
 
-async function addFailedCandidate(item, action) {
-  const tmdbId = Number(failedTmdbIds.value[item.id] || 0)
+function openFailedCandidate(item) {
+  manualCandidateItem.value = item
+  manualCandidateTmdbId.value = ''
+  manualCandidateDialog.value = true
+  error.value = ''
+}
+
+async function addFailedCandidate(action) {
+  const item = manualCandidateItem.value
+  if (!item) return
+  const tmdbId = Number(manualCandidateTmdbId.value || 0)
   if (!tmdbId) {
     error.value = `请先为“${item.title}”填写 TMDBID`
     return
@@ -240,7 +251,9 @@ async function addFailedCandidate(item, action) {
     if (result.operation_failures?.length) {
       throw new Error(result.operation_failures[0]?.reason || '规则添加失败')
     }
-    delete failedTmdbIds.value[item.id]
+    manualCandidateDialog.value = false
+    manualCandidateItem.value = null
+    manualCandidateTmdbId.value = ''
     notice.value = `已按 TMDB ${tmdbId} 建立维护规则`
   } catch (err) {
     error.value = err?.message || '补充 TMDBID 失败'
@@ -351,6 +364,28 @@ onMounted(async () => {
         <VSwitch v-model="config.notification_include_paths" color="primary" hide-details label="附带源与目标路径" />
         <VSwitch v-model="config.notification_passthrough_manual" color="primary" hide-details label="接管时转发其它人工通知" />
       </div>
+      <div class="notification-route-grid">
+        <VSelect
+          v-model="config.notification_success_service"
+          :items="notificationServiceItems"
+          label="入库成功通知实例"
+          placeholder="留空则发送到全部插件通知渠道"
+          density="comfortable"
+          variant="outlined"
+          clearable
+          hide-details
+        />
+        <VSelect
+          v-model="config.notification_failure_service"
+          :items="notificationServiceItems"
+          label="入库失败通知实例"
+          placeholder="留空则发送到全部插件通知渠道"
+          density="comfortable"
+          variant="outlined"
+          clearable
+          hide-details
+        />
+      </div>
     </section>
 
     <section class="section-shell">
@@ -393,7 +428,7 @@ onMounted(async () => {
         <VSelect
           v-model="config.notification_candidate_service"
           :items="notificationServiceItems"
-          label="候选专用通知实例"
+          label="集数偏移审批通知实例"
           placeholder="请选择具体通知实例"
           density="comfortable"
           variant="outlined"
@@ -494,14 +529,16 @@ onMounted(async () => {
           <VCheckboxBtn :model-value="allReadySelected" @update:model-value="setAllReady" />
           <span><strong>匹配完成</strong><small>{{ readyCandidates.length }} 部可直接加入维护规则</small></span>
           <VSpacer />
-          <VBtn variant="text" color="default" :disabled="!selectedReadyIds.length" @click="candidateAction('ignore')">忽略所选</VBtn>
-          <VBtn variant="tonal" color="primary" :loading="actionLoading" :disabled="!selectedReadyIds.length" @click="candidateAction('add_default')">按 TMDB 默认加入</VBtn>
-          <VBtn color="primary" :loading="actionLoading" :disabled="!selectedReadyIds.length" @click="candidateAction('add_group')">优先剧集组加入</VBtn>
+          <div class="candidate-actions">
+            <VBtn variant="text" color="default" :disabled="!selectedReadyIds.length" @click="candidateAction('ignore')">忽略所选</VBtn>
+            <VBtn variant="tonal" color="primary" :loading="actionLoading" :disabled="!selectedReadyIds.length" @click="candidateAction('add_default')">按 TMDB 默认加入</VBtn>
+            <VBtn color="primary" :loading="actionLoading" :disabled="!selectedReadyIds.length" @click="candidateAction('add_group')">优先剧集组加入</VBtn>
+          </div>
         </div>
         <div class="candidate-items">
           <label v-for="item in readyCandidates" :key="item.id" class="candidate-item">
             <VCheckboxBtn v-model="selectedReadyIds" :value="item.id" />
-            <VImg v-if="item.poster" :src="item.poster" width="42" height="58" cover class="candidate-poster" />
+            <VImg v-if="item.poster" :src="item.poster" width="48" height="68" cover class="candidate-poster" />
             <div class="candidate-copy">
               <strong>{{ item.title }}</strong>
               <span>TMDB {{ item.tmdb_id }} · {{ item.platform }}<template v-if="item.has_prequel"> · 续作</template></span>
@@ -513,36 +550,28 @@ onMounted(async () => {
       <div v-if="failedCandidates.length" class="candidate-list failed-list">
         <div class="candidate-toolbar">
           <VCheckboxBtn :model-value="allFailedSelected" @update:model-value="setAllFailed" />
-          <span><strong>扫描失败</strong><small>{{ failedCandidates.length }} 部可批量重试或忽略</small></span>
+          <span><strong>扫描失败</strong><small>{{ failedCandidates.length }} 部可批量重试、忽略或逐部补录</small></span>
           <VSpacer />
-          <VBtn variant="text" color="default" :disabled="!selectedFailedIds.length" @click="candidateAction('ignore', 'failed')">忽略所选</VBtn>
-          <VBtn color="warning" variant="tonal" prepend-icon="mdi-refresh" :loading="actionLoading" :disabled="!selectedFailedIds.length" @click="candidateAction('retry', 'failed')">重新扫描</VBtn>
+          <div class="candidate-actions">
+            <VBtn variant="text" color="default" :disabled="!selectedFailedIds.length" @click="candidateAction('ignore', 'failed')">忽略所选</VBtn>
+            <VBtn color="warning" variant="tonal" prepend-icon="mdi-refresh" :loading="actionLoading" :disabled="!selectedFailedIds.length" @click="candidateAction('retry', 'failed')">重新扫描</VBtn>
+          </div>
         </div>
         <div class="candidate-items">
           <div v-for="item in failedCandidates" :key="item.id" class="candidate-item failed-candidate-item">
             <VCheckboxBtn v-model="selectedFailedIds" :value="item.id" />
-            <VImg v-if="item.poster" :src="item.poster" width="42" height="58" cover class="candidate-poster" />
+            <VImg v-if="item.poster" :src="item.poster" width="48" height="68" cover class="candidate-poster" />
             <div class="candidate-copy">
               <strong>{{ item.title }}</strong>
               <span>{{ item.scan_error || '未匹配到可信 TMDB 条目' }}</span>
             </div>
-            <VTextField
-              v-model="failedTmdbIds[item.id]" label="TMDBID" type="number"
-              density="compact" variant="outlined" hide-details class="candidate-tmdb-input"
-            />
-            <VMenu>
-              <template #activator="{ props: menuProps }">
-                <VBtn
-                  v-bind="menuProps" color="primary" variant="tonal"
-                  append-icon="mdi-menu-down" :loading="manualCandidateBusy === item.id"
-                  :disabled="!Number(failedTmdbIds[item.id] || 0)"
-                >补充并加入</VBtn>
-              </template>
-              <VList density="compact">
-                <VListItem title="使用 TMDB 默认编集" prepend-icon="mdi-database-outline" @click="addFailedCandidate(item, 'add_default')" />
-                <VListItem title="优先 Production/Season 剧集组" prepend-icon="mdi-animation-outline" @click="addFailedCandidate(item, 'add_group')" />
-              </VList>
-            </VMenu>
+            <VBtn
+              color="primary"
+              variant="tonal"
+              prepend-icon="mdi-database-edit-outline"
+              :loading="manualCandidateBusy === item.id"
+              @click="openFailedCandidate(item)"
+            >补录 TMDB</VBtn>
           </div>
         </div>
       </div>
@@ -551,6 +580,52 @@ onMounted(async () => {
         <span>{{ candidateLoading ? '正在读取季度缓存…' : '当前筛选没有待处理条目；请先在“集数偏移”中加载并扫描该季度看板。' }}</span>
       </div>
     </section>
+
+    <VDialog v-model="manualCandidateDialog" max-width="560">
+      <VCard class="manual-candidate-dialog">
+        <VCardItem>
+          <template #prepend>
+            <VAvatar color="primary" variant="tonal">
+              <VIcon icon="mdi-database-edit-outline" />
+            </VAvatar>
+          </template>
+          <VCardTitle>补录 TMDB</VCardTitle>
+          <VCardSubtitle>{{ manualCandidateItem?.title }}</VCardSubtitle>
+        </VCardItem>
+        <VDivider />
+        <VCardText>
+          <VTextField
+            v-model="manualCandidateTmdbId"
+            label="TMDBID"
+            type="number"
+            autofocus
+            variant="outlined"
+            prepend-inner-icon="mdi-movie-search-outline"
+            hint="填写电视剧 TMDBID，再选择最终采用的编集方式。"
+            persistent-hint
+          />
+        </VCardText>
+        <VCardActions class="manual-candidate-actions">
+          <VBtn variant="text" @click="manualCandidateDialog = false">取消</VBtn>
+          <VSpacer />
+          <VBtn
+            color="primary"
+            variant="tonal"
+            prepend-icon="mdi-database-outline"
+            :disabled="!Number(manualCandidateTmdbId || 0)"
+            :loading="manualCandidateBusy === manualCandidateItem?.id"
+            @click="addFailedCandidate('add_default')"
+          >按 TMDB 默认编集加入</VBtn>
+          <VBtn
+            color="primary"
+            prepend-icon="mdi-animation-outline"
+            :disabled="!Number(manualCandidateTmdbId || 0)"
+            :loading="manualCandidateBusy === manualCandidateItem?.id"
+            @click="addFailedCandidate('add_group')"
+          >优先剧集组加入</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
 
     <section class="section-shell">
       <button type="button" class="records-heading" @click="showRecords = !showRecords">
@@ -629,6 +704,12 @@ onMounted(async () => {
 }
 .option-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 22px; }
 .option-row.compact { margin-top: 12px; }
+.notification-route-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
 .policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 .policy-card {
   display: flex; align-items: center; gap: 11px; min-height: 66px; padding: 10px 12px;
@@ -659,18 +740,43 @@ onMounted(async () => {
 }
 .candidate-controls { display: grid; grid-template-columns: minmax(130px, .7fr) minmax(130px, .7fr) minmax(190px, 1.1fr) auto auto; gap: 10px; margin-top: 14px; }
 .platform-select { max-width: 440px; min-width: 260px; }
-.candidate-list { margin-top: 14px; overflow: hidden; border: 1px solid rgba(var(--v-theme-on-surface), .09); border-radius: 13px; }
-.candidate-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 58px; padding: 7px 12px; background: rgba(var(--v-theme-primary), .045); }
+.candidate-list {
+  margin-top: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(var(--v-theme-on-surface), .09);
+  border-radius: 14px;
+  background: rgba(var(--v-theme-on-surface), .015);
+}
+.candidate-toolbar { display: flex; align-items: center; gap: 8px; min-height: 62px; padding: 9px 14px; background: rgba(var(--v-theme-primary), .045); }
 .candidate-toolbar > span { display: grid; gap: 1px; }
 .candidate-toolbar > span small { color: rgba(var(--v-theme-on-surface), .55); font-size: .72rem; }
+.candidate-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .failed-list .candidate-toolbar { background: rgba(var(--v-theme-warning), .055); }
-.candidate-items { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.candidate-item { display: flex; align-items: center; gap: 10px; min-height: 78px; padding: 10px 12px; border-top: 1px solid rgba(var(--v-theme-on-surface), .07); cursor: pointer; }
-.candidate-item:nth-child(odd) { border-right: 1px solid rgba(var(--v-theme-on-surface), .07); }
-.candidate-poster { flex: 0 0 auto; border-radius: 7px; }
-.candidate-copy { flex: 1; }
-.failed-candidate-item { cursor: default; flex-wrap: wrap; }
-.candidate-tmdb-input { flex: 0 0 118px; max-width: 118px; }
+.candidate-items {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  padding: 10px;
+}
+.candidate-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  min-height: 92px;
+  padding: 11px 12px;
+  border: 1px solid rgba(var(--v-theme-on-surface), .075);
+  border-radius: 12px;
+  background: rgba(var(--v-theme-surface), .82);
+  cursor: pointer;
+}
+.candidate-poster { flex: 0 0 auto; border-radius: 8px; }
+.candidate-copy { flex: 1; overflow: hidden; }
+.candidate-copy strong { overflow-wrap: anywhere; line-height: 1.4; }
+.candidate-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.failed-candidate-item { cursor: default; }
+.manual-candidate-dialog { overflow: hidden; border-radius: 16px !important; }
+.manual-candidate-actions { flex-wrap: wrap; gap: 8px; padding: 12px 20px 18px; }
 .empty-inline { display: flex; align-items: center; justify-content: center; gap: 9px; min-height: 86px; color: rgba(var(--v-theme-on-surface), .55); font-size: .82rem; }
 .records-heading { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 0; color: inherit; text-align: left; border: 0; background: transparent; cursor: pointer; }
 .record-toolbar { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
@@ -678,10 +784,10 @@ onMounted(async () => {
 .record-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 11px; background: rgba(var(--v-theme-on-surface), .035); }
 .record-item div { flex: 1; }
 @media (max-width: 900px) {
-  .mode-grid, .policy-grid, .candidate-items, .delivery-grid { grid-template-columns: 1fr; }
-  .candidate-item:nth-child(odd) { border-right: 0; }
-  .candidate-tmdb-input { flex-basis: 105px; max-width: 105px; }
+  .mode-grid, .policy-grid, .candidate-items, .delivery-grid, .notification-route-grid { grid-template-columns: 1fr; }
   .candidate-controls { grid-template-columns: 1fr 1fr; }
+  .candidate-toolbar { align-items: flex-start; flex-wrap: wrap; }
+  .candidate-actions { flex: 1 0 100%; justify-content: flex-start; padding-left: 34px; }
 }
 @media (max-width: 600px) {
   .section-shell { padding: 14px; }
@@ -693,5 +799,8 @@ onMounted(async () => {
   .candidate-message-style .v-btn-toggle { width: 100%; }
   .candidate-message-style .v-btn { flex: 1; }
   .premium-emoji-field { flex-basis: auto; width: 100%; }
+  .candidate-actions { padding-left: 0; }
+  .candidate-actions .v-btn { flex: 1; }
+  .manual-candidate-actions .v-btn { flex: 1 0 100%; }
 }
 </style>
