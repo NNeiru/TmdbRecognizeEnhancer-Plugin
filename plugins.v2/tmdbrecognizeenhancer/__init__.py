@@ -113,7 +113,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.21"
+    plugin_version = "0.8.22"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3462,6 +3462,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             userid: Optional[str] = None,
             rich_markdown: str = "",
             rich_text: str = "",
+            rich_blocks: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """绕过 MP 定时队列，向具体通知实例立即发送候选交互消息。"""
         if NotificationHelper is None:
@@ -3490,13 +3491,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 ) == "rich"
             )
             if (
-                    rich_markdown
+                    (rich_markdown or rich_blocks)
                     and not force_reply
                     and use_rich_messages
             ):
                 rich_result = self._send_candidate_rich_telegram(
                     instance=instance,
                     rich_markdown=rich_markdown,
+                    rich_blocks=rich_blocks,
                     buttons=buttons,
                     image=image,
                     original_message_id=original_message_id,
@@ -3616,6 +3618,47 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return text
 
     @staticmethod
+    def _candidate_rich_table(
+            rows: List[Tuple[Any, Any]],
+    ) -> Dict[str, Any]:
+        """生成 Telegram 10.2 原生表格，避免在 Markdown 表格中堆叠图标。"""
+        cells = [[
+            {
+                "text": "项目",
+                "is_header": True,
+                "align": "left",
+                "valign": "middle",
+            },
+            {
+                "text": "信息",
+                "is_header": True,
+                "align": "left",
+                "valign": "middle",
+            },
+        ]]
+        cells.extend([
+            [
+                {
+                    "text": str(label or ""),
+                    "align": "left",
+                    "valign": "middle",
+                },
+                {
+                    "text": value,
+                    "align": "left",
+                    "valign": "middle",
+                },
+            ]
+            for label, value in rows
+        ])
+        return {
+            "type": "table",
+            "cells": cells,
+            "is_bordered": True,
+            "is_striped": True,
+        }
+
+    @staticmethod
     def _candidate_telegram_reply_markup(
             buttons: List[List[dict]],
     ) -> Dict[str, Any]:
@@ -3654,6 +3697,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             *,
             instance: Any,
             rich_markdown: str,
+            rich_blocks: Optional[List[Dict[str, Any]]] = None,
             buttons: List[List[dict]],
             image: str = "",
             original_message_id: Optional[int] = None,
@@ -3672,11 +3716,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if chat_id in (None, ""):
             return {"success": False, "error": "Telegram Chat ID 为空"}
 
-        # Telegram 10.2 声称 editMessageText 可编辑 Rich Message，但实际客户端
-        # 对已存在的媒体块存在缓存/复用：正文已经翻到详情，图片仍停留在总览
-        # 拼图，连续编辑后还可能回退普通消息。带回调的候选页一律先发送完整的
-        # 新 Rich Message，成功后再删除旧消息，确保文本、媒体和键盘原子更新。
-        method = "sendRichMessage"
+        # 使用 Bot API 10.2 的原生 Rich Message 区块原地编辑。旧实现把图片
+        # 作为 Markdown 媒体引用，客户端可能复用旧媒体块，造成正文已翻页而
+        # 图片仍是总览拼图。blocks 会让标题、照片与表格作为一棵区块树替换。
+        method = "editMessageText" if original_message_id else "sendRichMessage"
         api_template = "https://api.telegram.org/bot{0}/{1}"
         try:
             from telebot import apihelper
@@ -3693,18 +3736,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
             proxies = getattr(settings, "PROXY", None)
 
         markdown = str(rich_markdown or "").strip()
-        rich_message: Dict[str, Any] = {
-            "markdown": markdown,
-            "skip_entity_detection": True,
-        }
+        blocks = deepcopy(rich_blocks) if rich_blocks else []
+        rich_message: Dict[str, Any] = (
+            {
+                "blocks": blocks,
+                "skip_entity_detection": True,
+            }
+            if blocks else {
+                "markdown": markdown,
+                "skip_entity_detection": True,
+            }
+        )
         files = None
         image_handle = None
         image_value = str(image or "").strip()
         if image_value:
-            # InputRichMessageMedia.id 不只是 Markdown 引用名。Telegram 在编辑
-            # Rich Message 时会按该标识复用媒体块；若总览和详情始终使用同一
-            # 个 id，客户端可能继续显示总览拼图。让 id 随图片变化，强制
-            # 翻页时将媒体块替换为当前条目的单张海报。
             media_id = (
                 "candidate_"
                 + hashlib.sha256(image_value.encode("utf-8")).hexdigest()[:20]
@@ -3727,57 +3773,42 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     ),
                 }
             elif image_value.startswith(("https://", "http://")):
-                # Telegram 直连部分 AniList/TMDB CDN 时可能取图失败，导致
-                # editMessageText 回退并保留原组合图。优先由 MP 下载、统一转成
-                # JPEG 后作为附件上传，下载失败才让 Telegram 直接读取 URL。
-                content = self._fetch_candidate_poster(image_value)
-                if content:
-                    prepared = BytesIO()
-                    try:
-                        if Image is not None:
-                            with Image.open(BytesIO(content)) as source:
-                                source.convert("RGB").save(
-                                    prepared,
-                                    format="JPEG",
-                                    quality=90,
-                                )
-                        else:
-                            prepared.write(content)
-                        prepared.seek(0)
-                        image_handle = prepared
-                        media_value = "attach://candidate_cover_file"
-                        files = {
-                            "candidate_cover_file": (
-                                "candidate-cover.jpg",
-                                image_handle,
-                                "image/jpeg",
-                            ),
-                        }
-                    except Exception:  # noqa: BLE001 - 图片转换失败改由 TG 拉取。
-                        prepared.close()
-                        image_handle = None
-                        media_value = image_value
-                else:
-                    media_value = image_value
+                # 公网海报让 Telegram 直接拉取。对 editMessageText 使用 URL
+                # 可以避免 multipart 编辑时旧附件被客户端继续复用。
+                media_value = image_value
             else:
                 media_value = ""
             if media_value:
-                rich_message["markdown"] = self._inject_rich_message_media(
-                    markdown, media_id,
-                )
-                rich_message["media"] = [{
-                    "id": media_id,
-                    "media": {
+                if blocks:
+                    photo_block = {
                         "type": "photo",
-                        "media": media_value,
-                    },
-                }]
+                        "photo": {
+                            "type": "photo",
+                            "media": media_value,
+                        },
+                    }
+                    insert_at = 1 if blocks and blocks[0].get("type") == "heading" else 0
+                    blocks.insert(insert_at, photo_block)
+                    rich_message["blocks"] = blocks
+                else:
+                    rich_message["markdown"] = self._inject_rich_message_media(
+                        markdown, media_id,
+                    )
+                    rich_message["media"] = [{
+                        "id": media_id,
+                        "media": {
+                            "type": "photo",
+                            "media": media_value,
+                        },
+                    }]
 
         payload: Dict[str, Any] = {
             "chat_id": chat_id,
             "rich_message": rich_message,
             "reply_markup": self._candidate_telegram_reply_markup(buttons),
         }
+        if original_message_id:
+            payload["message_id"] = int(original_message_id)
         response = None
         requester = None
         try:
@@ -3830,44 +3861,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
         result_chat = message.get("chat")
         result_chat = result_chat if isinstance(result_chat, dict) else {}
         result_chat_id = result_chat.get("id") or chat_id
-        if original_message_id and requester is not None:
-            delete_response = None
-            try:
-                delete_url = str(api_template).format(token, "deleteMessage")
-                delete_response = requester.post_res(
-                    delete_url,
-                    json={
-                        "chat_id": chat_id,
-                        "message_id": int(original_message_id),
-                    },
-                )
-                delete_result = (
-                    delete_response.json()
-                    if delete_response is not None else {}
-                )
-                if not (
-                        isinstance(delete_result, dict)
-                        and delete_result.get("ok")
-                ):
-                    logger.warning(
-                        "[媒体整理增强] 新 Rich Message 已发送，但旧候选消息"
-                        f"删除失败：{(
-                            delete_result.get('description')
-                            if isinstance(delete_result, dict)
-                            else 'Telegram 未返回有效结果'
-                        )}"
-                    )
-            except Exception as err:  # noqa: BLE001 - 新消息已成功，不应回退。
-                logger.warning(
-                    "[媒体整理增强] 新 Rich Message 已发送，但旧候选消息"
-                    f"删除异常：{err}"
-                )
-            finally:
-                if delete_response is not None:
-                    try:
-                        delete_response.close()
-                    except Exception:
-                        pass
         return {
             "success": True,
             "rich_message": True,
@@ -4119,6 +4112,24 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "rich_text": (
                     f"<blockquote>{html_utils.escape(completed_text)}</blockquote>"
                 ),
+                "rich_blocks": [
+                    {
+                        "type": "heading",
+                        "size": 2,
+                        "text": "批次处理完成",
+                    },
+                    {
+                        "type": "paragraph",
+                        "text": {
+                            "type": "marked",
+                            "text": f"{quarter} · {total} 部",
+                        },
+                    },
+                    {
+                        "type": "paragraph",
+                        "text": completed_text,
+                    },
+                ],
                 "buttons": [],
                 "image": str(batch.get("collage") or ""),
             }
@@ -4228,6 +4239,37 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "text": "\n".join(lines),
             "rich_markdown": rich_markdown,
             "rich_text": "\n".join(rich_lines),
+            "rich_blocks": [
+                {
+                    "type": "heading",
+                    "size": 2,
+                    "text": kind_text,
+                },
+                {
+                    "type": "paragraph",
+                    "text": [
+                        {
+                            "type": "marked",
+                            "text": f"{quarter} · {len(pending)} 部",
+                        },
+                        (
+                            f"　已处理 {handled}/{total}"
+                            f"　·　共 {page_count} 页"
+                        ),
+                    ],
+                },
+                {
+                    "type": "paragraph",
+                    "text": (
+                        f"来源：{'实时新增' if batch.get('realtime') else '计划批次'}"
+                        + (f"　·　{notice}" if notice else "")
+                    ),
+                },
+                {
+                    "type": "paragraph",
+                    "text": "查看详情可逐项处理，也可使用下方按钮处理整批。",
+                },
+            ],
             "buttons": buttons,
             "image": str(batch.get("collage") or ""),
         }
@@ -4343,22 +4385,22 @@ class TmdbRecognizeEnhancer(_PluginBase):
         detail_rows = [
             (
                 "状态",
-                f"🟢 =={status_text}== · 第 {page + 1}/{page_count} 页",
+                f"{status_text} · 第 {page + 1}/{page_count} 页",
             ),
-            ("TMDB", f"🔗 {tmdb_value}"),
+            ("TMDB", tmdb_value),
         ]
         if score is not None:
-            detail_rows.append(("匹配分", f"🟣 **{score} 分**"))
+            detail_rows.append(("匹配分", f"**{score} 分**"))
         detail_rows.extend([
-            ("载体", f"🔵 {self._rich_markdown_escape(platform)}"),
-            ("开播日期", f"🟠 {self._rich_markdown_escape(date_value)}"),
+            ("载体", self._rich_markdown_escape(platform)),
+            ("开播日期", self._rich_markdown_escape(date_value)),
             ("集数", f"{episode_count} 集" if episode_count else "—"),
         ])
         if traits:
             detail_rows.append((
                 "作品特征",
                 " · ".join(
-                    f"=={self._rich_markdown_escape(value)}=="
+                    self._rich_markdown_escape(value)
                     for value in traits
                 ),
             ))
@@ -4381,8 +4423,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "操作结果", self._rich_markdown_escape(notice),
             ))
         rich_markdown_lines = [
-            f"# {'🎞' if candidate_type == 'ready' else '🔎'} "
-            f"{self._rich_markdown_escape(focus_title)}",
+            f"# {self._rich_markdown_escape(focus_title)}",
             "",
             "| 项目 | 信息 |",
             "|:--|:--|",
@@ -4392,6 +4433,53 @@ class TmdbRecognizeEnhancer(_PluginBase):
             ],
         ]
         rich_markdown = "\n".join(rich_markdown_lines)
+        block_rows: List[Tuple[Any, Any]] = [
+            (
+                "状态",
+                {
+                    "type": "marked",
+                    "text": f"{status_text} · 第 {page + 1}/{page_count} 页",
+                },
+            ),
+            (
+                "TMDB",
+                (
+                    {
+                        "type": "url",
+                        "text": str(tmdb_id),
+                        "url": f"https://www.themoviedb.org/tv/{tmdb_id}",
+                    }
+                    if tmdb_id else "—"
+                ),
+            ),
+        ]
+        if score is not None:
+            block_rows.append((
+                "匹配分",
+                {
+                    "type": "bold",
+                    "text": f"{score} 分",
+                },
+            ))
+        block_rows.extend([
+            ("载体", platform),
+            ("开播日期", date_value),
+            ("集数", f"{episode_count} 集" if episode_count else "—"),
+        ])
+        if traits:
+            block_rows.append(("作品特征", " · ".join(traits)))
+        if original_title:
+            block_rows.append(("原名", original_title))
+        if candidate_type != "ready":
+            block_rows.append((
+                "失败原因",
+                self._notification_candidate_text(
+                    focus.get("scan_error") or "未匹配到可信 TMDB 候选",
+                    100,
+                ),
+            ))
+        if notice:
+            block_rows.append(("操作结果", notice))
 
         nav = []
         if page > 0:
@@ -4487,6 +4575,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "text": "\n".join(lines),
             "rich_markdown": rich_markdown,
             "rich_text": "\n".join(rich_lines),
+            "rich_blocks": [
+                {
+                    "type": "heading",
+                    "size": 2,
+                    "text": focus_title,
+                },
+                self._candidate_rich_table(block_rows),
+            ],
             "buttons": buttons,
             "image": image,
             "page_item_ids": [
@@ -4620,6 +4716,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             ),
             rich_markdown=view.get("rich_markdown", ""),
             rich_text=view.get("rich_text", ""),
+            rich_blocks=view.get("rich_blocks"),
         )
         if not delivery.get("success"):
             logger.error(
@@ -5169,6 +5266,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             original_chat_id=payload.get("original_chat_id"),
             rich_markdown=view.get("rich_markdown", ""),
             rich_text=view.get("rich_text", ""),
+            rich_blocks=view.get("rich_blocks"),
         )
 
     @staticmethod
@@ -5503,6 +5601,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     original_chat_id=data.get("original_chat_id"),
                     rich_markdown=view.get("rich_markdown", ""),
                     rich_text=view.get("rich_text", ""),
+                    rich_blocks=view.get("rich_blocks"),
                 )
             return
 
@@ -5536,6 +5635,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 original_chat_id=data.get("original_chat_id"),
                 rich_markdown=view.get("rich_markdown", ""),
                 rich_text=view.get("rich_text", ""),
+                rich_blocks=view.get("rich_blocks"),
             )
             return
 
@@ -5565,6 +5665,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 original_chat_id=data.get("original_chat_id"),
                 rich_markdown=view.get("rich_markdown", ""),
                 rich_text=view.get("rich_text", ""),
+                rich_blocks=view.get("rich_blocks"),
             )
             return
 
@@ -5640,6 +5741,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             original_chat_id=data.get("original_chat_id"),
             rich_markdown=view.get("rich_markdown", ""),
             rich_text=view.get("rich_text", ""),
+            rich_blocks=view.get("rich_blocks"),
         )
         if not delivery.get("success"):
             logger.warning(

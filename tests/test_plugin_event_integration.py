@@ -2637,19 +2637,27 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     assert summary["image"].endswith("collage.jpg")
     assert second_page["page_item_ids"] == ["anime:4"]
     assert "番剧 4" in second_page["text"]
-    assert second_page["rich_markdown"].startswith("# 🎞 番剧 4")
+    assert second_page["rich_markdown"].startswith("# 番剧 4")
     assert (
-        "| TMDB | 🔗 [1004](https://www.themoviedb.org/tv/1004) |"
+        "| TMDB | [1004](https://www.themoviedb.org/tv/1004) |"
         in second_page["rich_markdown"]
     )
-    assert "| 匹配分 | 🟣 **94 分** |" in second_page["rich_markdown"]
-    assert "| 作品特征 | ==续作== · ==多季== |" in second_page["rich_markdown"]
+    assert "| 匹配分 | **94 分** |" in second_page["rich_markdown"]
+    assert "| 作品特征 | 续作 · 多季 |" in second_page["rich_markdown"]
     assert "| 待处理 |" not in second_page["rich_markdown"]
     assert "TV" in second_page["rich_markdown"]
     assert "| 项目 | 信息 |" in second_page["rich_markdown"]
     assert "<details>" not in second_page["rich_markdown"]
     assert "<b>4. 番剧 4</b>" in second_page["rich_text"]
     assert second_page["image"].endswith("/4.jpg")
+    blocks = second_page["rich_blocks"]
+    assert blocks[0] == {"type": "heading", "size": 2, "text": "番剧 4"}
+    assert blocks[1]["type"] == "table"
+    assert blocks[1]["is_bordered"] is True
+    assert blocks[1]["is_striped"] is True
+    table_text = json.dumps(blocks[1], ensure_ascii=False)
+    assert "https://www.themoviedb.org/tv/1004" in table_text
+    assert all(icon not in table_text for icon in ("🟢", "🔗", "🟣", "🔵", "🟠"))
     assert any(
         button.get("style") == "success"
         for row in summary["buttons"]
@@ -2844,7 +2852,7 @@ def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
     assert captured["closed"] is True
 
 
-def test_candidate_rich_telegram_changes_media_id_with_image(monkeypatch):
+def test_candidate_rich_telegram_edits_blocks_and_replaces_photo(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
     captured = []
@@ -2865,8 +2873,6 @@ def test_candidate_rich_telegram_changes_media_id_with_image(monkeypatch):
 
         def post_res(self, url, **kwargs):
             captured.append((url, kwargs))
-            if url.endswith("/deleteMessage"):
-                return FakeResponse({"ok": True, "result": True})
             return FakeResponse({
                 "ok": True,
                 "result": {"message_id": 322, "chat": {"id": 654}},
@@ -2883,6 +2889,11 @@ def test_candidate_rich_telegram_changes_media_id_with_image(monkeypatch):
         result = plugin._send_candidate_rich_telegram(
             instance=instance,
             rich_markdown="# 候选",
+            rich_blocks=[{
+                "type": "heading",
+                "size": 2,
+                "text": "候选",
+            }],
             buttons=[],
             image=image,
             original_message_id=321,
@@ -2890,18 +2901,19 @@ def test_candidate_rich_telegram_changes_media_id_with_image(monkeypatch):
         )
         assert result["success"] is True
 
-    sends = [
-        kwargs for url, kwargs in captured if url.endswith("/sendRichMessage")
+    edits = [
+        kwargs for url, kwargs in captured if url.endswith("/editMessageText")
     ]
-    deletes = [
-        kwargs for url, kwargs in captured if url.endswith("/deleteMessage")
-    ]
-    first = sends[0]["json"]["rich_message"]
-    second = sends[1]["json"]["rich_message"]
-    assert first["media"][0]["id"] != second["media"][0]["id"]
-    assert "候选视觉" not in first["markdown"]
-    assert len(deletes) == 2
-    assert deletes[0]["json"] == {"chat_id": "654", "message_id": 321}
+    assert len(edits) == 2
+    first = edits[0]["json"]["rich_message"]
+    second = edits[1]["json"]["rich_message"]
+    assert edits[0]["json"]["message_id"] == 321
+    assert first["blocks"][0]["type"] == "heading"
+    assert first["blocks"][1]["type"] == "photo"
+    assert second["blocks"][1]["type"] == "photo"
+    assert first["blocks"][1]["photo"]["media"] == "https://image/collage.jpg"
+    assert second["blocks"][1]["photo"]["media"] == "https://image/poster.jpg"
+    assert not any(url.endswith("/deleteMessage") for url, _ in captured)
 
 
 def test_notification_candidate_collage_uses_local_versioned_endpoint(
