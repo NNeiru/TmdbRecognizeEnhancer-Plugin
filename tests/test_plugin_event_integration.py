@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import sys
+import threading
 from io import BytesIO
 from enum import Enum
 from pathlib import Path
@@ -2639,7 +2640,7 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     summary_blocks = summary["rich_blocks"]
     assert summary_blocks[0]["type"] == "heading"
     assert summary_blocks[1]["type"] == "divider"
-    assert summary_blocks[2]["text"]["type"] == "marked"
+    assert summary_blocks[2]["text"]["type"] == "bold"
     assert "待审批 7 部" in summary_blocks[2]["text"]["text"]
     assert summary_blocks[3]["type"] == "paragraph"
     assert summary_blocks[4]["type"] == "paragraph"
@@ -2677,6 +2678,13 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     table_text = json.dumps(blocks[1], ensure_ascii=False)
     assert "https://www.themoviedb.org/tv/1004" in table_text
     assert all(icon not in table_text for icon in ("🟢", "🔗", "🟣", "🔵", "🟠"))
+    detail_button_texts = [
+        button["text"]
+        for row in second_page["buttons"]
+        for button in row
+    ]
+    assert "查看剧集组" in detail_button_texts
+    assert all("优先剧集组加入" not in text for text in detail_button_texts)
     assert any(
         button.get("style") == "success"
         for row in summary["buttons"]
@@ -2715,6 +2723,164 @@ def test_notification_candidate_message_style_is_normalized(monkeypatch):
     assert plugin._normalize_config({
         "notification_candidate_custom_emoji_id": " 123-456 ",
     })["notification_candidate_custom_emoji_id"] == "123456"
+
+
+def test_notification_candidate_group_page_uses_collapsible_previews(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._episode_normalizer = SimpleNamespace(inspect=Mock(return_value={
+        "tmdb_id": 1001,
+        "title": "示例动画",
+        "default": {
+            "episode_count": 24,
+            "seasons": [{
+                "season": 1,
+                "episode_count": 24,
+                "is_special": False,
+            }],
+        },
+        "groups": [
+            {
+                "id": "production-group",
+                "name": "Seasons",
+                "type": 6,
+                "group_count": 2,
+                "episode_count": 24,
+                "recommended": True,
+                "seasons": [
+                    {
+                        "season": 1,
+                        "name": "Season 1",
+                        "episode_count": 12,
+                        "first_episode": 1,
+                        "last_episode": 12,
+                        "first_air_date": "2025-01-01",
+                        "last_air_date": "2025-03-20",
+                        "is_special": False,
+                    },
+                    {
+                        "season": 2,
+                        "name": "Season 2",
+                        "episode_count": 12,
+                        "first_episode": 1,
+                        "last_episode": 12,
+                        "first_air_date": "2026-01-01",
+                        "last_air_date": "2026-03-20",
+                        "is_special": False,
+                    },
+                ],
+            },
+            {
+                "id": "absolute-group",
+                "name": "Absolute",
+                "type": 2,
+                "group_count": 1,
+                "episode_count": 24,
+                "recommended": False,
+                "seasons": [],
+            },
+        ],
+        "recommendation": {
+            "target_type": "group",
+            "episode_group_id": "production-group",
+        },
+    }))
+    batch = {
+        "quarter": "2026-Q3",
+        "candidate_type": "ready",
+        "items": [{
+            "id": "anime:1",
+            "title": "示例动画",
+            "tmdb_id": 1001,
+            "poster": "https://image/1.jpg",
+        }],
+        "handled_ids": [],
+    }
+
+    view = plugin._render_notification_candidate_groups(
+        batch_id="123456789abc",
+        batch=batch,
+        page=0,
+    )
+
+    details = [
+        block for block in view["rich_blocks"]
+        if block.get("type") == "details"
+    ]
+    assert len(details) == 2
+    assert details[0]["is_open"] is True
+    assert details[0]["blocks"][0]["type"] == "table"
+    preview_text = json.dumps(details[0], ensure_ascii=False)
+    assert "S01 Season 1" in preview_text
+    assert "E01–E12" in preview_text
+    assert "2025-01-01 → 2025-03-20" in preview_text
+    assert view["groups"][0]["id"] == "production-group"
+    assert view["buttons"][-1][0]["text"] == "返回候选详情"
+    assert all(
+        len(button["callback_data"].encode("utf-8")) <= 64
+        for row in view["buttons"]
+        for button in row
+    )
+
+
+def test_notification_candidate_selected_group_is_passed_to_rule_api(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    item = {"id": "anime:1", "title": "示例", "tmdb_id": 1001}
+    plugin._data[plugin.DATA_KEY_NOTIFICATION_APPROVALS] = {
+        "batches": {
+            "123456789abc": {
+                "quarter": "2026-Q3",
+                "candidate_type": "ready",
+                "items": [item],
+                "item_ids": ["anime:1"],
+                "handled_ids": [],
+                "episode_group_inspections": {
+                    "1001": {
+                        "tmdb_id": 1001,
+                        "title": "示例",
+                        "default": {},
+                        "groups": [{
+                            "id": "chosen-group",
+                            "name": "Seasons",
+                            "type": 6,
+                            "seasons": [],
+                        }],
+                        "recommendation": {},
+                    },
+                },
+            },
+        },
+    }
+    plugin._notification_candidate_target = Mock(
+        return_value=("telegram", "候选通知"),
+    )
+    plugin._send_candidate_instance_notification = Mock(
+        return_value={"success": True},
+    )
+    plugin.action_notification_candidates_api = Mock(
+        return_value=module.schemas.Response(
+            success=True,
+            message="已加入",
+            data={"operation_failures": []},
+        ),
+    )
+
+    plugin.on_notification_message_action(SimpleNamespace(event_data={
+        "plugin_id": plugin.__class__.__name__,
+        "text": "nc:s:123456789abc:0:0",
+        "channel": "telegram",
+        "source": "候选通知",
+        "original_message_id": 123,
+        "original_chat_id": "456",
+    }))
+
+    payload = plugin.action_notification_candidates_api.call_args.args[0]
+    assert payload["action"] == "add_group"
+    assert payload["item_ids"] == ["anime:1"]
+    assert payload["episode_group_overrides"] == {
+        "anime:1": "chosen-group",
+    }
 
 
 def test_notification_candidate_custom_emoji_has_plain_fallback(monkeypatch):
@@ -2884,6 +3050,77 @@ def test_failed_rich_edit_does_not_downgrade_existing_message(monkeypatch):
     assert result["success"] is False
     assert result["preserved_rich_message"] is True
     instance.send_msg.assert_not_called()
+
+
+def test_candidate_rich_edits_are_serialized_and_reuse_latest_media_state(
+        monkeypatch,
+):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    instance = SimpleNamespace(send_msg=Mock())
+    monkeypatch.setattr(
+        module,
+        "NotificationHelper",
+        lambda: SimpleNamespace(
+            get_service=lambda name: SimpleNamespace(instance=instance),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "MessageChannel",
+        SimpleNamespace(Telegram="telegram"),
+    )
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = []
+
+    def send_rich(**kwargs):
+        calls.append(dict(kwargs))
+        if kwargs["image"] == "first.jpg":
+            first_started.set()
+            assert release_first.wait(2)
+            return {
+                "success": True,
+                "photo_unique_id": "photo-1",
+                "image_digest": "digest-1",
+            }
+        return {
+            "success": True,
+            "photo_unique_id": "photo-2",
+            "image_digest": "digest-2",
+        }
+
+    plugin._send_candidate_rich_telegram = Mock(side_effect=send_rich)
+    results = []
+
+    def deliver(image):
+        results.append(plugin._send_candidate_instance_notification(
+            title="候选",
+            text="正文",
+            buttons=[],
+            image=image,
+            channel="telegram",
+            service="候选通知",
+            original_message_id=123,
+            original_chat_id="456",
+            original_photo_unique_id="photo-0",
+            original_image_digest="digest-0",
+            rich_blocks=[{"type": "paragraph", "text": image}],
+        ))
+
+    first = threading.Thread(target=deliver, args=("first.jpg",))
+    second = threading.Thread(target=deliver, args=("second.jpg",))
+    first.start()
+    assert first_started.wait(2)
+    second.start()
+    release_first.set()
+    first.join(2)
+    second.join(2)
+
+    assert [call["image"] for call in calls] == ["first.jpg", "second.jpg"]
+    assert calls[1]["original_photo_unique_id"] == "photo-1"
+    assert calls[1]["original_image_digest"] == "digest-1"
+    assert len(results) == 2
 
 
 def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(

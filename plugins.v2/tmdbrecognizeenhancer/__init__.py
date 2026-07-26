@@ -114,7 +114,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.30"
+    plugin_version = "0.8.31"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -383,6 +383,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._notification_outgoing_lock = threading.RLock()
         self._notification_outgoing: Dict[str, float] = {}
         self._notification_telegram_send_lock = threading.RLock()
+        self._notification_rich_intent_lock = threading.RLock()
+        self._notification_rich_intents: Dict[Tuple[str, str, str], int] = {}
+        self._notification_rich_message_state: Dict[
+            Tuple[str, str, str], Dict[str, str]
+        ] = {}
+        self._notification_rich_intent_sequence = 0
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
         """加载配置并启停名称识别事件处理器。"""
@@ -3500,19 +3506,65 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     and not force_reply
                     and use_rich_messages
             ):
-                rich_result = self._send_candidate_rich_telegram(
-                    instance=instance,
-                    rich_markdown=rich_markdown,
-                    rich_blocks=rich_blocks,
-                    buttons=buttons,
-                    image=image,
-                    original_message_id=original_message_id,
-                    original_media_message_id=original_media_message_id,
-                    original_photo_unique_id=original_photo_unique_id,
-                    original_image_digest=original_image_digest,
-                    original_chat_id=original_chat_id,
-                    userid=userid,
+                message_key = (
+                    str(service or ""),
+                    str(original_chat_id or userid or ""),
+                    str(
+                        original_message_id
+                        or f"new:{threading.get_ident()}:{time.time_ns()}"
+                    ),
                 )
+                with self._notification_rich_intent_lock:
+                    self._notification_rich_intent_sequence += 1
+                    intent_sequence = self._notification_rich_intent_sequence
+                    self._notification_rich_intents[message_key] = intent_sequence
+                # 同一 Rich Message 的媒体替换必须串行提交。快速连续翻页时，
+                # 后一次点击会登记为更新意图；尚未开始的旧请求直接丢弃，已经
+                # 开始的请求完成后再由新请求覆盖，避免旧海报晚到反压新页面。
+                with self._notification_telegram_send_lock:
+                    with self._notification_rich_intent_lock:
+                        if (
+                                self._notification_rich_intents.get(message_key)
+                                != intent_sequence
+                        ):
+                            return {
+                                "success": True,
+                                "stale_intent_skipped": True,
+                            }
+                        remembered_state = dict(
+                            self._notification_rich_message_state.get(
+                                message_key,
+                            ) or {}
+                        )
+                    rich_result = self._send_candidate_rich_telegram(
+                        instance=instance,
+                        rich_markdown=rich_markdown,
+                        rich_blocks=rich_blocks,
+                        buttons=buttons,
+                        image=image,
+                        original_message_id=original_message_id,
+                        original_media_message_id=original_media_message_id,
+                        original_photo_unique_id=(
+                            remembered_state.get("photo_unique_id")
+                            or original_photo_unique_id
+                        ),
+                        original_image_digest=(
+                            remembered_state.get("image_digest")
+                            or original_image_digest
+                        ),
+                        original_chat_id=original_chat_id,
+                        userid=userid,
+                    )
+                    if rich_result.get("success"):
+                        with self._notification_rich_intent_lock:
+                            self._notification_rich_message_state[message_key] = {
+                                "photo_unique_id": str(
+                                    rich_result.get("photo_unique_id") or ""
+                                ),
+                                "image_digest": str(
+                                    rich_result.get("image_digest") or ""
+                                ),
+                            }
                 if rich_result.get("success"):
                     return rich_result
                 logger.warning(
@@ -4474,6 +4526,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
             raise ValueError("Telegram callback_data exceeds 64 bytes")
         return value
 
+    def _notification_candidate_group_callback(
+            self,
+            batch_id: str,
+            page: int,
+            group_index: int,
+    ) -> str:
+        value = (
+            f"[PLUGIN]{self.__class__.__name__}|"
+            f"nc:s:{batch_id}:{max(0, int(page))}:{max(0, int(group_index))}"
+        )
+        if len(value.encode("utf-8")) > 64:
+            raise ValueError("Telegram callback_data exceeds 64 bytes")
+        return value
+
     @staticmethod
     def _notification_candidate_text(value: Any, limit: int) -> str:
         text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -4536,7 +4602,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "text": completed_text,
                 "rich_markdown": (
                     "# ✅ 批次处理完成\n\n"
-                    f"=={self._rich_markdown_escape(quarter)} · {total} 部==\n\n"
+                    f"**{self._rich_markdown_escape(quarter)} · {total} 部**\n\n"
                     f"> {rich_completed}"
                 ),
                 "rich_text": (
@@ -4557,7 +4623,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     {
                         "type": "paragraph",
                         "text": {
-                            "type": "marked",
+                            "type": "bold",
                             "text": f"{quarter} · {total} 部",
                         },
                     },
@@ -4698,7 +4764,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 {
                     "type": "paragraph",
                     "text": {
-                        "type": "marked",
+                        "type": "bold",
                         "text": f"{quarter} · 待审批 {len(pending)} 部",
                     },
                 },
@@ -4726,7 +4792,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     [{
                         "type": "paragraph",
                         "text": {
-                            "type": "marked",
+                            "type": "bold",
                             "text": notice,
                         },
                     }]
@@ -4906,7 +4972,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             (
                 "状态",
                 {
-                    "type": "marked",
+                    "type": "bold",
                     "text": f"{status_text} · 第 {page + 1}/{page_count} 页",
                 },
             ),
@@ -4984,10 +5050,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         ),
                     },
                     {
-                        "text": "🎞 优先剧集组加入",
-                        "style": "success",
+                        "text": "查看剧集组",
+                        "style": "primary",
                         "callback_data": self._notification_candidate_callback(
-                            "g", batch_id, page,
+                            "v", batch_id, page,
                         ),
                     },
                 ],
@@ -5065,6 +5131,233 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 str(item.get("id")) for item in page_items if item.get("id")
             ],
             "page": page,
+        }
+
+    @staticmethod
+    def _episode_group_type_label(value: Any) -> str:
+        return {
+            1: "原始播出",
+            2: "绝对顺序",
+            3: "DVD",
+            4: "数字发行",
+            5: "故事线",
+            6: "制片",
+        }.get(TmdbRecognizeEnhancer._safe_int(value, 0), "自定义")
+
+    def _notification_candidate_group_inspection(
+            self,
+            *,
+            batch: Dict[str, Any],
+            item: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        tmdb_id = self._safe_int(item.get("tmdb_id"), 0)
+        cache = batch.setdefault("episode_group_inspections", {})
+        cached = cache.get(str(tmdb_id)) if isinstance(cache, dict) else None
+        if isinstance(cached, dict):
+            return cached
+        if not tmdb_id:
+            result = {"tmdb_id": 0, "groups": [], "error": "候选缺少 TMDBID"}
+        else:
+            try:
+                result = self._normalizer().inspect(tmdb_id)
+            except Exception as err:  # noqa: BLE001 - 通知页需把 TMDB 错误反馈出来。
+                result = {
+                    "tmdb_id": tmdb_id,
+                    "groups": [],
+                    "error": str(err),
+                }
+        cache[str(tmdb_id)] = deepcopy(result)
+        return result
+
+    def _render_notification_candidate_groups(
+            self,
+            *,
+            batch_id: str,
+            batch: Dict[str, Any],
+            page: int,
+            notice: str = "",
+    ) -> Dict[str, Any]:
+        page_view = self._render_notification_candidate_page(
+            batch_id=batch_id,
+            batch=batch,
+            page=page,
+        )
+        item_ids = page_view.get("page_item_ids") or []
+        pending_index = {
+            str(item.get("id") or ""): item
+            for item in self._notification_batch_pending_items(batch)
+        }
+        item = pending_index.get(str(item_ids[0])) if item_ids else None
+        if not item:
+            return self._render_notification_candidate_summary(
+                batch_id=batch_id,
+                batch=batch,
+                notice=notice or "当前候选已处理。",
+            )
+        inspection = self._notification_candidate_group_inspection(
+            batch=batch,
+            item=item,
+        )
+        groups = [
+            group for group in inspection.get("groups") or []
+            if isinstance(group, dict) and str(group.get("id") or "").strip()
+        ]
+        focus_title = self._notification_candidate_text(
+            inspection.get("title")
+            or item.get("title")
+            or item.get("original_title")
+            or "未命名",
+            120,
+        )
+        default_info = inspection.get("default") or {}
+        default_seasons = [
+            season for season in default_info.get("seasons") or []
+            if not season.get("is_special")
+        ]
+        blocks: List[Dict[str, Any]] = [
+            {
+                "type": "heading",
+                "size": 1,
+                "text": self._notification_candidate_heading(
+                    f"{focus_title} · 剧集组",
+                    fallback_emoji="🎞",
+                ),
+            },
+            {
+                "type": "paragraph",
+                "text": (
+                    f"TMDB 默认编集：{len(default_seasons)} 个正季 · "
+                    f"{self._safe_int(default_info.get('episode_count'), 0)} 集"
+                ),
+            },
+        ]
+        recommendation = inspection.get("recommendation") or {}
+        recommended_group_id = str(
+            recommendation.get("episode_group_id") or ""
+        )
+        if notice:
+            blocks.append({
+                "type": "blockquote",
+                "blocks": [{"type": "paragraph", "text": notice}],
+            })
+        if groups:
+            for group in groups:
+                group_id = str(group.get("id") or "")
+                group_name = self._notification_candidate_text(
+                    group.get("name") or "未命名剧集组",
+                    80,
+                )
+                group_type = self._episode_group_type_label(group.get("type"))
+                recommended = group_id == recommended_group_id
+                rows: List[Tuple[Any, Any]] = [
+                    ("类型", group_type),
+                    (
+                        "规模",
+                        f"{self._safe_int(group.get('group_count'), 0)} 组 · "
+                        f"{self._safe_int(group.get('episode_count'), 0)} 集",
+                    ),
+                ]
+                for season in group.get("seasons") or []:
+                    season_number = self._safe_int(
+                        season.get("season"), 0,
+                    )
+                    season_label = (
+                        "S00 特别篇"
+                        if season.get("is_special") or season_number == 0
+                        else f"S{season_number:02d} {season.get('name') or ''}".strip()
+                    )
+                    first_episode = self._safe_int(
+                        season.get("first_episode"), 0,
+                    )
+                    last_episode = self._safe_int(
+                        season.get("last_episode"), 0,
+                    )
+                    episode_range = (
+                        f"E{first_episode:02d}–E{last_episode:02d}"
+                        if first_episode and last_episode else "集号未提供"
+                    )
+                    dates = [
+                        str(season.get("first_air_date") or ""),
+                        str(season.get("last_air_date") or ""),
+                    ]
+                    date_range = " → ".join(value for value in dates if value)
+                    season_value = (
+                        f"{self._safe_int(season.get('episode_count'), 0)} 集 · "
+                        f"{episode_range}"
+                    )
+                    if date_range:
+                        season_value += f"\n{date_range}"
+                    rows.append((season_label, season_value))
+                summary: Any = [
+                    {
+                        "type": "bold",
+                        "text": f"{'推荐 · ' if recommended else ''}{group_name}",
+                    },
+                    f"　{group_type}",
+                ]
+                blocks.append({
+                    "type": "details",
+                    "summary": summary,
+                    "blocks": [self._candidate_rich_table(rows)],
+                    "is_open": recommended,
+                })
+        else:
+            error_text = str(
+                inspection.get("error") or "TMDB 没有提供可选剧集组"
+            )
+            blocks.append({
+                "type": "blockquote",
+                "blocks": [{
+                    "type": "paragraph",
+                    "text": error_text,
+                }],
+            })
+
+        buttons: List[List[Dict[str, Any]]] = []
+        for index, group in enumerate(groups):
+            name = self._notification_candidate_text(
+                group.get("name") or f"剧集组 {index + 1}",
+                30,
+            )
+            buttons.append([{
+                "text": f"选择 {name}",
+                "style": (
+                    "success"
+                    if str(group.get("id") or "") == recommended_group_id
+                    else "primary"
+                ),
+                "callback_data": self._notification_candidate_group_callback(
+                    batch_id, page, index,
+                ),
+            }])
+        buttons.append([{
+            "text": "返回候选详情",
+            "callback_data": self._notification_candidate_callback(
+                "p", batch_id, page,
+            ),
+        }])
+        lines = [
+            f"{focus_title} · 剧集组",
+            f"TMDB {self._safe_int(item.get('tmdb_id'), 0)}",
+            f"可选剧集组：{len(groups)} 个",
+        ]
+        return {
+            "title": f"{focus_title} · 选择剧集组",
+            "text": "\n".join(lines),
+            "rich_markdown": (
+                f"# {self._rich_markdown_escape(focus_title)} · 剧集组\n\n"
+                f"可选剧集组：**{len(groups)}** 个"
+            ),
+            "rich_text": (
+                f"<b>{html_utils.escape(focus_title)} · 剧集组</b>\n"
+                f"可选剧集组：{len(groups)} 个"
+            ),
+            "rich_blocks": blocks,
+            "buttons": buttons,
+            "image": str(item.get("poster") or ""),
+            "page_item_ids": [str(item.get("id") or "")],
+            "page": self._safe_int(page_view.get("page"), 0),
+            "groups": groups,
         }
 
     @staticmethod
@@ -5523,6 +5816,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
             for key, value in raw_overrides.items()
             if self._safe_int(value, 0)
         } if isinstance(raw_overrides, dict) else {}
+        raw_group_overrides = payload.get("episode_group_overrides") or {}
+        episode_group_overrides = {
+            str(key): str(value or "").strip()
+            for key, value in raw_group_overrides.items()
+            if str(value or "").strip()
+        } if isinstance(raw_group_overrides, dict) else {}
         preference = "group_preferred" if action == "add_group" else "default"
         rules = self._read_episode_rules()
         added, failed = [], []
@@ -5532,11 +5831,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 failed.append({"id": item_id, "reason": "季度缓存中不存在"})
                 continue
             try:
+                add_kwargs = {
+                    "tmdb_id_override": tmdb_id_overrides.get(item_id, 0),
+                }
+                if episode_group_overrides.get(item_id):
+                    add_kwargs["episode_group_id_override"] = (
+                        episode_group_overrides[item_id]
+                    )
                 added.append(self._add_catalog_item_to_rules(
-                    item,
-                    preference,
-                    rules,
-                    tmdb_id_override=tmdb_id_overrides.get(item_id, 0),
+                    item, preference, rules, **add_kwargs,
                 ))
             except Exception as err:  # noqa: BLE001 - 批量审批逐条报告
                 failed.append({"id": item_id, "reason": str(err)})
@@ -6043,21 +6346,33 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return
         if content.startswith("plugin_input_cancel|") or content.startswith("plugin_input_expired|"):
             return
-        match = re.fullmatch(
-            r"nc:([opdgimMDGIrR]):([0-9a-f]{12}):(\d{1,3})",
+        group_match = re.fullmatch(
+            r"nc:s:([0-9a-f]{12}):(\d{1,3}):(\d{1,2})",
             content,
         )
+        group_index: Optional[int] = None
+        if group_match:
+            batch_id, page_text, group_index_text = group_match.groups()
+            action = "s"
+            page = self._safe_int(page_text, 0)
+            group_index = self._safe_int(group_index_text, -1)
+            match = None
+        else:
+            match = re.fullmatch(
+                r"nc:([opdvgimMDGIrR]):([0-9a-f]{12}):(\d{1,3})",
+                content,
+            )
         if match:
             action, batch_id, page_text = match.groups()
             page = self._safe_int(page_text, 0)
-        else:
+        elif not group_match:
             page = 0
         compact_legacy = re.fullmatch(r"nc:([ari]):([0-9a-f]{12})", content)
         legacy_match = re.fullmatch(
             r"notify-candidates:(approve|retry|ignore):([0-9a-f]{12})",
             content,
         )
-        if not match:
+        if not match and not group_match:
             old_match = compact_legacy or legacy_match
             if not old_match:
                 return
@@ -6098,6 +6413,44 @@ class TmdbRecognizeEnhancer(_PluginBase):
         target = self._notification_candidate_target()
         channel = data.get("channel") or (target[0] if target else None)
         service = str(data.get("source") or (target[1] if target else ""))
+
+        if action == "v":
+            view = self._render_notification_candidate_groups(
+                batch_id=batch_id,
+                batch=batch,
+                page=page,
+            )
+            batches = (
+                approvals.get("batches")
+                if isinstance(approvals.get("batches"), dict)
+                else {}
+            )
+            batches[batch_id] = batch
+            approvals["batches"] = batches
+            self._save_notification_approvals(approvals)
+            delivery = self._send_candidate_instance_notification(
+                title=view["title"],
+                text=view["text"],
+                buttons=view["buttons"],
+                image=view.get("image", ""),
+                channel=channel,
+                service=service,
+                original_message_id=data.get("original_message_id"),
+                original_media_message_id=batch.get("media_message_id"),
+                original_photo_unique_id=batch.get("rich_photo_unique_id", ""),
+                original_image_digest=batch.get("rich_image_digest", ""),
+                original_chat_id=data.get("original_chat_id"),
+                rich_markdown=view.get("rich_markdown", ""),
+                rich_text=view.get("rich_text", ""),
+                rich_blocks=view.get("rich_blocks"),
+            )
+            if delivery.get("success"):
+                self._remember_notification_candidate_media_message(
+                    batch_id=batch_id,
+                    batch=batch,
+                    delivery=delivery,
+                )
+            return
 
         if action in ("m", "M"):
             prompted = self._prompt_notification_candidate_tmdb(
@@ -6178,10 +6531,28 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return
 
         pending = self._notification_batch_pending_items(batch)
-        if action in ("d", "g", "i", "r"):
+        selected_group_id = ""
+        if action == "s":
+            page_view = self._render_notification_candidate_groups(
+                batch_id=batch_id, batch=batch, page=page,
+            )
+            groups = page_view.get("groups") or []
+            if (
+                    group_index is None
+                    or group_index < 0
+                    or group_index >= len(groups)
+            ):
+                return
+            selected_group_id = str(
+                groups[group_index].get("id") or ""
+            ).strip()
+        elif action in ("d", "g", "i", "r"):
             page_view = self._render_notification_candidate_page(
                 batch_id=batch_id, batch=batch, page=page,
             )
+        else:
+            page_view = {}
+        if action in ("d", "g", "i", "r", "s"):
             item_ids = page_view.get("page_item_ids") or []
             page = self._safe_int(page_view.get("page"), 0)
         else:
@@ -6216,18 +6587,23 @@ class TmdbRecognizeEnhancer(_PluginBase):
             api_action = "retry"
         elif action in ("d", "D"):
             api_action = "add_default"
-        elif action in ("g", "G"):
+        elif action in ("g", "G", "s"):
             api_action = "add_group"
         else:  # 旧版“按推荐加入”
             preference = str(batch.get("preference") or "group_preferred")
             api_action = (
                 "add_group" if preference == "group_preferred" else "add_default"
             )
-        result = self.action_notification_candidates_api({
+        api_payload = {
             "quarter": quarter,
             "item_ids": item_ids,
             "action": api_action,
-        })
+        }
+        if selected_group_id and item_ids:
+            api_payload["episode_group_overrides"] = {
+                item_ids[0]: selected_group_id,
+            }
+        result = self.action_notification_candidates_api(api_payload)
         result_data = getattr(result, "data", None)
         result_data = result_data if isinstance(result_data, dict) else {}
         succeeded_ids = set(item_ids)
@@ -10935,6 +11311,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             preference: str,
             rules: List[Dict[str, Any]],
             tmdb_id_override: int = 0,
+            episode_group_id_override: str = "",
     ) -> Dict[str, Any]:
         """把一个看板条目转成规则，已有规则只追加季度片段、不覆盖用户目标。"""
         match = self._match_catalog_item(item, tmdb_id_override)
@@ -10948,7 +11325,24 @@ class TmdbRecognizeEnhancer(_PluginBase):
             if self._safe_int(rule.get("tmdb_id"), 0) == tmdb_id
         ), None)
         existing = rules[existing_index] if existing_index is not None else None
-        if existing:
+        explicit_group_id = str(episode_group_id_override or "").strip()
+        if explicit_group_id:
+            inspection = self._normalizer().inspect(tmdb_id)
+            selected_group = next((
+                group for group in inspection.get("groups") or []
+                if str(group.get("id") or "") == explicit_group_id
+            ), None)
+            if not selected_group:
+                raise ValueError("指定的 TMDB 剧集组不存在或已失效")
+            target_type = "group"
+            group_id = explicit_group_id
+            recommendation = {
+                "target_type": "group",
+                "episode_group_id": group_id,
+                "group": selected_group,
+                "reason": "已按通知中明确选择的剧集组加入",
+            }
+        elif existing:
             target_type = str(existing.get("target_type") or "default")
             group_id = str(existing.get("episode_group_id") or "")
             selected_group = None
