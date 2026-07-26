@@ -1238,6 +1238,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const StrategySettings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-4d1b6e90"]]);
+const StrategySettings = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-c7ec6ecb"]]);
 
 export { ModuleHeader as M, StrategySettings as S };

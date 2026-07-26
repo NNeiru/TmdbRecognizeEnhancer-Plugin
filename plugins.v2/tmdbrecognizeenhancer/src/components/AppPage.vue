@@ -406,9 +406,32 @@ onMounted(loadStatus)
                       <VAlert v-else-if="preview.final_naming" type="warning" variant="tonal" density="compact" class="mb-4">
                         最终命名未生成：{{ preview.final_naming.reason }}
                       </VAlert>
-                      <div v-if="preview.best" class="best-result">
-                        <div><div class="text-h6">{{ preview.best.name }}</div><div class="text-caption text-medium-emphasis">{{ mediaTypeText(preview.best.media_type) }} · {{ preview.best.year || '未知年份' }} · TMDB {{ preview.best.tmdb_id }}</div></div>
-                        <VProgressCircular :model-value="preview.best.score" :color="scoreColor(preview.best.score)" size="68" width="7"><strong>{{ preview.best.score }}</strong></VProgressCircular>
+                      <div v-if="preview.best" class="best-result" :class="{ 'has-backdrop': preview.best.backdrop }" :style="preview.best.backdrop ? { '--best-backdrop': `url(${preview.best.backdrop})` } : {}">
+                        <div class="best-result-visual">
+                          <VImg v-if="preview.best.poster" :src="preview.best.poster" :alt="`${preview.best.name} 海报`" cover class="best-result-poster" />
+                          <div v-else class="best-result-poster-placeholder"><VIcon icon="mdi-movie-open-outline" size="34" /></div>
+                        </div>
+                        <div class="best-result-copy">
+                          <div class="best-result-heading">
+                            <div>
+                              <div class="text-h6">{{ preview.best.name }}</div>
+                              <div v-if="preview.best.original_name && preview.best.original_name !== preview.best.name" class="best-result-original">{{ preview.best.original_name }}</div>
+                            </div>
+                            <VBtn v-if="preview.best.tmdb_url" :href="preview.best.tmdb_url" target="_blank" rel="noopener" icon="mdi-open-in-new" size="small" variant="text" title="打开 TMDB 条目" />
+                          </div>
+                          <div class="best-result-meta">
+                            <VChip size="x-small" color="primary" variant="tonal">{{ mediaTypeText(preview.best.media_type) }}</VChip>
+                            <VChip size="x-small" variant="tonal">{{ preview.best.year || '未知年份' }}</VChip>
+                            <VChip size="x-small" variant="tonal">TMDB {{ preview.best.tmdb_id }}</VChip>
+                            <VChip v-if="preview.best.vote_average" size="x-small" color="warning" variant="tonal" prepend-icon="mdi-star">TMDB {{ preview.best.vote_average }}</VChip>
+                            <VChip v-if="preview.selection_mode === 'cross_id'" size="x-small" color="success" variant="tonal">跨站 ID 定位</VChip>
+                          </div>
+                          <div v-if="preview.best.genres?.length" class="best-result-genres">
+                            <span v-for="genre in preview.best.genres.slice(0, 4)" :key="genre.name || genre">{{ genre.name || genre }}</span>
+                          </div>
+                          <p v-if="preview.best.overview" class="best-result-overview">{{ preview.best.overview }}</p>
+                        </div>
+                        <VProgressCircular class="best-result-score" :model-value="preview.best.score" :color="scoreColor(preview.best.score)" size="68" width="7"><strong>{{ preview.best.score }}</strong></VProgressCircular>
                       </div>
                       <VAlert v-if="preview.episode_adjustment" :type="preview.episode_adjustment.applied ? 'success' : 'info'" variant="tonal" density="compact" class="mt-4">
                         <strong>集数偏移：</strong>{{ preview.episode_adjustment.reason }}
@@ -553,7 +576,21 @@ onMounted(loadStatus)
 .preview-naming-panel { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
 .field-label { margin: 0 0 7px 2px; color: rgba(var(--v-theme-on-surface),.7); font-size: .78rem; font-weight: 600; line-height: 1.2; }
 .result-card { min-height: 390px; }
-.best-result { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; border-radius: 14px; background: rgba(var(--v-theme-primary),.055); }
+.best-result { position: relative; isolation: isolate; display: grid; grid-template-columns: 82px minmax(0, 1fr) auto; gap: 16px; align-items: center; min-height: 132px; padding: 15px; overflow: hidden; border: 1px solid rgba(var(--v-theme-primary), .13); border-radius: 16px; background: linear-gradient(135deg, rgba(var(--v-theme-primary), .075), rgba(var(--v-theme-surface), .96)); }
+.best-result.has-backdrop::before { content: ''; position: absolute; z-index: -2; inset: 0; background-image: var(--best-backdrop); background-position: center 24%; background-size: cover; opacity: .16; }
+.best-result.has-backdrop::after { content: ''; position: absolute; z-index: -1; inset: 0; background: linear-gradient(90deg, rgba(var(--v-theme-surface), .98) 7%, rgba(var(--v-theme-surface), .88) 58%, rgba(var(--v-theme-surface), .72)); }
+.best-result-visual { align-self: stretch; min-height: 116px; }
+.best-result-poster, .best-result-poster-placeholder { width: 82px; height: 116px; overflow: hidden; border-radius: 11px; box-shadow: 0 6px 18px rgba(0, 0, 0, .16); }
+.best-result-poster-placeholder { display: grid; place-items: center; background: rgba(var(--v-theme-primary), .1); color: rgb(var(--v-theme-primary)); }
+.best-result-copy { min-width: 0; display: grid; gap: 8px; }
+.best-result-heading { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.best-result-heading .text-h6 { line-height: 1.35; }
+.best-result-original { margin-top: 2px; overflow: hidden; color: rgba(var(--v-theme-on-surface), .58); font-size: .76rem; text-overflow: ellipsis; white-space: nowrap; }
+.best-result-meta, .best-result-genres { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.best-result-genres span { color: rgba(var(--v-theme-on-surface), .58); font-size: .7rem; }
+.best-result-genres span:not(:last-child)::after { content: '·'; margin-left: 6px; }
+.best-result-overview { display: -webkit-box; margin: 0; overflow: hidden; color: rgba(var(--v-theme-on-surface), .7); font-size: .76rem; line-height: 1.55; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.best-result-score { flex: 0 0 auto; }
 .final-name-card { border: 1px solid rgba(var(--v-theme-primary), .2); }
 .final-name-output { display: block; margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: rgba(var(--v-theme-surface), .72); color: rgb(var(--v-theme-primary)); font-size: .9rem; overflow-wrap: anywhere; white-space: normal; }
 .preview-detail-panels { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
@@ -581,4 +618,5 @@ onMounted(loadStatus)
 .history-card-content { padding: 16px; }
 .future-card { height: 100%; }
 @media (max-width: 720px) { .hero-content { align-items: flex-start; flex-wrap: wrap; padding: 22px; } .hero-content :deep(.v-spacer) { display: none; } .tab-content { padding: 18px; } .sticky-actions { margin: 18px -18px -18px; } .module-grid { grid-template-columns: 1fr; } .header-control-copy { flex-basis: 100%; } }
+@media (max-width: 560px) { .best-result { grid-template-columns: 64px minmax(0, 1fr); gap: 12px; } .best-result-visual { min-height: 92px; } .best-result-poster, .best-result-poster-placeholder { width: 64px; height: 92px; } .best-result-score { grid-column: 1 / -1; justify-self: end; margin-top: -50px; } .best-result-copy { padding-right: 58px; } }
 </style>

@@ -148,17 +148,44 @@ class StrmMediaInfoSynchronizer:
 
         if isinstance(body, list) and body:
             restored = body[0] if isinstance(body[0], dict) else {}
-            local_ticks = ((restored.get("MediaSourceInfo") or {}).get("RunTimeTicks"))
-            pushed_ticks = ((payload[0].get("MediaSourceInfo") or {}).get("RunTimeTicks"))
-            if local_ticks and pushed_ticks and local_ticks != pushed_ticks:
+            restored_signature = self._media_signature(restored)
+            pushed_signature = self._media_signature(payload[0])
+            if (
+                    restored_signature and pushed_signature
+                    and restored_signature != pushed_signature
+            ):
                 # 本地数据优先原则：返回的不是我们推的内容，说明 Emby 已有媒体信息
                 return {
-                    **self._result("local", "Emby 已存在媒体信息，神医按本地优先保留原值"),
+                    **self._result(
+                        "local",
+                        "Emby 已存在媒体信息，神医按本地优先保留原值；本次插件数据未覆盖",
+                        delivery="preexisting",
+                        http_status=200,
+                        response_matches_payload=False,
+                    ),
                     **base,
                 }
-            return {**self._result("synced", "媒体信息已推送并由神医写入 Emby"), **base}
+            return {
+                **self._result(
+                    "synced",
+                    "神医接口已接受，返回媒体信息与本次插件推送一致",
+                    delivery="response_match",
+                    http_status=200,
+                    response_matches_payload=True,
+                ),
+                **base,
+            }
         if isinstance(body, dict) and body:
-            return {**self._result("synced", "媒体信息已推送并由神医写入 Emby"), **base}
+            return {
+                **self._result(
+                    "synced",
+                    "神医接口已接受本次插件推送，并返回有效媒体信息",
+                    delivery="accepted",
+                    http_status=200,
+                    response_matches_payload=None,
+                ),
+                **base,
+            }
         return {
             **self._result(
                 "empty",
@@ -214,6 +241,33 @@ class StrmMediaInfoSynchronizer:
             str(name): service for name, service in values.items()
             if str(getattr(service, "type", "") or "").casefold() == "emby"
         }
+
+    @staticmethod
+    def _media_signature(item: Dict[str, Any]) -> Tuple[Any, ...]:
+        """提取足以区分本次 ffprobe 结果与 Emby 原有数据的稳定指纹。"""
+        source = item.get("MediaSourceInfo") or {}
+        if not isinstance(source, dict):
+            return tuple()
+        stream_keys = (
+            "Index", "Type", "Codec", "Profile", "Level", "Language",
+            "Width", "Height", "BitDepth", "Channels", "SampleRate",
+            "ChannelLayout", "IsExternal",
+        )
+        streams = []
+        for stream in source.get("MediaStreams") or []:
+            if not isinstance(stream, dict):
+                continue
+            streams.append(tuple(stream.get(key) for key in stream_keys))
+        streams.sort(key=lambda values: (
+            values[0] is None, values[0] if isinstance(values[0], int) else 0,
+            str(values[1] or ""), str(values[2] or ""),
+        ))
+        return (
+            source.get("Size"),
+            source.get("RunTimeTicks"),
+            str(source.get("Container") or "").casefold(),
+            tuple(streams),
+        )
 
     @staticmethod
     def _result(status: str, reason: str, **kwargs: Any) -> Dict[str, Any]:

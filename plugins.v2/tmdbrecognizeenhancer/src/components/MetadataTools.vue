@@ -160,6 +160,30 @@ const strmJobStatusPresentation = status => ({
   failed: { label: '推送失败', color: 'error', icon: 'mdi-alert-circle-outline' },
   attention: { label: '需要处理', color: 'warning', icon: 'mdi-alert-outline' },
 })[status] || { label: status || '未知状态', color: 'default', icon: 'mdi-help-circle-outline' }
+const strmServerStatusPresentation = status => ({
+  synced: { label: '插件推送已接受', color: 'success', icon: 'mdi-cloud-check-outline' },
+  local: { label: '沿用 Emby 原值', color: 'info', icon: 'mdi-database-check-outline' },
+  pending: { label: '等待 Emby 入库', color: 'warning', icon: 'mdi-clock-outline' },
+  error: { label: '连接失败', color: 'error', icon: 'mdi-alert-circle-outline' },
+  unsupported: { label: '不支持此接口', color: 'warning', icon: 'mdi-api-off' },
+  empty: { label: '接口拒绝或空响应', color: 'warning', icon: 'mdi-database-alert-outline' },
+  invalid: { label: '扫描数据无效', color: 'error', icon: 'mdi-file-alert-outline' },
+})[status] || { label: status || '未知', color: 'default', icon: 'mdi-help-circle-outline' }
+const strmServerResults = job => Object.entries(job?.server_results || {}).map(([name, result]) => ({
+  name,
+  ...(result || {}),
+  presentation: strmServerStatusPresentation(result?.status),
+}))
+const strmJobSummary = job => {
+  const results = strmServerResults(job)
+  if (!results.length) return job?.reason || '暂无说明'
+  const synced = results.filter(item => item.status === 'synced').length
+  const local = results.filter(item => item.status === 'local').length
+  if (synced && !local && synced === results.length) return '神医接口已接受本次插件推送，响应与推送媒体信息一致'
+  if (local && !synced && local === results.length) return 'Emby 已有媒体信息，神医保留原值，本次插件数据未覆盖'
+  if (synced || local) return `${synced} 个目标接受插件推送，${local} 个目标沿用 Emby 原有信息`
+  return job?.reason || '暂无说明'
+}
 const strmJobDetailOpen = jobId => openStrmJobDetails.value.includes(String(jobId))
 function toggleStrmJobDetail(jobId) {
   const key = String(jobId)
@@ -1036,7 +1060,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
                   <VIcon :icon="strmJobStatusPresentation(job.status).icon" :color="strmJobStatusPresentation(job.status).color" size="20" />
                   <button type="button" class="strm-job-main" @click="toggleStrmJobDetail(job.id)">
                     <strong>{{ job.title || job.target_path }}</strong>
-                    <span>{{ job.reason || '等待后台处理' }}</span>
+                    <span>{{ strmJobSummary(job) || '等待后台处理' }}</span>
                   </button>
                   <VChip size="small" :color="strmJobStatusPresentation(job.status).color" variant="tonal">{{ strmJobStatusPresentation(job.status).label }}</VChip>
                   <div class="strm-job-row-actions">
@@ -1044,7 +1068,7 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
                     <VBtn icon="mdi-replay" size="small" variant="text" @click="retryStrmJob(job.id)" />
                     <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="deleteStrmJob(job.id)" />
                   </div>
-                  <VExpandTransition><div v-if="strmJobDetailOpen(job.id)" class="strm-job-detail"><div><span>目标路径</span><code>{{ job.target_path || '未记录' }}</code></div><div><span>处理说明</span><strong>{{ job.reason || '暂无说明' }}</strong></div><div><span>尝试次数</span><strong>{{ job.attempts || 0 }} 次</strong></div></div></VExpandTransition>
+                  <VExpandTransition><div v-if="strmJobDetailOpen(job.id)" class="strm-job-detail"><div><span>目标路径</span><code>{{ job.target_path || '未记录' }}</code></div><div><span>处理说明</span><strong>{{ strmJobSummary(job) }}</strong></div><div><span>尝试次数</span><strong>{{ job.attempts || 0 }} 次</strong></div><div v-if="strmServerResults(job).length" class="strm-server-results"><span>服务器结果</span><div v-for="result in strmServerResults(job)" :key="result.name" class="strm-server-result"><VIcon :icon="result.presentation.icon" :color="result.presentation.color" size="17" /><div><div><strong>{{ result.name }}</strong><VChip size="x-small" :color="result.presentation.color" variant="tonal">{{ result.presentation.label }}</VChip></div><small>{{ result.reason }}</small><code v-if="result.mapped_path">{{ result.mapped_path }}</code></div></div></div></div></VExpandTransition>
                 </div>
               </div>
             </section>
@@ -1060,14 +1084,14 @@ onUnmounted(() => { if (staticFfprobePoll) window.clearTimeout(staticFfprobePoll
                       <VIcon icon="mdi-check-circle-outline" color="success" size="20" />
                       <button type="button" class="strm-job-main" @click="toggleStrmJobDetail(job.id)">
                         <strong>{{ job.title || job.target_path }}</strong>
-                        <span>{{ job.reason || '推送完成' }}</span>
+                        <span>{{ strmJobSummary(job) }}</span>
                       </button>
                       <VChip size="small" color="success" variant="tonal">已完成</VChip>
                       <div class="strm-job-row-actions">
                         <VBtn :icon="strmJobDetailOpen(job.id) ? 'mdi-chevron-up' : 'mdi-chevron-down'" size="small" variant="text" @click="toggleStrmJobDetail(job.id)" />
                         <VBtn icon="mdi-delete-outline" size="small" color="error" variant="text" @click="deleteStrmJob(job.id)" />
                       </div>
-                      <VExpandTransition><div v-if="strmJobDetailOpen(job.id)" class="strm-job-detail"><div><span>目标路径</span><code>{{ job.target_path || '未记录' }}</code></div><div><span>处理说明</span><strong>{{ job.reason || '推送完成' }}</strong></div><div><span>尝试次数</span><strong>{{ job.attempts || 0 }} 次</strong></div></div></VExpandTransition>
+                      <VExpandTransition><div v-if="strmJobDetailOpen(job.id)" class="strm-job-detail"><div><span>目标路径</span><code>{{ job.target_path || '未记录' }}</code></div><div><span>处理说明</span><strong>{{ strmJobSummary(job) }}</strong></div><div><span>尝试次数</span><strong>{{ job.attempts || 0 }} 次</strong></div><div v-if="strmServerResults(job).length" class="strm-server-results"><span>服务器结果</span><div v-for="result in strmServerResults(job)" :key="result.name" class="strm-server-result"><VIcon :icon="result.presentation.icon" :color="result.presentation.color" size="17" /><div><div><strong>{{ result.name }}</strong><VChip size="x-small" :color="result.presentation.color" variant="tonal">{{ result.presentation.label }}</VChip></div><small>{{ result.reason }}</small><code v-if="result.mapped_path">{{ result.mapped_path }}</code></div></div></div></div></VExpandTransition>
                     </div>
                   </div>
                 </VExpansionPanelText>
@@ -1391,6 +1415,12 @@ code { color: rgb(var(--v-theme-primary)); font-weight: 600; }
 .strm-job-detail > div { min-width: 0; display: grid; gap: 3px; }
 .strm-job-detail span { color: rgba(var(--v-theme-on-surface), .5); font-size: .68rem; }
 .strm-job-detail strong, .strm-job-detail code { min-width: 0; overflow-wrap: anywhere; color: rgba(var(--v-theme-on-surface), .76); font-size: .74rem; }
+.strm-job-detail > .strm-server-results { grid-column: 1 / -1; display: grid; gap: 7px; padding-top: 8px; border-top: 1px dashed rgba(var(--v-border-color), var(--v-border-opacity)); }
+.strm-server-result { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: start; padding: 8px 9px; border-radius: 8px; background: rgba(var(--v-theme-on-surface), .035); }
+.strm-server-result > div { min-width: 0; display: grid; gap: 3px; }
+.strm-server-result > div > div { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.strm-server-result small { color: rgba(var(--v-theme-on-surface), .62); font-size: .7rem; }
+.strm-server-result code { font-size: .68rem; }
 .strm-completed-panel { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 10px; overflow: hidden; }
 .strm-completed-title { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-right: 8px; }
 .strm-completed-title > div { display: flex; align-items: center; gap: 8px; font-weight: 600; }

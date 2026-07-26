@@ -104,6 +104,10 @@ def test_push_uses_mapped_path_and_pro_contract():
 
     result = outcome["results"]["主 Emby"]
     assert result["status"] == "synced"
+    assert result["delivery"] == "response_match"
+    assert result["http_status"] == 200
+    assert result["response_matches_payload"] is True
+    assert "接口已接受" in result["reason"]
     assert result["mapped_path"] == "/emby/library/Anime/E01.strm"
     url, params, body = state["calls"][0]
     assert url == "http://emby/emby/Items/SyncMediaInfo"
@@ -147,7 +151,30 @@ def test_different_returned_ticks_means_local_media_info_won():
 
     result = outcome["results"]["主 Emby"]
     assert result["status"] == "local"
+    assert result["delivery"] == "preexisting"
+    assert result["response_matches_payload"] is False
+    assert "未覆盖" in result["reason"]
     assert "本地优先" in result["reason"]
+
+
+def test_different_returned_streams_mean_local_media_info_won():
+    pushed = _payload()
+    pushed[0]["MediaSourceInfo"]["MediaStreams"] = [{
+        "Index": 0, "Type": "Video", "Codec": "hevc", "Width": 1920,
+        "Height": 1080, "BitDepth": 10,
+    }]
+    restored = _payload()
+    restored[0]["MediaSourceInfo"]["MediaStreams"] = [{
+        "Index": 0, "Type": "Video", "Codec": "h264", "Width": 1920,
+        "Height": 1080, "BitDepth": 8,
+    }]
+    sync, _ = _sync(FakeResponse(200, restored))
+
+    outcome = _push(sync, payload=pushed)
+
+    result = outcome["results"]["主 Emby"]
+    assert result["status"] == "local"
+    assert result["delivery"] == "preexisting"
 
 
 def test_missing_size_or_duration_never_sends_request():

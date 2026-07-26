@@ -840,6 +840,11 @@ def test_cross_id_mapping_precedes_tmdb_title_search(monkeypatch):
             "name": "超超超超超喜欢你的100个女朋友",
             "original_name": "君のことが大大大大大好きな100人の彼女",
             "first_air_date": "2023-10-08",
+            "poster_path": "/poster.jpg",
+            "backdrop_path": "/backdrop.jpg",
+            "overview": "一段来自 TMDB 的简介。",
+            "vote_average": 8.6,
+            "genres": [{"id": 16, "name": "动画"}],
         },
     )
 
@@ -851,6 +856,12 @@ def test_cross_id_mapping_precedes_tmdb_title_search(monkeypatch):
     assert result["accepted"] is True
     assert result["selection_mode"] == "cross_id"
     assert result["best"]["tmdb_id"] == 223564
+    assert result["best"]["poster"].endswith("/w342/poster.jpg")
+    assert result["best"]["backdrop"].endswith("/w780/backdrop.jpg")
+    assert result["best"]["overview"] == "一段来自 TMDB 的简介。"
+    assert result["best"]["vote_average"] == 8.6
+    assert result["best"]["genres"] == ["动画"]
+    assert result["best"]["tmdb_url"].endswith("/tv/223564")
     assert result["queries"] == []
     search.assert_not_called()
 
@@ -1361,6 +1372,41 @@ def test_final_name_preview_uses_moviepilot_template_with_adjusted_coordinates(m
     assert captured["mediainfo"].season == 3
     assert captured["mediainfo"].episode_group == "group-id"
     assert plugin._preview_state.active is False
+
+
+def test_final_name_preview_lazily_restores_tmdb_client(monkeypatch):
+    module = _load_plugin(monkeypatch)
+
+    class FakeTmdb:
+        def get_info(self, **kwargs):
+            return {"id": kwargs["tmdbid"], "name": "Conan"}
+
+    class FakeMediaInfo:
+        def __init__(self, tmdb_info):
+            self.tmdb_info = tmdb_info
+
+    class FakeFileManager:
+        @staticmethod
+        def recommend_name(meta, mediainfo):
+            return f"TV/{mediainfo.tmdb_info['name']}.mkv"
+
+    monkeypatch.setattr(module, "TmdbApi", FakeTmdb)
+    monkeypatch.setattr(module, "MoviePilotMediaInfo", FakeMediaInfo)
+    monkeypatch.setattr(module, "FileManagerModule", FakeFileManager)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._tmdb_api = None
+
+    result = plugin._preview_final_name(
+        raw_title="[SBSUB][CONAN][1208].mkv",
+        parsed_title="名侦探柯南",
+        best={"tmdb_id": 30983, "media_type": module.MediaType.TV},
+        hints={},
+        episode_result={},
+    )
+
+    assert result["available"] is True
+    assert result["output"] == "TV/Conan.mkv"
+    assert isinstance(plugin._tmdb_api, FakeTmdb)
 
 
 def test_duplicate_tmdb_entries_share_one_decision_slot(monkeypatch):

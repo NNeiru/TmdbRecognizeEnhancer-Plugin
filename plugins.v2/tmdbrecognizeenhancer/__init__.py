@@ -1490,7 +1490,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not media_type or not tmdb_id:
             return {"available": False, "output": "", "reason": "缺少媒体类型或 TMDBID"}
         try:
-            tmdb_info = self._tmdb_api.get_info(mtype=media_type, tmdbid=tmdb_id)
+            tmdb_info = self._tmdb_client().get_info(
+                mtype=media_type, tmdbid=tmdb_id,
+            )
             if not tmdb_info:
                 return {"available": False, "output": "", "reason": "无法读取 TMDB 详情"}
             mediainfo = MoviePilotMediaInfo(tmdb_info=tmdb_info)
@@ -3138,7 +3140,23 @@ class TmdbRecognizeEnhancer(_PluginBase):
             statuses = {str(value.get("status") or "") for value in results.values()}
             if statuses and statuses <= StrmMediaInfoSynchronizer.SUCCESS_STATUSES:
                 status = "completed"
-                reason = "所有目标 Emby 均已获得媒体信息"
+                synced_count = sum(
+                    str(value.get("status") or "") == "synced"
+                    for value in results.values()
+                )
+                local_count = sum(
+                    str(value.get("status") or "") == "local"
+                    for value in results.values()
+                )
+                if synced_count and not local_count:
+                    reason = "所有目标神医接口均已接受本次插件推送"
+                elif local_count and not synced_count:
+                    reason = "所有目标 Emby 均已有媒体信息，本次插件数据未覆盖"
+                else:
+                    reason = (
+                        f"{synced_count} 个目标接受插件推送，"
+                        f"{local_count} 个目标沿用 Emby 原有媒体信息"
+                    )
             elif not statuses:
                 status = "attention"
                 reason = outcome.get("reason") or "推送未产生结果，请检查扫描数据与服务器配置"
@@ -4441,6 +4459,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         else:
             reason = f"最佳候选通过阈值，得分 {best['score']}，领先 {margin:g} 分"
 
+        self._enrich_selected_candidate(best)
         result = {
             "accepted": accepted,
             "selection_mode": "scored",
@@ -4551,7 +4570,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
         detail: Dict[str, Any] = {}
         try:
-            detail = self._tmdb_api.get_info(mtype=media_type, tmdbid=tmdb_id) or {}
+            detail = self._tmdb_client().get_info(
+                mtype=media_type, tmdbid=tmdb_id,
+            ) or {}
         except Exception as err:  # noqa: BLE001 - ID 映射本身仍有效
             logger.debug(f"[媒体整理增强] 跨站映射 TMDB 详情读取失败：{err}")
         record = lookup.get("record") or {}
@@ -4593,6 +4614,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 )
             },
         }
+        self._enrich_selected_candidate(best, detail=detail)
         result = {
             "accepted": True,
             "attempted": True,
@@ -4770,6 +4792,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             # 评分仅保留为诊断信息，不参与该模式的选择。
             best["diagnostic_score"] = best.get("score")
             best["score"] = 100.0
+            self._enrich_selected_candidate(best)
         candidate_sources = self._candidate_source_summary()
         result = {
             "accepted": bool(best),
@@ -5001,8 +5024,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             hints: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """合并 TMDB Multi、类型专用搜索与可选共享识别候选。"""
-        if not self._tmdb_api:
-            self._tmdb_api = TmdbApi()
+        tmdb_api = self._tmdb_client()
         hints = hints or {}
         candidate_limit = int(self._config["candidate_limit"])
         collected: Dict[Tuple[str, int], Dict[str, Any]] = {}
@@ -5017,7 +5039,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "shared": self._empty_shared_summary(),
         }
         for query_index, query in enumerate(queries):
-            search_batches = [("tmdb_multi", self._tmdb_api.search_multiis(query) or [])]
+            search_batches = [("tmdb_multi", tmdb_api.search_multiis(query) or [])]
             source_summary["multi"]["attempted"] += 1
             typed_results = self._search_typed_candidates(query, requested_type, hints)
             if requested_type:
@@ -5883,6 +5905,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "score": score,
             "popularity": round(float(candidate.get("popularity") or 0), 2),
             "vote_count": self._safe_int(candidate.get("vote_count"), 0),
+            "vote_average": round(self._safe_float(candidate.get("vote_average"), 0.0), 1),
+            "poster_path": candidate.get("poster_path") or candidate.get("poster") or "",
+            "backdrop_path": candidate.get("backdrop_path") or candidate.get("backdrop") or "",
+            "overview": str(candidate.get("overview") or "").strip(),
+            "original_language": str(candidate.get("original_language") or ""),
             "query_index": best_query_index,
             "tmdb_rank": best_rank,
             "eligible_rank": eligible_rank,
@@ -6692,10 +6719,82 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _normalizer(self) -> EpisodeNormalizer:
         """返回当前 TMDB 客户端对应的归一化服务。"""
         if not self._episode_normalizer:
-            if not self._tmdb_api:
-                self._tmdb_api = TmdbApi()
-            self._episode_normalizer = EpisodeNormalizer(self._tmdb_api)
+            self._episode_normalizer = EpisodeNormalizer(self._tmdb_client())
         return self._episode_normalizer
+
+    def _tmdb_client(self) -> TmdbApi:
+        """返回可用 TMDB 客户端，兼容插件热重载和跨站 ID 先行命中。"""
+        with self._config_lock:
+            if self._tmdb_api is None:
+                self._tmdb_api = TmdbApi()
+            return self._tmdb_api
+
+    @staticmethod
+    def _tmdb_image_url(value: Any, size: str) -> str:
+        """把 TMDB 图片路径转成可直接展示的地址。"""
+        path = str(value or "").strip()
+        if not path:
+            return ""
+        if path.startswith(("http://", "https://", "data:")):
+            return path
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return f"https://image.tmdb.org/t/p/{size}{path}"
+
+    def _enrich_selected_candidate(
+            self,
+            candidate: Optional[Dict[str, Any]],
+            detail: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """只为最终入选项读取一次详情，补齐统一展示所需的 TMDB 元数据。"""
+        if not candidate:
+            return candidate
+        media_type = self._normalize_media_type(candidate.get("media_type"))
+        tmdb_id = self._safe_int(candidate.get("tmdb_id"), 0)
+        if not media_type or not tmdb_id:
+            return candidate
+        resolved = detail or {}
+        if not resolved:
+            try:
+                resolved = self._tmdb_client().get_info(
+                    mtype=media_type, tmdbid=tmdb_id,
+                ) or {}
+            except Exception as err:  # noqa: BLE001 - 详情失败不影响已完成的候选选择
+                logger.debug(f"[媒体整理增强] TMDB {tmdb_id} 展示详情读取失败：{err}")
+        poster_path = (
+            resolved.get("poster_path") or resolved.get("poster")
+            or candidate.get("poster_path") or candidate.get("poster")
+        )
+        backdrop_path = (
+            resolved.get("backdrop_path") or resolved.get("backdrop")
+            or candidate.get("backdrop_path") or candidate.get("backdrop")
+        )
+        genres = [
+            str(item.get("name") or "").strip()
+            for item in (resolved.get("genres") or [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+        candidate.update({
+            "poster": self._tmdb_image_url(poster_path, "w342"),
+            "backdrop": self._tmdb_image_url(backdrop_path, "w780"),
+            "overview": str(
+                resolved.get("overview") or candidate.get("overview") or ""
+            ).strip(),
+            "vote_average": round(self._safe_float(
+                resolved.get("vote_average", candidate.get("vote_average")), 0.0,
+            ), 1),
+            "genres": genres or candidate.get("genres") or [],
+            "original_language": str(
+                resolved.get("original_language")
+                or candidate.get("original_language") or ""
+            ),
+            "tmdb_url": (
+                f"https://www.themoviedb.org/"
+                f"{'tv' if media_type == MediaType.TV else 'movie'}/{tmdb_id}"
+            ),
+            "details_loaded": bool(resolved),
+        })
+        return candidate
 
     def _read_episode_rules(self) -> List[Dict[str, Any]]:
         """读取目标编集规则。"""
