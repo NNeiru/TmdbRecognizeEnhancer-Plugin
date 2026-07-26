@@ -114,7 +114,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.29"
+    plugin_version = "0.8.30"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -255,6 +255,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_candidate_sequel_only": True,
         "notification_candidate_preference": "group_preferred",
         "notification_candidate_message_style": "rich",
+        "notification_candidate_custom_emoji_id": "",
     }
 
     # 这组配置由集数偏移页的独立接口维护。主设置页可能长期保留旧快照，
@@ -303,6 +304,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_candidate_sequel_only",
         "notification_candidate_preference",
         "notification_candidate_message_style",
+        "notification_candidate_custom_emoji_id",
     )
 
     RENAME_SEPARATOR_FIELDS = {
@@ -3514,9 +3516,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 if rich_result.get("success"):
                     return rich_result
                 logger.warning(
-                    "[媒体整理增强] Telegram Rich Message 发送失败，"
-                    f"已回退兼容消息：{rich_result.get('error') or '未知错误'}"
+                    "[媒体整理增强] Telegram Rich Message 发送或编辑失败："
+                    f"{rich_result.get('error') or '未知错误'}"
                 )
+                if original_message_id:
+                    # 已经是 Rich Message 的交互消息不降级为普通消息。部分
+                    # Telegram 客户端/服务端在编辑媒体时可能暂时不返回完整
+                    # RichBlockPhoto 元数据；此时保留当前 Rich 页面，让用户
+                    # 可以再次操作，也避免 send_msg 覆盖掉组合图和区块结构。
+                    return {
+                        "success": False,
+                        "preserved_rich_message": True,
+                        "error": rich_result.get("error") or "Rich Message 编辑失败",
+                    }
             local_image = None
             if image and original_message_id and original_chat_id:
                 try:
@@ -3688,6 +3700,23 @@ class TmdbRecognizeEnhancer(_PluginBase):
             if button_row:
                 keyboard.append(button_row)
         return {"inline_keyboard": keyboard}
+
+    @classmethod
+    def _candidate_plain_emoji_fallback(cls, value: Any) -> Any:
+        """把会员表情递归降级为 alternative_text，保持 Rich 结构不变。"""
+        if isinstance(value, dict):
+            if value.get("type") == "custom_emoji":
+                return str(value.get("alternative_text") or "✨")
+            return {
+                key: cls._candidate_plain_emoji_fallback(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [
+                cls._candidate_plain_emoji_fallback(item)
+                for item in value
+            ]
+        return value
 
     def _prepare_candidate_rich_photo(
             self,
@@ -4009,6 +4038,17 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 }
             ),
         )]
+        plain_emoji_blocks = self._candidate_plain_emoji_fallback(
+            legacy_blocks,
+        )
+        if plain_emoji_blocks != legacy_blocks:
+            rich_messages.append((
+                "blocks_plain_emoji",
+                {
+                    "blocks": plain_emoji_blocks,
+                    "skip_entity_detection": True,
+                },
+            ))
         if image and markdown and photo.get("media_id"):
             media_id = str(photo["media_id"])
             rich_messages.append((
@@ -4182,13 +4222,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         previous_digest = str(original_image_digest or "")
         previous_unique_id = str(original_photo_unique_id or "")
         if image and not photo_unique_id:
-            return {
-                "success": False,
-                "error": (
-                    "Telegram 已接受 Rich Message，但编辑结果没有返回"
-                    " RichBlockPhoto 媒体标识"
-                ),
-            }
+            logger.warning(
+                "[媒体整理增强] Telegram 已接受 Rich Message，但回执未携带"
+                " RichBlockPhoto 媒体标识；保留 Rich 结果并按图片摘要继续跟踪"
+            )
         if (
                 image
                 and previous_digest
@@ -4202,10 +4239,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 f"new_digest={image_digest[:12]} "
                 f"file_unique_id={photo_unique_id}"
             )
-            return {
-                "success": False,
-                "error": "Telegram 返回了旧的 RichBlockPhoto 媒体标识",
-            }
+            # 两阶段编辑已在提交新图前清除旧图片区块。客户端返回旧 ID
+            # 不足以证明编辑失败；若把它当失败再走普通消息回退，反而会
+            # 确定性地破坏 Rich 页面。保留服务端已接受的新 Rich 内容。
         if image:
             logger.info(
                 "[媒体整理增强] Telegram Rich Message 图片已确认："
@@ -4416,7 +4452,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         path = self._notification_collage_path(batch_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         canvas.save(path, format="JPEG", quality=88, optimize=True)
-        cutoff = time.time() - 7 * 24 * 3600
+        # 审批批次可能跨季度才处理；过早删除会令“返回总览”只能恢复文字。
+        # 与候选任务的长期可操作性保持一致，拼图保留 90 天。
+        cutoff = time.time() - 90 * 24 * 3600
         for old_path in path.parent.glob("*.jpg"):
             try:
                 if old_path != path and old_path.stat().st_mtime < cutoff:
@@ -4440,6 +4478,28 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _notification_candidate_text(value: Any, limit: int) -> str:
         text = re.sub(r"\s+", " ", str(value or "")).strip()
         return text if len(text) <= limit else f"{text[:max(1, limit - 1)]}…"
+
+    def _notification_candidate_heading(
+            self,
+            title: str,
+            *,
+            fallback_emoji: str,
+    ) -> Any:
+        """生成醒目的 Rich 标题；会员表情不可用时保留普通表情。"""
+        custom_emoji_id = str(
+            self._config.get("notification_candidate_custom_emoji_id") or ""
+        ).strip()
+        if custom_emoji_id:
+            return [
+                {
+                    "type": "custom_emoji",
+                    "custom_emoji_id": custom_emoji_id,
+                    "alternative_text": fallback_emoji,
+                },
+                " ",
+                title,
+            ]
+        return f"{fallback_emoji} {title}"
 
     @staticmethod
     def _notification_batch_pending_items(
@@ -4485,8 +4545,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "rich_blocks": [
                     {
                         "type": "heading",
-                        "size": 2,
-                        "text": "批次处理完成",
+                        "size": 1,
+                        "text": self._notification_candidate_heading(
+                            "批次处理完成",
+                            fallback_emoji="✅",
+                        ),
                     },
                     {
                         "type": "divider",
@@ -4509,16 +4572,17 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
         kind_text = "集数偏移候选" if candidate_type == "ready" else "扫描失败候选"
         lines = [
-            f"{kind_text} {len(pending)} 部",
-            f"已处理 {handled} / {total} · 共 {page_count} 页",
-            (
-                f"来源：{'实时新增' if batch.get('realtime') else '计划批次'}"
-                f" · {quarter}"
-            ),
+            f"{quarter} · {kind_text}",
+            "",
+            f"待审批：{len(pending)} 部",
+            "",
+            f"处理进度：{handled} / {total}",
+            "",
+            f"详情分页：共 {page_count} 页",
         ]
         if notice:
-            lines.insert(0, notice)
-        lines.append("进入详情页可查看番剧信息并处理当页；也可直接处理整批。")
+            lines.extend(["", f"操作结果：{notice}"])
+        lines.extend(["", "可进入详情逐项处理，也可直接处理整批。"])
         rich_lines = []
         if notice:
             rich_lines.append(
@@ -4554,7 +4618,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             f"{rich_notice}"
             f"## {self._rich_markdown_escape(quarter)} · "
             f"{len(pending)} 部待审批\n\n"
-            f"进度 {handled}/{total}　·　{page_count} 页　·　{source_text}\n\n"
+            f"**处理进度**　{handled}/{total}\n\n"
+            f"**详情分页**　{page_count} 页\n\n"
+            f"**来源**　{source_text}\n\n"
             "> 查看详情可逐项处理，也可使用下方按钮处理整批。"
         )
         buttons = [[{
@@ -4594,7 +4660,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons.append([
                 {
                     "text": "🔄 整批重新扫描",
-                    "style": "primary",
+                    "style": "success",
                     "callback_data": self._notification_candidate_callback(
                         "R", batch_id,
                     ),
@@ -4608,17 +4674,22 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 },
             ])
         return {
-            "title": f"待审批 · {quarter} · {len(pending)} 部",
+            "title": f"{quarter} · {kind_text} {len(pending)} 部",
             "text": "\n".join(lines),
             "rich_markdown": rich_markdown,
-            "rich_text": "\n".join(rich_lines),
+            "rich_text": "\n\n".join(rich_lines),
             "rich_blocks": [
                 {
                     "type": "heading",
-                    "size": 2,
-                    "text": (
-                        f"{'集数偏移候选' if candidate_type == 'ready' else '扫描失败候选'}"
-                        " · 审批总览"
+                    "size": 1,
+                    "text": self._notification_candidate_heading(
+                        (
+                            f"{'集数偏移候选' if candidate_type == 'ready' else '扫描失败候选'}"
+                            " · 审批总览"
+                        ),
+                        fallback_emoji=(
+                            "🎬" if candidate_type == "ready" else "⚠️"
+                        ),
                     ),
                 },
                 {
@@ -4684,12 +4755,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
         page = min(max(0, page), page_count - 1)
         page_items = pending[page * page_size:(page + 1) * page_size]
         candidate_type = str(batch.get("candidate_type") or "ready")
-        lines = [notice] if notice else []
+        lines = [f"操作结果：{notice}", ""] if notice else []
         rich_lines = (
             [f"<blockquote>{html_utils.escape(notice)}</blockquote>"]
             if notice else []
         )
         for offset, item in enumerate(page_items, start=page * page_size + 1):
+            if lines and lines[-1] != "":
+                lines.append("")
             title = self._notification_candidate_text(
                 item.get("title") or item.get("original_title") or "未命名",
                 80,
@@ -4742,7 +4815,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             lines.append(f"   {fact_text}")
             if fact_text:
                 rich_lines.append(f"<i>{html_utils.escape(fact_text)}</i>")
-        lines.append(f"第 {page + 1} / {page_count} 页 · 尚待处理 {len(pending)} 部")
+        lines.extend([
+            "",
+            f"详情分页：第 {page + 1} / {page_count} 页",
+            f"尚待处理：{len(pending)} 部",
+        ])
         rich_lines.append(
             f"<blockquote>第 <b>{page + 1}</b> / {page_count} 页"
             f"　·　尚待处理 <b>{len(pending)}</b> 部</blockquote>"
@@ -4943,6 +5020,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 [
                     {
                         "text": "🔄 重新扫描此项",
+                        "style": "success",
                         "callback_data": self._notification_candidate_callback(
                             "r", batch_id, page,
                         ),
@@ -4961,17 +5039,23 @@ class TmdbRecognizeEnhancer(_PluginBase):
         image = str(page_items[0].get("poster") or "")
         return {
             "title": (
-                f"{'候选详情' if candidate_type == 'ready' else '失败详情'}"
-                f" · {page + 1}/{page_count}"
+                f"{focus_title} · "
+                f"{'候选详情' if candidate_type == 'ready' else '失败详情'} "
+                f"{page + 1}/{page_count}"
             ),
             "text": "\n".join(lines),
             "rich_markdown": rich_markdown,
-            "rich_text": "\n".join(rich_lines),
+            "rich_text": "\n\n".join(rich_lines),
             "rich_blocks": [
                 {
                     "type": "heading",
-                    "size": 2,
-                    "text": focus_title,
+                    "size": 1,
+                    "text": self._notification_candidate_heading(
+                        focus_title,
+                        fallback_emoji=(
+                            "🎞" if candidate_type == "ready" else "🔎"
+                        ),
+                    ),
                 },
                 self._candidate_rich_table(block_rows),
             ],
@@ -10048,6 +10132,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
             if candidate_message_style in ("classic", "rich")
             else "rich"
         )
+        custom_emoji_id = re.sub(
+            r"\D+",
+            "",
+            str(merged.get("notification_candidate_custom_emoji_id") or ""),
+        )
+        merged["notification_candidate_custom_emoji_id"] = custom_emoji_id[:32]
         candidate_lists: Dict[str, List[int]] = {}
         for key in ("tmdb_exclude_ids", "tmdb_prefer_ids"):
             raw_values = merged.get(key) or []

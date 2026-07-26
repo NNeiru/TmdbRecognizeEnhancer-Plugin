@@ -2629,7 +2629,8 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     assert "7 部" in summary["title"]
     assert "共 7 页" in summary["text"]
     assert summary["rich_markdown"].startswith("# 🎬 集数偏移候选")
-    assert "进度 0/7" in summary["rich_markdown"]
+    assert "**处理进度**　0/7" in summary["rich_markdown"]
+    assert "**详情分页**　7 页" in summary["rich_markdown"]
     assert "查看详情可逐项处理" in summary["rich_markdown"]
     assert "| 批次状态 | 数量 |" not in summary["rich_markdown"]
     assert "- [ ]" not in summary["rich_markdown"]
@@ -2665,7 +2666,11 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     assert "<b>4. 番剧 4</b>" in second_page["rich_text"]
     assert second_page["image"].endswith("/4.jpg")
     blocks = second_page["rich_blocks"]
-    assert blocks[0] == {"type": "heading", "size": 2, "text": "番剧 4"}
+    assert blocks[0] == {
+        "type": "heading",
+        "size": 1,
+        "text": "🎞 番剧 4",
+    }
     assert blocks[1]["type"] == "table"
     assert blocks[1]["is_bordered"] is True
     assert blocks[1]["is_striped"] is True
@@ -2707,6 +2712,43 @@ def test_notification_candidate_message_style_is_normalized(monkeypatch):
     assert plugin._normalize_config({
         "notification_candidate_message_style": "unsupported",
     })["notification_candidate_message_style"] == "rich"
+    assert plugin._normalize_config({
+        "notification_candidate_custom_emoji_id": " 123-456 ",
+    })["notification_candidate_custom_emoji_id"] == "123456"
+
+
+def test_notification_candidate_custom_emoji_has_plain_fallback(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config["notification_candidate_custom_emoji_id"] = "5368324170671202286"
+    batch = {
+        "quarter": "2026-Q3",
+        "candidate_type": "failed",
+        "items": [{
+            "id": "anime:1",
+            "title": "示例作品",
+            "scan_error": "未匹配",
+        }],
+        "handled_ids": [],
+    }
+
+    view = plugin._render_notification_candidate_summary(
+        batch_id="123456789abc",
+        batch=batch,
+    )
+    heading = view["rich_blocks"][0]
+    assert heading["size"] == 1
+    assert heading["text"][0]["type"] == "custom_emoji"
+    assert heading["text"][0]["alternative_text"] == "⚠️"
+    fallback = plugin._candidate_plain_emoji_fallback(view["rich_blocks"])
+    assert "".join(fallback[0]["text"]).startswith("⚠️ ")
+    retry = next(
+        button
+        for row in view["buttons"]
+        for button in row
+        if "重新扫描" in button["text"]
+    )
+    assert retry["style"] == "success"
 
 
 def test_notification_candidate_page_action_only_handles_current_page(monkeypatch):
@@ -2804,6 +2846,44 @@ def test_notification_candidate_overview_restores_local_collage(
     assert sent["image"] == str(collage_path)
     assert sent["rich_markdown"].startswith("# 🎬 集数偏移候选")
     assert "<blockquote>" in sent["rich_text"]
+
+
+def test_failed_rich_edit_does_not_downgrade_existing_message(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    instance = SimpleNamespace(send_msg=Mock())
+    monkeypatch.setattr(
+        module,
+        "NotificationHelper",
+        lambda: SimpleNamespace(
+            get_service=lambda name: SimpleNamespace(instance=instance),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "MessageChannel",
+        SimpleNamespace(Telegram="telegram"),
+    )
+    plugin._send_candidate_rich_telegram = Mock(return_value={
+        "success": False,
+        "error": "temporary rich edit error",
+    })
+
+    result = plugin._send_candidate_instance_notification(
+        title="候选",
+        text="正文",
+        buttons=[],
+        image="/tmp/collage.jpg",
+        channel="telegram",
+        service="候选通知",
+        original_message_id=123,
+        original_chat_id="456",
+        rich_blocks=[{"type": "paragraph", "text": "正文"}],
+    )
+
+    assert result["success"] is False
+    assert result["preserved_rich_message"] is True
+    instance.send_msg.assert_not_called()
 
 
 def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
@@ -3134,7 +3214,9 @@ def test_candidate_rich_telegram_falls_back_when_media_field_is_unsupported(
     assert second["markdown"].startswith("# 候选\n\n![](tg://photo?id=")
 
 
-def test_candidate_rich_telegram_rejects_unchanged_photo_identity(monkeypatch):
+def test_candidate_rich_telegram_keeps_rich_result_with_stale_photo_identity(
+        monkeypatch,
+):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
 
@@ -3192,8 +3274,9 @@ def test_candidate_rich_telegram_rejects_unchanged_photo_identity(monkeypatch):
         original_chat_id="654",
     )
 
-    assert result["success"] is False
-    assert "旧的 RichBlockPhoto" in result["error"]
+    assert result["success"] is True
+    assert result["rich_message"] is True
+    assert result["image_digest"]
 
 
 def test_notification_candidate_collage_uses_local_versioned_endpoint(

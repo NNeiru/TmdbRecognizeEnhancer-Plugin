@@ -443,7 +443,21 @@ onMounted(async () => {
           <VBtn value="classic" prepend-icon="mdi-message-text-outline">经典消息</VBtn>
           <VBtn value="rich" prepend-icon="mdi-card-text-outline">Rich Message</VBtn>
         </VBtnToggle>
+        <VTextField
+          v-if="config.notification_candidate_message_style === 'rich'"
+          v-model="config.notification_candidate_custom_emoji_id"
+          label="会员表情 ID（可选）"
+          placeholder="留空使用普通符号"
+          density="compact"
+          variant="outlined"
+          hide-details
+          clearable
+          class="premium-emoji-field"
+        />
       </div>
+      <small v-if="config.notification_candidate_message_style === 'rich'" class="premium-emoji-help">
+        用于总览与详情标题装饰；填写 Telegram custom_emoji_id。Bot 无权限或留空时自动使用普通表情。
+      </small>
       <VAlert type="info" variant="tonal" density="compact" class="mt-3">
         这里按 MoviePilot 的通知配置名称精确投递；即使有多个 Telegram，也只会发送到选中的实例。
         请确保该实例已启用“插件”通知类型。
@@ -638,6 +652,11 @@ onMounted(async () => {
 }
 .candidate-message-style > span { display: grid; min-width: 0; gap: 2px; }
 .candidate-message-style small { color: rgba(var(--v-theme-on-surface), .58); font-size: .72rem; }
+.premium-emoji-field { flex: 0 1 280px; min-width: 220px; }
+.premium-emoji-help {
+  display: block; margin: 5px 12px 0;
+  color: rgba(var(--v-theme-on-surface), .55); font-size: .72rem; line-height: 1.45;
+}
 .candidate-controls { display: grid; grid-template-columns: minmax(130px, .7fr) minmax(130px, .7fr) minmax(190px, 1.1fr) auto auto; gap: 10px; margin-top: 14px; }
 .platform-select { max-width: 440px; min-width: 260px; }
 .candidate-list { margin-top: 14px; overflow: hidden; border: 1px solid rgba(var(--v-theme-on-surface), .09); border-radius: 13px; }
@@ -673,5 +692,6 @@ onMounted(async () => {
   .candidate-message-style { align-items: stretch; flex-direction: column; }
   .candidate-message-style .v-btn-toggle { width: 100%; }
   .candidate-message-style .v-btn { flex: 1; }
+  .premium-emoji-field { flex-basis: auto; width: 100%; }
 }
 </style>
