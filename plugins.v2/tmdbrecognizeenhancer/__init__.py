@@ -34,9 +34,10 @@ from app.schemas.types import ChainEventType, MediaType
 from app.utils.http import RequestUtils
 
 try:
-    from PIL import Image, ImageOps
+    from PIL import Image, ImageFilter, ImageOps
 except ImportError:  # pragma: no cover - MoviePilot 正常镜像内置 Pillow。
     Image = None
+    ImageFilter = None
     ImageOps = None
 
 try:
@@ -113,7 +114,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.28"
+    plugin_version = "0.8.29"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3730,12 +3731,39 @@ class TmdbRecognizeEnhancer(_PluginBase):
                             getattr(Image, "Resampling", Image),
                             "LANCZOS",
                         )
-                        normalized_source = ImageOps.fit(
+                        canvas_size = (720, 1080)
+                        background = ImageOps.fit(
                             normalized_source,
-                            (720, 1080),
+                            canvas_size,
                             method=resampling,
                             centering=(0.5, 0.5),
                         )
+                        if ImageFilter is not None:
+                            background = background.filter(
+                                ImageFilter.GaussianBlur(radius=28),
+                            )
+                        # 压暗柔化背景，令完整海报本体保持清晰。
+                        background = Image.blend(
+                            background,
+                            Image.new("RGB", canvas_size, (18, 16, 24)),
+                            0.34,
+                        )
+                        foreground = ImageOps.contain(
+                            normalized_source,
+                            (696, 1056),
+                            method=resampling,
+                        )
+                        foreground_x = (
+                            canvas_size[0] - foreground.width
+                        ) // 2
+                        foreground_y = (
+                            canvas_size[1] - foreground.height
+                        ) // 2
+                        background.paste(
+                            foreground,
+                            (foreground_x, foreground_y),
+                        )
+                        normalized_source = background
                     normalized_source.save(
                         prepared,
                         format="JPEG",
@@ -3949,20 +3977,17 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 },
             }
             if legacy_blocks:
-                insert_at = (
-                    1
-                    if legacy_blocks[0].get("type") == "heading"
-                    else 0
-                )
-                legacy_blocks.insert(insert_at, photo_block)
+                # 海报或总览拼图始终作为首个视觉区块；标题和后续信息放在
+                # 图片下方，避免大标题抢占消息最上方。
+                legacy_blocks.insert(0, photo_block)
             else:
                 legacy_blocks = [
+                    photo_block,
                     {
                         "type": "heading",
                         "size": 2,
                         "text": "候选审批",
                     },
-                    photo_block,
                     {
                         "type": "paragraph",
                         "text": markdown,
@@ -4614,7 +4639,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                             "text": "处理进度",
                         },
                         f"　{handled}/{total}",
-                        "　　",
+                    ],
+                },
+                {
+                    "type": "paragraph",
+                    "text": [
                         {
                             "type": "bold",
                             "text": "详情分页",
@@ -4622,14 +4651,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         f"　{page_count} 页",
                     ],
                 },
-                {
-                    "type": "footer",
-                    "text": (
-                        f"来源：{'实时新增' if batch.get('realtime') else '计划批次'}"
-                        "　·　可逐项查看详情，也可直接处理整批"
-                        + (f"　·　{notice}" if notice else "")
-                    ),
-                },
+                *(
+                    [{
+                        "type": "paragraph",
+                        "text": {
+                            "type": "marked",
+                            "text": notice,
+                        },
+                    }]
+                    if notice else []
+                ),
             ],
             "buttons": buttons,
             "image": str(batch.get("collage") or ""),

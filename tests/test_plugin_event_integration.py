@@ -2641,7 +2641,14 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
     assert summary_blocks[2]["text"]["type"] == "marked"
     assert "待审批 7 部" in summary_blocks[2]["text"]["text"]
     assert summary_blocks[3]["type"] == "paragraph"
-    assert summary_blocks[4]["type"] == "footer"
+    assert summary_blocks[4]["type"] == "paragraph"
+    assert "处理进度" in json.dumps(
+        summary_blocks[3], ensure_ascii=False,
+    )
+    assert "详情分页" in json.dumps(
+        summary_blocks[4], ensure_ascii=False,
+    )
+    assert all(block["type"] != "footer" for block in summary_blocks)
     assert second_page["page_item_ids"] == ["anime:4"]
     assert "番剧 4" in second_page["text"]
     assert second_page["rich_markdown"].startswith("# 番剧 4")
@@ -2869,10 +2876,10 @@ def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
     rich_message = json.loads(rich_request["data"]["rich_message"])
     reply_markup = json.loads(rich_request["data"]["reply_markup"])
     assert "markdown" not in rich_message
-    assert rich_message["blocks"][0]["type"] == "heading"
-    assert rich_message["blocks"][1]["type"] == "photo"
-    assert rich_message["blocks"][1]["photo"]["type"] == "photo"
-    assert rich_message["blocks"][1]["photo"]["media"].startswith(
+    assert rich_message["blocks"][0]["type"] == "photo"
+    assert rich_message["blocks"][1]["type"] == "heading"
+    assert rich_message["blocks"][0]["photo"]["type"] == "photo"
+    assert rich_message["blocks"][0]["photo"]["media"].startswith(
         "attach://",
     )
     assert reply_markup["inline_keyboard"][0][0]["style"] == "success"
@@ -3000,15 +3007,15 @@ def test_candidate_rich_telegram_edits_blocks_and_replaces_photo(monkeypatch):
     cleared = edits[1]["json"]["rich_message"]
     second = json.loads(edits[2]["data"]["rich_message"])
     assert edits[0]["data"]["message_id"] == "321"
-    assert first["blocks"][1]["type"] == "photo"
+    assert first["blocks"][0]["type"] == "photo"
     assert all(block.get("type") != "photo" for block in cleared["blocks"])
-    assert second["blocks"][1]["type"] == "photo"
+    assert second["blocks"][0]["type"] == "photo"
     assert (
-        first["blocks"][1]["photo"]["media"]
-        != second["blocks"][1]["photo"]["media"]
+        first["blocks"][0]["photo"]["media"]
+        != second["blocks"][0]["photo"]["media"]
     )
-    assert first["blocks"][1]["photo"]["media"].startswith("attach://")
-    assert second["blocks"][1]["photo"]["media"].startswith("attach://")
+    assert first["blocks"][0]["photo"]["media"].startswith("attach://")
+    assert second["blocks"][0]["photo"]["media"].startswith("attach://")
     assert not any(
         url.endswith("/editMessageMedia") for url, _ in captured
     )
@@ -3023,7 +3030,9 @@ def test_candidate_remote_poster_is_normalized_to_two_by_three(monkeypatch):
     if module.Image is None:
         return
     plugin = _plugin_with_runtime(module, SimpleNamespace())
-    source = module.Image.new("RGB", (1200, 500), (80, 120, 180))
+    source = module.Image.new("RGB", (1200, 500), (180, 80, 80))
+    source.paste((40, 190, 80), (0, 0, 200, 500))
+    source.paste((235, 190, 40), (1000, 0, 1200, 500))
     content = BytesIO()
     source.save(content, format="JPEG")
     plugin._fetch_candidate_poster = Mock(return_value=content.getvalue())
@@ -3037,6 +3046,11 @@ def test_candidate_remote_poster_is_normalized_to_two_by_three(monkeypatch):
         handle.seek(0)
         with module.Image.open(handle) as normalized:
             assert normalized.size == (720, 1080)
+            # 横图两端仍完整保留；硬裁剪会丢失两侧绿、黄区域。
+            left = normalized.getpixel((30, 540))
+            right = normalized.getpixel((690, 540))
+            assert left[1] > left[0] and left[1] > left[2]
+            assert right[0] > right[2] and right[1] > right[2]
     finally:
         prepared["handle"].close()
 
