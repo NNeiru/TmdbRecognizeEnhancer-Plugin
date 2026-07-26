@@ -16,6 +16,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlencode, urlparse
 
@@ -115,7 +116,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.35"
+    plugin_version = "0.8.36"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -395,6 +396,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._notification_lock = threading.RLock()
         self._notification_recent_lock = threading.RLock()
         self._notification_recent: Dict[str, Dict[str, Any]] = {}
+        self._notification_notice_tokens: List[Dict[str, Any]] = []
         self._notification_outgoing_lock = threading.RLock()
         self._notification_outgoing: Dict[str, float] = {}
         self._notification_telegram_send_lock = threading.RLock()
@@ -6422,9 +6424,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def _remember_transfer_notice_context(
             self, data: Any, scene: str, event_kind: str = "",
-    ) -> None:
+    ) -> Dict[str, Any]:
         """短暂保留结构化整理事件，补齐随后 NoticeMessage 缺失的路径。"""
         fileitem = self._event_get(data, "fileitem")
+        meta = self._event_get(data, "meta")
         transferinfo = self._event_get(data, "transferinfo")
         mediainfo = self._event_get(data, "mediainfo")
         target_item = self._event_get(transferinfo, "target_item")
@@ -6442,6 +6445,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "source_path": source_path,
             "target_path": target_path,
             "reason": str(self._event_get(transferinfo, "message") or ""),
+            "season_episode": str(
+                self._event_get(meta, "season_episode")
+                or self._event_get(meta, "season")
+                or ""
+            ),
+            "image": str(
+                (
+                    mediainfo.get_message_image()
+                    if callable(getattr(mediainfo, "get_message_image", None))
+                    else ""
+                )
+                or ""
+            ),
             "history_id": self._event_get(data, "transfer_history_id"),
             "event_kind": event_kind,
             "created_ts": time.time(),
@@ -6452,6 +6468,125 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 key: value for key, value in self._notification_recent.items()
                 if time.time() - self._safe_float(value.get("created_ts"), 0) < 180
             }
+        return context
+
+    def _remember_ingest_notice_token(self, scene: str, title: str) -> None:
+        """登记 MP 已产生的整理通知，供结构化事件兜底去重。"""
+        now = time.time()
+        with self._notification_recent_lock:
+            self._notification_notice_tokens = [
+                item for item in self._notification_notice_tokens
+                if now - self._safe_float(item.get("created_ts"), 0) < 15
+            ]
+            self._notification_notice_tokens.append({
+                "scene": scene,
+                "title": str(title or ""),
+                "created_ts": now,
+            })
+
+    def _consume_ingest_notice_token(
+            self,
+            scene: str,
+            title: str,
+            event_created_ts: float,
+    ) -> bool:
+        """消费一条相邻的 MP 原生通知；标题相关项优先，兼容完全自定义模板。"""
+        now = time.time()
+        normalized_title = self._normalize_text(title)
+        with self._notification_recent_lock:
+            candidates = [
+                (index, item)
+                for index, item in enumerate(self._notification_notice_tokens)
+                if item.get("scene") == scene
+                and abs(
+                    self._safe_float(item.get("created_ts"), 0)
+                    - event_created_ts
+                ) <= 8
+            ]
+            related = [
+                (index, item)
+                for index, item in candidates
+                if normalized_title
+                and (
+                    normalized_title in self._normalize_text(item.get("title"))
+                    or self._normalize_text(item.get("title")) in normalized_title
+                )
+            ]
+            selected = related[-1:] or candidates[-1:]
+            if not selected:
+                self._notification_notice_tokens = [
+                    item for item in self._notification_notice_tokens
+                    if now - self._safe_float(item.get("created_ts"), 0) < 15
+                ]
+                return False
+            selected_index = selected[0][0]
+            self._notification_notice_tokens.pop(selected_index)
+            return True
+
+    def _send_transfer_event_notification_fallback(
+            self,
+            context: Dict[str, Any],
+    ) -> None:
+        """MP 未产生 NoticeMessage 时，以整理事实事件兜底发送一次。"""
+        scene = str(context.get("scene") or "")
+        if not self._notification_active():
+            return
+        if str(self._config.get("notification_mode") or "observe") not in (
+                "parallel", "takeover",
+        ):
+            return
+        if not self._config.get("notification_plugin_enabled"):
+            return
+        if scene == "success" and not self._config.get("notification_success_enabled"):
+            return
+        if scene == "failure" and not self._config.get("notification_failure_enabled"):
+            return
+        if self._consume_ingest_notice_token(
+                scene,
+                str(context.get("title") or ""),
+                self._safe_float(context.get("created_ts"), time.time()),
+        ):
+            return
+
+        title = " ".join(
+            value for value in (
+                str(context.get("title") or "").strip(),
+                str(context.get("season_episode") or "").strip(),
+            )
+            if value
+        ) or "未命名媒体"
+        if scene == "failure":
+            title = f"{title} 入库失败！"
+            text = f"原因：{context.get('reason') or '未知'}"
+            notice_type = "手动处理"
+        else:
+            text = "媒体文件已整理完成"
+            notice_type = "整理入库"
+        self._handle_notice_message(
+            SimpleNamespace(event_data={
+                "source": "MoviePilot",
+                "type": notice_type,
+                "title": title,
+                "text": text,
+                "image": str(context.get("image") or ""),
+            }),
+            remember_token=False,
+        )
+
+    def _schedule_transfer_event_notification_fallback(
+            self,
+            context: Dict[str, Any],
+    ) -> None:
+        """等待 MP 原生渲染通知；缺席时再使用结构化事件，避免重复发送。"""
+        if not context or not self._notification_active():
+            return
+        timer = threading.Timer(
+            1.5,
+            self._send_transfer_event_notification_fallback,
+            args=(deepcopy(context),),
+        )
+        timer.daemon = True
+        timer.start()
 
     def _recent_transfer_context(
             self, scene: str, notice_title: str = "",
@@ -6496,13 +6631,22 @@ class TmdbRecognizeEnhancer(_PluginBase):
             logger.warning(f"[媒体整理增强] 入库通知 Jinja2 模板渲染失败：{err}")
             return fallback
 
-    def _handle_notice_message(self, event: Event) -> None:
+    def _handle_notice_message(
+            self,
+            event: Event,
+            *,
+            remember_token: bool = True,
+    ) -> None:
         if not self._notification_active() or not event or not event.event_data:
             return
         notice = extract_notice(event.event_data)
         if self._is_outgoing_notification(notice):
             return
         scene = notification_kind(notice)
+        if scene in ("success", "failure") and remember_token:
+            self._remember_ingest_notice_token(
+                scene, str(notice.get("title") or ""),
+            )
         mode = str(self._config.get("notification_mode") or "observe")
         if scene == "other":
             # 接管“手动处理”渠道时回送非整理类消息，避免用户为屏蔽原生失败通知
@@ -6621,7 +6765,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not event or not event.event_data:
             return
         if self._notification_active():
-            self._remember_transfer_notice_context(event.event_data, "success")
+            context = self._remember_transfer_notice_context(
+                event.event_data, "success",
+            )
+            self._schedule_transfer_event_notification_fallback(context)
         try:
             self._maybe_enqueue_strm_sync(event.event_data)
         except Exception as err:
@@ -6632,27 +6779,30 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def on_transfer_failed(self, event: Event) -> None:
         """缓存媒体文件整理失败上下文，实际通知由 NoticeMessage 统一决策。"""
         if self._notification_active() and event and event.event_data:
-            self._remember_transfer_notice_context(
+            context = self._remember_transfer_notice_context(
                 event.event_data, "failure", "transfer.failed",
             )
+            self._schedule_transfer_event_notification_fallback(context)
 
     @eventmanager.register(getattr(
         EventType, "SubtitleTransferFailed", "transfer.subtitle.failed",
     ))
     def on_subtitle_transfer_failed(self, event: Event) -> None:
         if self._notification_active() and event and event.event_data:
-            self._remember_transfer_notice_context(
+            context = self._remember_transfer_notice_context(
                 event.event_data, "failure", "transfer.subtitle.failed",
             )
+            self._schedule_transfer_event_notification_fallback(context)
 
     @eventmanager.register(getattr(
         EventType, "AudioTransferFailed", "transfer.audio.failed",
     ))
     def on_audio_transfer_failed(self, event: Event) -> None:
         if self._notification_active() and event and event.event_data:
-            self._remember_transfer_notice_context(
+            context = self._remember_transfer_notice_context(
                 event.event_data, "failure", "transfer.audio.failed",
             )
+            self._schedule_transfer_event_notification_fallback(context)
 
     @eventmanager.register(getattr(EventType, "NoticeMessage", "notice.message"))
     def on_notice_message(self, event: Event) -> None:

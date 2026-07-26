@@ -4023,6 +4023,93 @@ def test_real_success_and_failure_records_use_channel_receipt(monkeypatch):
     assert failure["details"]["delivery_error"] == "Telegram rejected message"
 
 
+def test_candidate_filter_save_keeps_ingest_delivery_configuration(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_success_enabled": True,
+        "notification_failure_enabled": True,
+        "notification_success_service": "入库成功通知",
+        "notification_failure_service": "入库失败通知",
+    })
+
+    response = plugin.save_notification_enhancer_config_api({
+        "notification_candidate_quarter": "2026-Q3",
+        "notification_candidate_region": "all",
+        "notification_candidate_platforms": ["TV"],
+        "notification_candidate_sequel_only": False,
+    })
+
+    assert response.success is True
+    assert plugin._config["notification_enhancer_enabled"] is True
+    assert plugin._config["notification_mode"] == "takeover"
+    assert plugin._config["notification_plugin_enabled"] is True
+    assert plugin._config["notification_success_service"] == "入库成功通知"
+    assert plugin._config["notification_failure_service"] == "入库失败通知"
+
+
+def test_transfer_event_fallback_sends_when_mp_notice_is_absent(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_success_enabled": True,
+    })
+    plugin._notification_active = Mock(return_value=True)
+    plugin._handle_notice_message = Mock()
+    context = {
+        "scene": "success",
+        "title": "示例动画 (2026)",
+        "season_episode": "S01E03",
+        "target_path": "/media/example.mkv",
+        "image": "https://example.invalid/poster.jpg",
+        "created_ts": 100.0,
+    }
+
+    plugin._send_transfer_event_notification_fallback(context)
+
+    plugin._handle_notice_message.assert_called_once()
+    event = plugin._handle_notice_message.call_args.args[0]
+    assert event.event_data["type"] == "整理入库"
+    assert event.event_data["title"] == "示例动画 (2026) S01E03"
+    assert event.event_data["image"] == "https://example.invalid/poster.jpg"
+    assert plugin._handle_notice_message.call_args.kwargs == {
+        "remember_token": False,
+    }
+
+
+def test_transfer_event_fallback_deduplicates_existing_mp_notice(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_success_enabled": True,
+    })
+    plugin._notification_active = Mock(return_value=True)
+    plugin._handle_notice_message = Mock()
+    plugin._notification_notice_tokens = [{
+        "scene": "success",
+        "title": "示例动画 (2026) 已入库",
+        "created_ts": 101.0,
+    }]
+
+    plugin._send_transfer_event_notification_fallback({
+        "scene": "success",
+        "title": "示例动画 (2026)",
+        "created_ts": 100.0,
+    })
+
+    plugin._handle_notice_message.assert_not_called()
+    assert plugin._notification_notice_tokens == []
+
+
 def test_ingest_notification_preserves_mp_template_and_only_uses_paths_explicitly(
         monkeypatch,
 ):
