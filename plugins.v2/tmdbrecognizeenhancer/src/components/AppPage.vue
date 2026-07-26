@@ -49,6 +49,62 @@ const filteredHistory = computed(() => history.value.filter(item => {
 const normalizerStatus = computed(() => status.value.episode_normalizer || {})
 const modules = computed(() => status.value.modules || {})
 const crossIdStatus = computed(() => status.value.anime_cross_id_database || {})
+const pipelineStageDefinitions = [
+  {
+    key: 'prepare', title: '解析与上下文', icon: 'mdi-text-search-variant',
+    modules: ['MoviePilot 标题解析（识别前）', '识别字段覆盖', '制作组类型辅助'],
+  },
+  {
+    key: 'recognize', title: '媒体识别', icon: 'mdi-database-search-outline',
+    modules: ['TMDB 搜索增强'],
+  },
+  {
+    key: 'episode', title: '季集处理', icon: 'mdi-counter',
+    modules: ['集数偏移'],
+  },
+  {
+    key: 'naming', title: '命名输出', icon: 'mdi-file-edit-outline',
+    modules: ['制作组命名编排', '自定义命名字段', 'MoviePilot 模板与最终命名'],
+  },
+  {
+    key: 'library', title: '入库后联动', icon: 'mdi-server-network',
+    modules: ['Emby 剧集组联动（入库后）'],
+  },
+]
+const previewPipelineGroups = computed(() => {
+  const steps = preview.value?.pipeline || []
+  return pipelineStageDefinitions.map((definition, index) => {
+    const stageSteps = definition.modules
+      .map(module => steps.find(step => step.module === module))
+      .filter(Boolean)
+    const active = stageSteps.filter(step => step.status !== 'skipped')
+    const skipped = stageSteps.filter(step => step.status === 'skipped')
+    const rejected = stageSteps.some(step => step.status === 'rejected')
+    const applied = stageSteps.some(step => ['applied', 'accepted', 'completed'].includes(step.status))
+    return {
+      ...definition,
+      index: index + 1,
+      active,
+      skipped,
+      status: rejected ? 'rejected' : applied ? 'completed' : 'skipped',
+    }
+  }).filter(stage => stage.active.length || stage.skipped.length)
+})
+
+function pipelineStagePresentation(status) {
+  return ({
+    completed: { label: '已处理', color: 'success', icon: 'mdi-check' },
+    rejected: { label: '未通过', color: 'warning', icon: 'mdi-shield-alert-outline' },
+    skipped: { label: '未触发', color: 'default', icon: 'mdi-minus' },
+  })[status] || { label: '未知', color: 'default', icon: 'mdi-help' }
+}
+
+function pipelineStepSummary(step) {
+  if (step?.module === 'MoviePilot 模板与最终命名' && step.status === 'completed') {
+    return '最终相对路径已生成，完整结果见上方“最终命名”'
+  }
+  return step?.summary || '没有补充信息'
+}
 
 function historyStatus(item) {
   if (item.accepted) return { color: 'success', marker: 'success', label: item.kind === 'operation' ? '完成' : (item.best?.score ?? '通过') }
@@ -441,14 +497,39 @@ onMounted(loadStatus)
                         <VExpansionPanel>
                           <VExpansionPanelTitle><div><strong>处理流程</strong><div class="text-caption text-medium-emphasis">按解析、识别、季集、命名、入库后联动的顺序查看</div></div></VExpansionPanelTitle>
                           <VExpansionPanelText>
-                            <div v-if="preview.pipeline?.length" class="pipeline-list">
-                              <div v-for="step in preview.pipeline" :key="step.module" class="pipeline-item">
-                                <VIcon :icon="step.status === 'applied' || step.status === 'accepted' || step.status === 'completed' ? 'mdi-check-circle-outline' : 'mdi-minus-circle-outline'" :color="step.status === 'rejected' ? 'warning' : step.status === 'skipped' ? 'medium-emphasis' : 'success'" />
-                                <div><strong>{{ step.module }}</strong><div class="text-caption text-medium-emphasis">{{ step.summary }}</div></div>
-                              </div>
+                            <div v-if="previewPipelineGroups.length" class="pipeline-timeline">
+                              <section v-for="stage in previewPipelineGroups" :key="stage.key" class="pipeline-stage" :class="`pipeline-stage-${stage.status}`">
+                                <div class="pipeline-stage-rail">
+                                  <div class="pipeline-stage-marker"><VIcon :icon="stage.icon" size="18" /></div>
+                                </div>
+                                <div class="pipeline-stage-card">
+                                  <header class="pipeline-stage-header">
+                                    <div><span class="pipeline-stage-index">{{ String(stage.index).padStart(2, '0') }}</span><strong>{{ stage.title }}</strong></div>
+                                    <VChip size="x-small" :color="pipelineStagePresentation(stage.status).color" variant="tonal" :prepend-icon="pipelineStagePresentation(stage.status).icon">{{ pipelineStagePresentation(stage.status).label }}</VChip>
+                                  </header>
+                                  <div v-if="stage.active.length" class="pipeline-active-list">
+                                    <div v-for="step in stage.active" :key="step.module" class="pipeline-active-step">
+                                      <VIcon :icon="step.status === 'rejected' ? 'mdi-alert-circle-outline' : 'mdi-check-circle-outline'" :color="step.status === 'rejected' ? 'warning' : 'success'" size="18" />
+                                      <div><strong>{{ step.module }}</strong><span :title="step.summary">{{ pipelineStepSummary(step) }}</span></div>
+                                    </div>
+                                  </div>
+                                  <div v-if="stage.skipped.length && stage.active.length" class="pipeline-skipped">
+                                    <VIcon icon="mdi-minus-circle-outline" size="15" />
+                                    <span>未触发：{{ stage.skipped.map(item => item.module).join('、') }}</span>
+                                  </div>
+                                  <div v-if="stage.key === 'naming' && preview.release_group_arrangement?.input && preview.release_group_arrangement?.applied" class="pipeline-stage-detail">
+                                    <span>制作组</span><code>{{ preview.release_group_arrangement.input }}</code><VIcon icon="mdi-arrow-right" size="15" /><code>{{ preview.release_group_arrangement.output }}</code>
+                                  </div>
+                                  <div v-if="stage.key === 'naming' && Object.keys(preview.custom_rename_fields?.values || {}).length" class="pipeline-custom-fields">
+                                    <span v-for="(value, key) in preview.custom_rename_fields.values" :key="key"><code>{{ key }}</code><strong>{{ value || '（空）' }}</strong></span>
+                                  </div>
+                                </div>
+                              </section>
                             </div>
-                            <div v-if="preview.release_group_arrangement?.input" class="detail-block mt-3"><strong>制作组编排</strong><div class="result-path"><code>{{ preview.release_group_arrangement.input }}</code><VIcon icon="mdi-arrow-right" size="18" /><code>{{ preview.release_group_arrangement.output }}</code></div></div>
-                            <div v-if="Object.keys(preview.custom_rename_fields?.values || {}).length" class="detail-block mt-3"><strong>自定义命名字段</strong><div class="custom-preview-values mt-2"><div v-for="(value, key) in preview.custom_rename_fields.values" :key="key"><code>{{ key }}</code><span>{{ value || '（空）' }}</span></div></div></div>
+                            <div v-else class="pipeline-empty">
+                              <VIcon icon="mdi-timeline-question-outline" size="24" />
+                              <span>本次试跑没有返回处理阶段</span>
+                            </div>
                           </VExpansionPanelText>
                         </VExpansionPanel>
                         <VExpansionPanel>
@@ -594,12 +675,34 @@ onMounted(loadStatus)
 .final-name-card { border: 1px solid rgba(var(--v-theme-primary), .2); }
 .final-name-output { display: block; margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: rgba(var(--v-theme-surface), .72); color: rgb(var(--v-theme-primary)); font-size: .9rem; overflow-wrap: anywhere; white-space: normal; }
 .preview-detail-panels { border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: 12px; overflow: hidden; }
-.detail-block { padding: 12px 14px; border-radius: 10px; background: rgba(var(--v-theme-secondary), .045); }
-.pipeline-list { display: grid; gap: 8px; }
-.result-path { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; overflow-wrap: anywhere; }
-.custom-preview-values { display: grid; gap: 7px; }
-.custom-preview-values > div { display: flex; justify-content: space-between; gap: 14px; overflow-wrap: anywhere; }
-.pipeline-item { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; align-items: start; padding: 10px 12px; border-radius: 10px; background: rgba(var(--v-theme-primary),.035); }
+.pipeline-timeline { display: grid; }
+.pipeline-stage { min-width: 0; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; }
+.pipeline-stage-rail { position: relative; display: flex; justify-content: center; }
+.pipeline-stage:not(:last-child) .pipeline-stage-rail::after { content: ''; position: absolute; top: 32px; bottom: -1px; width: 1px; background: rgba(var(--v-theme-primary), .2); }
+.pipeline-stage-marker { position: relative; z-index: 1; display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid rgba(var(--v-theme-primary), .18); border-radius: 10px; background: rgb(var(--v-theme-surface)); color: rgb(var(--v-theme-primary)); }
+.pipeline-stage-skipped .pipeline-stage-marker { border-color: rgba(var(--v-theme-on-surface), .1); background: rgba(var(--v-theme-on-surface), .035); color: rgba(var(--v-theme-on-surface), .42); }
+.pipeline-stage-rejected .pipeline-stage-marker { border-color: rgba(var(--v-theme-warning), .22); background: rgba(var(--v-theme-warning), .08); color: rgb(var(--v-theme-warning)); }
+.pipeline-stage-card { min-width: 0; display: grid; gap: 8px; margin-bottom: 10px; padding: 10px 12px; border: 1px solid rgba(var(--v-border-color), calc(var(--v-border-opacity) * .8)); border-radius: 11px; background: rgba(var(--v-theme-primary), .025); }
+.pipeline-stage-skipped .pipeline-stage-card { gap: 5px; padding-block: 8px; background: rgba(var(--v-theme-on-surface), .018); }
+.pipeline-stage-header { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.pipeline-stage-header > div { min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.pipeline-stage-header strong { font-size: .86rem; }
+.pipeline-stage-index { color: rgba(var(--v-theme-on-surface), .4); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .66rem; font-weight: 700; }
+.pipeline-active-list { display: grid; overflow: hidden; border-top: 1px solid rgba(var(--v-border-color), calc(var(--v-border-opacity) * .62)); }
+.pipeline-active-step { min-width: 0; display: grid; grid-template-columns: 19px minmax(0, 1fr); gap: 8px; align-items: start; padding: 8px 1px 2px; }
+.pipeline-active-step + .pipeline-active-step { margin-top: 5px; border-top: 1px dashed rgba(var(--v-border-color), calc(var(--v-border-opacity) * .65)); }
+.pipeline-active-step > div { min-width: 0; display: grid; gap: 2px; }
+.pipeline-active-step strong { font-size: .8rem; }
+.pipeline-active-step span { display: -webkit-box; overflow: hidden; color: rgba(var(--v-theme-on-surface), .58); font-size: .71rem; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.pipeline-skipped { min-width: 0; display: flex; align-items: center; gap: 6px; color: rgba(var(--v-theme-on-surface), .43); font-size: .68rem; }
+.pipeline-skipped span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pipeline-stage-detail { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 7px 9px; border-radius: 8px; background: rgba(var(--v-theme-secondary), .055); font-size: .7rem; }
+.pipeline-stage-detail > span { color: rgba(var(--v-theme-on-surface), .5); }
+.pipeline-stage-detail code { overflow-wrap: anywhere; }
+.pipeline-custom-fields { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.pipeline-custom-fields > span { min-width: 0; display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border-radius: 7px; background: rgba(var(--v-theme-primary), .055); font-size: .68rem; }
+.pipeline-custom-fields strong { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pipeline-empty { min-height: 90px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 7px; color: rgba(var(--v-theme-on-surface), .45); font-size: .76rem; }
 .candidate-table { border-radius: 12px; border: 1px solid rgba(var(--v-theme-on-surface),.08); overflow: hidden; }
 .candidate-suppressed { opacity: .62; background: rgba(var(--v-theme-info),.035); }
 .context-evidence { margin-top: 2px; color: rgb(var(--v-theme-primary)); font-weight: 600; }
