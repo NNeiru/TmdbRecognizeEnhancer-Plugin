@@ -47,6 +47,11 @@ except ImportError:  # pragma: no cover - 旧版 MP 没有共享识别帮助类�
     MoviePilotServerHelper = None
 
 try:
+    from app.helper.notification import NotificationHelper
+except ImportError:  # pragma: no cover - 旧版 MP 不能枚举具体通知实例时保留基础通知能力。
+    NotificationHelper = None
+
+try:
     from app.schemas.types import EventType
 except ImportError:  # pragma: no cover - 仅用于兼容缺少异步事件枚举的旧版 MP。
     EventType = None
@@ -93,7 +98,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.9"
+    plugin_version = "0.8.10"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -221,6 +226,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             item["key"]: "notify" for item in FAILURE_CATEGORIES
         },
         "notification_episode_candidates_enabled": False,
+        "notification_candidate_service": "",
         "notification_candidate_channel": "",
         "notification_candidate_batch_enabled": True,
         "notification_candidate_batch_frequency": "monthly",
@@ -267,6 +273,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_record_limit",
         "notification_failure_policies",
         "notification_episode_candidates_enabled",
+        "notification_candidate_service",
         "notification_candidate_channel",
         "notification_candidate_batch_enabled",
         "notification_candidate_batch_frequency",
@@ -351,6 +358,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._notification_lock = threading.RLock()
         self._notification_recent_lock = threading.RLock()
         self._notification_recent: Dict[str, Dict[str, Any]] = {}
+        self._notification_outgoing_lock = threading.RLock()
+        self._notification_outgoing: Dict[str, float] = {}
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
         """加载配置并启停名称识别事件处理器。"""
@@ -2874,16 +2883,86 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self.save_data(self.DATA_KEY_NOTIFICATION_APPROVALS, value)
 
     def _notification_config_data(self) -> Dict[str, Any]:
-        return {
+        config = {
             key: deepcopy(self._config.get(key, self.DEFAULT_CONFIG.get(key)))
             for key in self.NOTIFICATION_CONFIG_KEYS
         }
+        target = self._notification_candidate_target()
+        if target and not config.get("notification_candidate_service"):
+            # 旧版只保存渠道类型；当该类型仅有一个可用实例时无歧义迁移到实例选择。
+            config["notification_candidate_service"] = target[1]
+        return config
+
+    @staticmethod
+    def _message_channel_for_notification_type(service_type: Any) -> Any:
+        """把 MP 通知模块类型转换为 MessageChannel。"""
+        if MessageChannel is None:
+            return None
+        normalized = re.sub(r"[^a-z0-9]+", "", str(service_type or "").lower())
+        channel_name = {
+            "wechat": "Wechat",
+            "feishu": "Feishu",
+            "wechatclawbot": "WechatClawBot",
+            "telegram": "Telegram",
+            "slack": "Slack",
+            "discord": "Discord",
+            "synologychat": "SynologyChat",
+            "vocechat": "VoceChat",
+            "voicechat": "VoceChat",
+            "webpush": "WebPush",
+            "qq": "QQ",
+            "qqbot": "QQ",
+        }.get(normalized)
+        return getattr(MessageChannel, channel_name, None) if channel_name else None
+
+    def _notification_service_options(self) -> List[Dict[str, Any]]:
+        """列出能接收 Plugin 通知的具体 MP 通知配置实例。"""
+        if NotificationHelper is None or NotificationType is None:
+            return []
+        try:
+            configs = NotificationHelper().get_configs()
+        except Exception as err:  # noqa: BLE001 - 通知配置读取失败不影响其它模块。
+            logger.warning(f"[媒体整理增强] 读取 MoviePilot 通知实例失败：{err}")
+            return []
+        plugin_type = str(getattr(NotificationType.Plugin, "value", NotificationType.Plugin))
+        options: List[Dict[str, Any]] = []
+        for name, conf in configs.items():
+            channel = self._message_channel_for_notification_type(
+                getattr(conf, "type", None)
+            )
+            if channel is None:
+                continue
+            switchs = {
+                str(getattr(value, "value", value))
+                for value in (getattr(conf, "switchs", None) or [])
+            }
+            accepts_plugin = plugin_type in switchs
+            options.append({
+                "title": f"{name} · {channel.value}",
+                "value": str(name),
+                "channel": channel.value,
+                "service_type": str(getattr(conf, "type", None) or ""),
+                "accepts_plugin": accepts_plugin,
+                "subtitle": (
+                    "可接收插件通知"
+                    if accepts_plugin else "尚未启用“插件”通知类型"
+                ),
+            })
+        return sorted(
+            options,
+            key=lambda item: (
+                not item["accepts_plugin"],
+                item["channel"].casefold(),
+                item["title"].casefold(),
+            ),
+        )
 
     def _notification_status_data(self) -> Dict[str, Any]:
         records = self._read_notification_records()
         policies = normalize_failure_policies(
             self._config.get("notification_failure_policies")
         )
+        notification_services = self._notification_service_options()
         return {
             "active": self._notification_active(),
             "config": self._notification_config_data(),
@@ -2905,11 +2984,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "suppressed": sum(1 for item in records if item.get("action") == "suppressed"),
                 "digest": summarize_digest(records).get("total", 0),
             },
-            "notification_channels": [
-                {"title": channel.value, "value": channel.value}
-                for channel in (list(MessageChannel) if MessageChannel is not None else [])
-                if channel.value not in ("Web", "WebAgent")
-            ],
+            "notification_services": notification_services,
+            # 旧前端字段保留一个版本，避免后端先更新时页面直接失去可选项。
+            "notification_channels": notification_services,
             "candidate_schedule": self._notification_candidate_schedule_status(),
             "takeover_note": (
                 "接管模式会用“插件”通知重新发送整理消息。请在 MoviePilot 通知渠道中"
@@ -2938,6 +3015,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             for key in self.NOTIFICATION_CONFIG_KEYS:
                 if key in submitted:
                     merged[key] = deepcopy(submitted[key])
+            if "notification_candidate_service" in submitted:
+                # 新前端已明确提交实例选择（包括主动清空），不再回落旧版渠道字段。
+                merged["notification_candidate_channel"] = ""
             self._config = self._normalize_config(merged)
             self.update_config(self._current_config())
         if (
@@ -3123,26 +3203,60 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """兼容旧调用：只返回已经匹配成功、可直接加入规则的候选。"""
         return self._notification_candidate_snapshot(quarter, options)["ready"]
 
-    def _notification_candidate_channel(self) -> Any:
-        """将保存的显示值还原为 MessageChannel；未选择时不广播。"""
-        if MessageChannel is None:
-            return None
-        configured = str(
+    def _notification_candidate_target(self) -> Optional[Tuple[Any, str]]:
+        """解析候选通知目标为“渠道枚举 + 具体配置实例名”。"""
+        configured_service = str(
+            self._config.get("notification_candidate_service") or ""
+        ).strip()
+        options = self._notification_service_options()
+        if configured_service:
+            selected = next(
+                (
+                    item for item in options
+                    if item["value"] == configured_service
+                    and item["accepts_plugin"]
+                ),
+                None,
+            )
+            if not selected:
+                return None
+            channel = next(
+                (
+                    item for item in MessageChannel
+                    if item.value == selected["channel"]
+                ),
+                None,
+            ) if MessageChannel is not None else None
+            return (channel, configured_service) if channel is not None else None
+
+        # 兼容 0.8.9：旧配置只保存渠道类型。仅在恰好存在一个同类可用实例时迁移，
+        # 多个 Telegram 等情况必须由用户明确选择，避免误发到所有实例。
+        legacy_channel = str(
             self._config.get("notification_candidate_channel") or ""
         ).strip()
-        if not configured:
+        matches = [
+            item for item in options
+            if item["channel"] == legacy_channel and item["accepts_plugin"]
+        ]
+        if len(matches) != 1 or MessageChannel is None:
             return None
-        return next(
-            (channel for channel in MessageChannel if channel.value == configured),
+        channel = next(
+            (item for item in MessageChannel if item.value == legacy_channel),
             None,
         )
+        return (channel, matches[0]["value"]) if channel is not None else None
+
+    def _notification_candidate_channel(self) -> Any:
+        """兼容旧内部调用，仅返回已选实例对应的渠道枚举。"""
+        target = self._notification_candidate_target()
+        return target[0] if target else None
 
     def _notification_candidate_delivery_active(self) -> bool:
         return bool(
             self._notification_active()
             and self._config.get("notification_plugin_enabled")
             and self._config.get("notification_episode_candidates_enabled")
-            and self._notification_candidate_channel() is not None
+            and self._notification_candidate_target() is not None
         )
 
     @staticmethod
@@ -3255,6 +3369,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
             ]]
         if len(candidates) > 8:
             preview += f"\n…另有 {len(candidates) - 8} 部"
+        target = self._notification_candidate_target()
+        if not target:
+            logger.warning("[媒体整理增强] 未选择可接收“插件”通知的候选专用实例")
+            return
         self._send_enhanced_notification(
             title=title,
             text=(
@@ -3263,7 +3381,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             ),
             source_notice={},
             buttons=buttons,
-            channel=self._notification_candidate_channel(),
+            channel=target[0],
+            service=target[1],
         )
 
     def _monitor_notification_candidates(self, quarter: str) -> None:
@@ -3398,11 +3517,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def send_notification_candidate_batch_api(
             self, payload: dict = Body(default={}),
     ) -> schemas.Response:
-        """立即生成一批，用于验证筛选和专用通知频道。"""
+        """立即生成一批，用于验证筛选和专用通知实例。"""
         if not self._notification_candidate_delivery_active():
             return schemas.Response(
                 success=False,
-                message="请先启用候选通知、允许插件发送，并选择专用通知频道",
+                message="请先启用候选通知、允许插件发送，并选择可接收“插件”消息的专用通知实例",
             )
         result = self._send_notification_candidate_batch(
             force=True,
@@ -3563,28 +3682,76 @@ class TmdbRecognizeEnhancer(_PluginBase):
             source_notice: Dict[str, Any],
             buttons: Optional[List[List[dict]]] = None,
             channel: Any = None,
+            service: str = "",
     ) -> None:
-        """统一使用 Plugin 类型发送，避免递归接管自身通知。"""
+        """统一使用 Plugin 类型发送；service 用于精确指定 MP 通知配置实例。"""
         if NotificationType is None:
             logger.warning("[媒体整理增强] 当前 MoviePilot 缺少 NotificationType，无法发送增强通知")
             return
-        kwargs: Dict[str, Any] = {
-            "source": "TmdbRecognizeEnhancer.Notification",
-        }
-        for key in ("image", "link", "userid", "username", "channel", "targets"):
+        kwargs: Dict[str, Any] = {}
+        for key in ("image", "link", "userid", "username", "targets"):
             if source_notice.get(key):
                 kwargs[key] = source_notice[key]
         if channel is not None:
             kwargs["channel"] = channel
+        if service:
+            kwargs["source"] = str(service)
         resolved_buttons = buttons if buttons is not None else source_notice.get("buttons")
         if resolved_buttons:
             kwargs["buttons"] = resolved_buttons
+        self._remember_outgoing_notification(title=title, text=text)
         self.post_message(
             mtype=NotificationType.Plugin,
             title=title,
             text=text,
             **kwargs,
         )
+
+    @staticmethod
+    def _notification_fingerprint(
+            *,
+            title: Any,
+            text: Any,
+            mtype: Any = None,
+    ) -> str:
+        type_value = str(getattr(mtype, "value", mtype) or "")
+        return hashlib.sha1(
+            f"{type_value}\0{str(title or '')}\0{str(text or '')}".encode(
+                "utf-8", errors="ignore",
+            )
+        ).hexdigest()
+
+    def _remember_outgoing_notification(self, *, title: str, text: str) -> None:
+        """短暂记录插件自发消息，避免 NoticeMessage 再次被通知增强接管。"""
+        fingerprint = self._notification_fingerprint(
+            title=title,
+            text=text,
+            mtype=NotificationType.Plugin if NotificationType is not None else "插件",
+        )
+        now = time.monotonic()
+        with self._notification_outgoing_lock:
+            self._notification_outgoing = {
+                key: expires
+                for key, expires in self._notification_outgoing.items()
+                if expires > now
+            }
+            self._notification_outgoing[fingerprint] = now + 30.0
+
+    def _is_outgoing_notification(self, notice: Dict[str, Any]) -> bool:
+        fingerprint = self._notification_fingerprint(
+            title=notice.get("title"),
+            text=notice.get("text"),
+            mtype=notice.get("mtype") or notice.get("type"),
+        )
+        now = time.monotonic()
+        with self._notification_outgoing_lock:
+            expires = self._notification_outgoing.get(fingerprint, 0)
+            self._notification_outgoing = {
+                key: deadline
+                for key, deadline in self._notification_outgoing.items()
+                if deadline > now
+            }
+        return expires > now
 
     def _remember_transfer_notice_context(
             self, data: Any, scene: str, event_kind: str = "",
@@ -3647,7 +3814,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not self._notification_active() or not event or not event.event_data:
             return
         notice = extract_notice(event.event_data)
-        if str(notice.get("source") or "").startswith("TmdbRecognizeEnhancer.Notification"):
+        if self._is_outgoing_notification(notice):
             return
         scene = notification_kind(notice)
         mode = str(self._config.get("notification_mode") or "observe")
@@ -3814,14 +3981,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "action": "add_group" if preference == "group_preferred" else "add_default",
             })
             message = result.message or "候选已加入"
+        target = self._notification_candidate_target()
         self._send_enhanced_notification(
             title="集数偏移候选处理完成",
             text=message,
             source_notice={
                 "userid": data.get("userid"),
-                "channel": data.get("channel"),
             },
-            channel=data.get("channel"),
+            channel=data.get("channel") or (target[0] if target else None),
+            service=str(data.get("source") or (target[1] if target else "")),
         )
 
     def _maybe_enqueue_strm_sync(self, data: Any) -> None:
@@ -7602,6 +7770,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged["notification_failure_policies"] = normalize_failure_policies(
             merged.get("notification_failure_policies")
         )
+        merged["notification_candidate_service"] = str(
+            merged.get("notification_candidate_service") or ""
+        ).strip()[:160]
         candidate_channel = str(
             merged.get("notification_candidate_channel") or ""
         ).strip()

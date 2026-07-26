@@ -23,6 +23,7 @@ const data = ref({
   records: [],
   record_counts: {},
   candidates: { ready: [], failed: [] },
+  notification_services: [],
   notification_channels: [],
   candidate_schedule: {},
 })
@@ -59,6 +60,18 @@ const records = computed(() => (data.value.records || []).filter(item => {
 }))
 const readyCandidates = computed(() => data.value.candidates?.ready || [])
 const failedCandidates = computed(() => data.value.candidates?.failed || [])
+const notificationServiceItems = computed(() => (
+  (data.value.notification_services || [])
+    .filter(item => item.accepts_plugin)
+    .map(item => ({
+      title: item.title,
+      value: item.value,
+      subtitle: item.subtitle,
+    }))
+))
+const unavailableNotificationServices = computed(() => (
+  (data.value.notification_services || []).filter(item => !item.accepts_plugin)
+))
 const allReadySelected = computed(() => (
   readyCandidates.value.length > 0
   && selectedReadyIds.value.length === readyCandidates.value.length
@@ -330,10 +343,10 @@ onMounted(async () => {
       </div>
       <div class="delivery-grid">
         <VSelect
-          v-model="config.notification_candidate_channel"
-          :items="data.notification_channels || []"
-          label="候选专用通知频道"
-          placeholder="请选择一个频道"
+          v-model="config.notification_candidate_service"
+          :items="notificationServiceItems"
+          label="候选专用通知实例"
+          placeholder="请选择具体通知实例"
           density="comfortable"
           variant="outlined"
           clearable
@@ -367,7 +380,18 @@ onMounted(async () => {
         </div>
       </div>
       <VAlert type="info" variant="tonal" density="compact" class="mt-3">
-        专用频道只发送集数偏移候选。请先在 MoviePilot 通知设置中配置该频道，并允许接收“插件”类型通知。
+        这里按 MoviePilot 的通知配置名称精确投递；即使有多个 Telegram，也只会发送到选中的实例。
+        请确保该实例已启用“插件”通知类型。
+      </VAlert>
+      <VAlert
+        v-if="unavailableNotificationServices.length"
+        type="warning"
+        variant="tonal"
+        density="compact"
+        class="mt-2"
+      >
+        {{ unavailableNotificationServices.map(item => item.title).join('、') }}
+        尚未启用“插件”通知类型，因此暂不可选择。
       </VAlert>
       <div class="candidate-controls">
         <VSelect v-model="selectedQuarter" :items="quarterItems" label="季度" density="comfortable" variant="outlined" hide-details @update:model-value="queryCandidates" />
