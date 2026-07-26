@@ -113,7 +113,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.19"
+    plugin_version = "0.8.20"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3640,9 +3640,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return {"inline_keyboard": keyboard}
 
     @staticmethod
-    def _inject_rich_message_media(markdown: str) -> str:
-        """把视觉媒体放到主标题之后，形成真正的 Rich Message 媒体块。"""
-        media_block = '![](tg://photo?id=candidate_cover "候选视觉")'
+    def _inject_rich_message_media(markdown: str, media_id: str) -> str:
+        """把视觉媒体放到主标题之后，不额外生成重复的图片标题。"""
+        media_block = f"![](tg://photo?id={media_id})"
         parts = markdown.split("\n\n", 1)
         if len(parts) == 2:
             return f"{parts[0]}\n\n{media_block}\n\n{parts[1]}"
@@ -3695,6 +3695,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
         image_handle = None
         image_value = str(image or "").strip()
         if image_value:
+            # InputRichMessageMedia.id 不只是 Markdown 引用名。Telegram 在编辑
+            # Rich Message 时会按该标识复用媒体块；若总览和详情始终使用同一
+            # 个 id，客户端可能继续显示总览拼图。让 id 随图片变化，强制
+            # 翻页时将媒体块替换为当前条目的单张海报。
+            media_id = (
+                "candidate_"
+                + hashlib.sha256(image_value.encode("utf-8")).hexdigest()[:20]
+            )
             local_path = None
             try:
                 path = Path(image_value)
@@ -3749,10 +3757,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 media_value = ""
             if media_value:
                 rich_message["markdown"] = self._inject_rich_message_media(
-                    markdown,
+                    markdown, media_id,
                 )
                 rich_message["media"] = [{
-                    "id": "candidate_cover",
+                    "id": media_id,
                     "media": {
                         "type": "photo",
                         "media": media_value,
@@ -4117,12 +4125,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
             f"# {'🎬' if candidate_type == 'ready' else '⚠️'} "
             f"{self._rich_markdown_escape(kind_text)}\n\n"
             f"{rich_notice}"
-            f"=={self._rich_markdown_escape(quarter)} · "
-            f"{len(pending)} 部待审批==\n\n"
-            f"**进度**　{handled} / {total}\n"
-            f"**分页**　{page_count} 页\n"
-            f"**来源**　{source_text}\n\n"
-            "> 可逐项查看海报并处理，也可使用下方按钮处理整批。"
+            f"## {self._rich_markdown_escape(quarter)} · "
+            f"{len(pending)} 部待审批\n\n"
+            f"进度 {handled}/{total}　·　{page_count} 页　·　{source_text}\n\n"
+            "> 查看详情可逐项处理，也可使用下方按钮处理整批。"
         )
         buttons = [[{
             "text": f"📋 查看详情 1/{page_count}",
@@ -4283,61 +4289,49 @@ class TmdbRecognizeEnhancer(_PluginBase):
             )
             if enabled
         ]
-        rich_status = (
-            f"TMDB {focus.get('tmdb_id') or '—'}"
-            if candidate_type == "ready"
-            else "等待重新扫描或人工补充"
+        status_text = (
+            "匹配完成" if candidate_type == "ready" else "扫描未通过"
         )
+        detail_rows = [
+            ("状态", f"{status_text} · 第 {page + 1}/{page_count} 页"),
+            ("TMDB", str(focus.get("tmdb_id") or "—")),
+        ]
+        if score is not None:
+            detail_rows.append(("匹配分", f"{score} 分"))
+        detail_rows.extend([
+            ("载体", platform),
+            ("开播日期", date_value),
+            ("集数", f"{episode_count} 集" if episode_count else "未提供"),
+        ])
+        if traits:
+            detail_rows.append(("作品特征", " · ".join(traits)))
+        if original_title:
+            detail_rows.append(("原名", original_title))
+        if candidate_type != "ready":
+            detail_rows.append((
+                "失败原因",
+                self._notification_candidate_text(
+                    focus.get("scan_error") or "未匹配到可信 TMDB 候选",
+                    100,
+                ),
+            ))
+        if notice:
+            detail_rows.append(("操作结果", notice))
+        detail_rows.append(("待处理", f"{len(pending)} 部"))
         rich_markdown_lines = [
             f"# {'🎞' if candidate_type == 'ready' else '🔎'} "
             f"{self._rich_markdown_escape(focus_title)}",
             "",
+            "| 项目 | 信息 |",
+            "|:--|:--|",
+            *[
+                (
+                    f"| {self._rich_markdown_escape(label)} | "
+                    f"{self._rich_markdown_escape(value)} |"
+                )
+                for label, value in detail_rows
+            ],
         ]
-        if notice:
-            rich_markdown_lines.extend([
-                f"> {self._rich_markdown_escape(notice)}",
-                "",
-            ])
-        rich_markdown_lines.extend([
-            (
-                f"=={'匹配完成' if candidate_type == 'ready' else '扫描未通过'}"
-                f" · 第 {page + 1}/{page_count} 页=="
-            ),
-            "",
-            f"**{self._rich_markdown_escape(rich_status)}**"
-            + (
-                f"　·　**{self._rich_markdown_escape(score)} 分**"
-                if score is not None else ""
-            ),
-            (
-                f"{self._rich_markdown_escape(platform)}　·　"
-                f"{self._rich_markdown_escape(date_value)}　·　"
-                f"{self._rich_markdown_escape(
-                    f'{episode_count} 集' if episode_count else '集数未提供'
-                )}"
-            ),
-        ])
-        if traits:
-            rich_markdown_lines.append(
-                f"=={self._rich_markdown_escape(' · '.join(traits))}=="
-            )
-        if original_title:
-            rich_markdown_lines.extend([
-                "",
-                f"> 原名：{self._rich_markdown_escape(original_title)}",
-            ])
-        if candidate_type != "ready":
-            rich_markdown_lines.extend([
-                "",
-                "> 原因："
-                f"{self._rich_markdown_escape(
-                    focus.get('scan_error') or '未匹配到可信 TMDB 候选'
-                )}",
-            ])
-        rich_markdown_lines.extend([
-            "",
-            f"*本批次尚待处理 {len(pending)} 部*",
-        ])
         rich_markdown = "\n".join(rich_markdown_lines)
 
         nav = []
