@@ -98,7 +98,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.10"
+    plugin_version = "0.8.11"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -2980,7 +2980,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "records": records,
             "record_counts": {
                 "total": len(records),
-                "notified": sum(1 for item in records if item.get("action") == "notified"),
+                "notified": sum(
+                    1 for item in records
+                    if item.get("action") in ("notified", "delivered")
+                ),
+                "submitted": sum(
+                    1 for item in records if item.get("action") == "notified"
+                ),
+                "delivered": sum(
+                    1 for item in records if item.get("action") == "delivered"
+                ),
+                "delivery_failed": sum(
+                    1 for item in records
+                    if item.get("action") == "delivery_failed"
+                ),
                 "suppressed": sum(1 for item in records if item.get("action") == "suppressed"),
                 "digest": summarize_digest(records).get("total", 0),
             },
@@ -3096,7 +3109,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def test_notification_enhancer_api(
             self, payload: dict = Body(default={}),
     ) -> schemas.Response:
-        """发送一条真实 Plugin 类型测试通知。"""
+        """向具体通知实例直发测试消息，并使用渠道回执判断是否送达。"""
         payload = payload or {}
         scene = str(payload.get("scene") or "success").strip().lower()
         if scene == "failure":
@@ -3107,15 +3120,44 @@ class TmdbRecognizeEnhancer(_PluginBase):
             category = {}
             title = "✅ 入库完成 · 通知增强测试"
             text = "测试媒体 S01E01\n这是一条测试消息，没有执行文件操作。"
-        self._send_enhanced_notification(
-            title=title, text=text, source_notice={},
+        target = self._notification_test_target()
+        if not target:
+            return schemas.Response(
+                success=False,
+                message=(
+                    "请选择候选专用通知实例；如果只有一个可用实例，"
+                    "请确认它已启用“插件”通知类型"
+                ),
+                data=self._notification_status_data(),
+            )
+        delivery = self._send_direct_test_notification(
+            title=title,
+            text=text,
+            channel=target[0],
+            service=target[1],
         )
         self._append_notification_record(build_record(
             scene=scene, title=title, text=text, category=category,
-            action="notified", source="test",
+            action="delivered" if delivery["success"] else "delivery_failed",
+            source=target[1],
+            details={
+                "channel": getattr(target[0], "value", str(target[0])),
+                "message_id": delivery.get("message_id"),
+                "chat_id": delivery.get("chat_id"),
+            },
         ))
+        if not delivery["success"]:
+            return schemas.Response(
+                success=False,
+                message=(
+                    f"通知实例“{target[1]}”未返回发送成功。"
+                    "请检查该 Telegram 的 Token、Chat ID 与 MoviePilot 日志"
+                ),
+                data=self._notification_status_data(),
+            )
         return schemas.Response(
-            success=True, message="测试消息已提交到“插件”通知渠道",
+            success=True,
+            message=f"通知实例“{target[1]}”已确认送达",
             data=self._notification_status_data(),
         )
 
@@ -3250,6 +3292,64 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """兼容旧内部调用，仅返回已选实例对应的渠道枚举。"""
         target = self._notification_candidate_target()
         return target[0] if target else None
+
+    def _notification_test_target(self) -> Optional[Tuple[Any, str]]:
+        """优先使用用户选择的实例；只有一个可用实例时允许免选择测试。"""
+        target = self._notification_candidate_target()
+        if target:
+            return target
+        available = [
+            item for item in self._notification_service_options()
+            if item.get("accepts_plugin")
+        ]
+        if len(available) != 1 or MessageChannel is None:
+            return None
+        channel = next(
+            (
+                item for item in MessageChannel
+                if item.value == available[0].get("channel")
+            ),
+            None,
+        )
+        return (channel, str(available[0]["value"])) if channel is not None else None
+
+    def _send_direct_test_notification(
+            self,
+            *,
+            title: str,
+            text: str,
+            channel: Any,
+            service: str,
+    ) -> Dict[str, Any]:
+        """绕过普通通知队列直发，以取得渠道提供的真实成功回执。"""
+        if NotificationType is None or not getattr(self, "chain", None):
+            return {"success": False}
+        notification_cls = getattr(schemas, "Notification", None)
+        if notification_cls is None:
+            return {"success": False}
+        try:
+            response = self.chain.send_direct_message(notification_cls(
+                channel=channel,
+                source=service,
+                mtype=NotificationType.Plugin,
+                title=title,
+                text=text,
+                save_history=False,
+            ))
+        except Exception as err:  # noqa: BLE001 - 测试失败需原样记录，不影响模块运行。
+            logger.error(f"[媒体整理增强] 通知实例 {service} 直发测试失败：{err}")
+            return {"success": False, "error": str(err)}
+        if isinstance(response, dict):
+            return {
+                "success": bool(response.get("success")),
+                "message_id": response.get("message_id"),
+                "chat_id": response.get("chat_id"),
+            }
+        return {
+            "success": bool(getattr(response, "success", False)),
+            "message_id": getattr(response, "message_id", None),
+            "chat_id": getattr(response, "chat_id", None),
+        }
 
     def _notification_candidate_delivery_active(self) -> bool:
         return bool(

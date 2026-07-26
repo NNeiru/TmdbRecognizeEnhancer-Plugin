@@ -45,6 +45,15 @@ const policyItems = [
   { title: '进入摘要', value: 'digest' },
   { title: '静默记录', value: 'silent' },
 ]
+const recordActionText = {
+  observed: '已观察',
+  notified: '已提交到 MP',
+  delivered: '渠道确认送达',
+  delivery_failed: '渠道发送失败',
+  suppressed: '已静默',
+  digest_pending: '等待摘要',
+  digest_sent: '摘要已提交',
+}
 const quarterItems = computed(() => {
   const values = []
   for (let year = now.getFullYear() + 1; year >= now.getFullYear() - 3; year -= 1) {
@@ -134,7 +143,7 @@ async function sendTest(scene) {
       `${props.pluginBase}/notification-enhancer/test`, { scene },
     ))
     data.value = { ...data.value, ...(next || {}) }
-    notice.value = '测试消息已提交，请检查已启用“插件”类型的通知渠道'
+    notice.value = '目标通知实例已返回发送成功'
   } catch (err) {
     error.value = err?.message || '测试消息发送失败'
   } finally {
@@ -460,7 +469,13 @@ onMounted(async () => {
       <button type="button" class="records-heading" @click="showRecords = !showRecords">
         <span>
           <strong>通知运行记录</strong>
-          <small>共 {{ data.record_counts?.total || 0 }} 条 · 已发送 {{ data.record_counts?.notified || 0 }} · 静默 {{ data.record_counts?.suppressed || 0 }} · 待摘要 {{ data.record_counts?.digest || 0 }}</small>
+          <small>
+            共 {{ data.record_counts?.total || 0 }} 条
+            · 渠道确认 {{ data.record_counts?.delivered || 0 }}
+            · 已提交 {{ data.record_counts?.submitted || 0 }}
+            · 静默 {{ data.record_counts?.suppressed || 0 }}
+            · 待摘要 {{ data.record_counts?.digest || 0 }}
+          </small>
         </span>
         <VIcon :icon="showRecords ? 'mdi-chevron-up' : 'mdi-chevron-down'" />
       </button>
@@ -483,10 +498,13 @@ onMounted(async () => {
           <div v-if="records.length" class="record-list">
             <article v-for="item in records" :key="item.id" class="record-item">
               <VIcon
-                :icon="item.scene === 'success' ? 'mdi-check-circle-outline' : item.action === 'suppressed' ? 'mdi-bell-off-outline' : 'mdi-alert-circle-outline'"
-                :color="item.scene === 'success' ? 'success' : item.action === 'suppressed' ? 'default' : 'warning'"
+                :icon="item.action === 'delivery_failed' ? 'mdi-send-alert-outline' : item.scene === 'success' ? 'mdi-check-circle-outline' : item.action === 'suppressed' ? 'mdi-bell-off-outline' : 'mdi-alert-circle-outline'"
+                :color="item.action === 'delivery_failed' ? 'error' : item.scene === 'success' ? 'success' : item.action === 'suppressed' ? 'default' : 'warning'"
               />
-              <div><strong>{{ item.title }}</strong><span>{{ item.created_at }} · {{ item.category?.label || '入库成功' }} · {{ item.action }}</span></div>
+              <div>
+                <strong>{{ item.title }}</strong>
+                <span>{{ item.created_at }} · {{ item.category?.label || '入库成功' }} · {{ recordActionText[item.action] || item.action }}</span>
+              </div>
               <VChip size="x-small" variant="tonal">{{ item.policy }}</VChip>
             </article>
           </div>
