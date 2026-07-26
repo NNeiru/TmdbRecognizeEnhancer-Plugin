@@ -113,7 +113,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.22"
+    plugin_version = "0.8.23"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3457,6 +3457,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             service: str,
             image: str = "",
             original_message_id: Optional[int] = None,
+            original_media_message_id: Optional[int] = None,
             original_chat_id: Optional[str] = None,
             force_reply: bool = False,
             userid: Optional[str] = None,
@@ -3502,6 +3503,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     buttons=buttons,
                     image=image,
                     original_message_id=original_message_id,
+                    original_media_message_id=original_media_message_id,
                     original_chat_id=original_chat_id,
                     userid=userid,
                 )
@@ -3692,125 +3694,104 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return f"{parts[0]}\n\n{media_block}\n\n{parts[1]}"
         return f"{markdown}\n\n{media_block}"
 
-    def _send_candidate_rich_telegram(
+    def _send_candidate_telegram_media(
             self,
             *,
-            instance: Any,
-            rich_markdown: str,
-            rich_blocks: Optional[List[Dict[str, Any]]] = None,
-            buttons: List[List[dict]],
-            image: str = "",
-            original_message_id: Optional[int] = None,
-            original_chat_id: Optional[str] = None,
-            userid: Optional[str] = None,
+            token: str,
+            chat_id: Any,
+            image: str,
+            original_media_message_id: Optional[int],
+            api_template: str,
+            proxies: Any,
     ) -> Dict[str, Any]:
-        """通过 Bot API 10.2 原生 Rich Message 发送或更新候选页。"""
-        token = str(getattr(instance, "_telegram_token", "") or "").strip()
-        determine_chat = getattr(instance, "_determine_target_chat_id", None)
-        if not token or not callable(determine_chat):
-            return {"success": False, "error": "Telegram 实例缺少 Token 或 Chat ID"}
-        try:
-            chat_id = determine_chat(userid, original_chat_id)
-        except Exception as err:  # noqa: BLE001 - 兼容第三方 Telegram 模块实现。
-            return {"success": False, "error": f"无法确定 Chat ID：{err}"}
-        if chat_id in (None, ""):
-            return {"success": False, "error": "Telegram Chat ID 为空"}
-
-        # 使用 Bot API 10.2 的原生 Rich Message 区块原地编辑。旧实现把图片
-        # 作为 Markdown 媒体引用，客户端可能复用旧媒体块，造成正文已翻页而
-        # 图片仍是总览拼图。blocks 会让标题、照片与表格作为一棵区块树替换。
-        method = "editMessageText" if original_message_id else "sendRichMessage"
-        api_template = "https://api.telegram.org/bot{0}/{1}"
-        try:
-            from telebot import apihelper
-
-            api_template = getattr(
-                apihelper,
-                "API_URL",
-                api_template,
-            )
-            api_url = str(api_template).format(token, method)
-            proxies = getattr(apihelper, "proxy", None)
-        except Exception:  # pragma: no cover - MP 正常 Telegram 环境必有 telebot。
-            api_url = f"https://api.telegram.org/bot{token}/{method}"
-            proxies = getattr(settings, "PROXY", None)
-
-        markdown = str(rich_markdown or "").strip()
-        blocks = deepcopy(rich_blocks) if rich_blocks else []
-        rich_message: Dict[str, Any] = (
-            {
-                "blocks": blocks,
-                "skip_entity_detection": True,
-            }
-            if blocks else {
-                "markdown": markdown,
-                "skip_entity_detection": True,
-            }
-        )
-        files = None
-        image_handle = None
+        """发送或原地替换候选视觉消息，不依赖 Rich Message 内嵌媒体。"""
         image_value = str(image or "").strip()
-        if image_value:
-            media_id = (
-                "candidate_"
-                + hashlib.sha256(image_value.encode("utf-8")).hexdigest()[:20]
-            )
-            local_path = None
-            try:
-                path = Path(image_value)
-                if path.is_file():
-                    local_path = path
-            except (OSError, ValueError):
-                local_path = None
-            if local_path:
-                image_handle = local_path.open("rb")
-                media_value = "attach://candidate_cover_file"
-                files = {
-                    "candidate_cover_file": (
-                        local_path.name,
-                        image_handle,
-                        "image/jpeg",
-                    ),
-                }
-            elif image_value.startswith(("https://", "http://")):
-                # 公网海报让 Telegram 直接拉取。对 editMessageText 使用 URL
-                # 可以避免 multipart 编辑时旧附件被客户端继续复用。
-                media_value = image_value
-            else:
-                media_value = ""
-            if media_value:
-                if blocks:
-                    photo_block = {
-                        "type": "photo",
-                        "photo": {
-                            "type": "photo",
-                            "media": media_value,
-                        },
-                    }
-                    insert_at = 1 if blocks and blocks[0].get("type") == "heading" else 0
-                    blocks.insert(insert_at, photo_block)
-                    rich_message["blocks"] = blocks
-                else:
-                    rich_message["markdown"] = self._inject_rich_message_media(
-                        markdown, media_id,
-                    )
-                    rich_message["media"] = [{
-                        "id": media_id,
-                        "media": {
-                            "type": "photo",
-                            "media": media_value,
-                        },
-                    }]
+        if not image_value:
+            return {
+                "success": True,
+                "message_id": original_media_message_id,
+            }
 
-        payload: Dict[str, Any] = {
-            "chat_id": chat_id,
-            "rich_message": rich_message,
-            "reply_markup": self._candidate_telegram_reply_markup(buttons),
-        }
-        if original_message_id:
-            payload["message_id"] = int(original_message_id)
+        local_path = None
+        try:
+            path = Path(image_value)
+            if path.is_file():
+                local_path = path
+        except (OSError, ValueError):
+            local_path = None
+
+        image_handle = None
+        files = None
+        media_value = image_value
+        attachment_key = (
+            "candidate_media_"
+            + hashlib.sha256(
+                f"{image_value}|{time.time_ns()}".encode("utf-8"),
+            ).hexdigest()[:16]
+        )
+        if local_path:
+            image_handle = local_path.open("rb")
+            media_value = f"attach://{attachment_key}"
+            files = {
+                attachment_key: (
+                    local_path.name,
+                    image_handle,
+                    "image/jpeg",
+                ),
+            }
+        elif image_value.startswith(("https://", "http://")):
+            # 由 MP 下载公网海报后上传给 Telegram，避免 TMDB/AniList CDN
+            # 防盗链或超时使 editMessageMedia 保留旧图。
+            content = self._fetch_candidate_poster(image_value)
+            if content:
+                prepared = BytesIO()
+                try:
+                    if Image is not None:
+                        with Image.open(BytesIO(content)) as source:
+                            source.convert("RGB").save(
+                                prepared,
+                                format="JPEG",
+                                quality=90,
+                            )
+                    else:
+                        prepared.write(content)
+                    prepared.seek(0)
+                    image_handle = prepared
+                    media_value = f"attach://{attachment_key}"
+                    files = {
+                        attachment_key: (
+                            "candidate-poster.jpg",
+                            image_handle,
+                            "image/jpeg",
+                        ),
+                    }
+                except Exception:  # noqa: BLE001 - 转换失败由 Telegram 拉取。
+                    prepared.close()
+                    image_handle = None
+                    media_value = image_value
+
+        method = (
+            "editMessageMedia"
+            if original_media_message_id
+            else "sendPhoto"
+        )
+        api_url = str(api_template).format(token, method)
+        if original_media_message_id:
+            payload: Dict[str, Any] = {
+                "chat_id": chat_id,
+                "message_id": int(original_media_message_id),
+                "media": {
+                    "type": "photo",
+                    "media": media_value,
+                },
+            }
+        else:
+            payload = {
+                "chat_id": chat_id,
+                "photo": media_value,
+            }
+
         response = None
-        requester = None
         try:
             requester = RequestUtils(
                 headers={
@@ -3836,7 +3817,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             else:
                 response = requester.post_res(api_url, json=payload)
             result = response.json() if response is not None else {}
-        except Exception as err:  # noqa: BLE001 - Rich API 异常由旧消息路径兜底。
+        except Exception as err:  # noqa: BLE001 - 调用方决定是否回退。
             return {"success": False, "error": str(err)}
         finally:
             if response is not None:
@@ -3858,6 +3839,128 @@ class TmdbRecognizeEnhancer(_PluginBase):
             }
         message = result.get("result")
         message = message if isinstance(message, dict) else {}
+        return {
+            "success": True,
+            "message_id": (
+                message.get("message_id")
+                or original_media_message_id
+            ),
+        }
+
+    def _send_candidate_rich_telegram(
+            self,
+            *,
+            instance: Any,
+            rich_markdown: str,
+            rich_blocks: Optional[List[Dict[str, Any]]] = None,
+            buttons: List[List[dict]],
+            image: str = "",
+            original_message_id: Optional[int] = None,
+            original_media_message_id: Optional[int] = None,
+            original_chat_id: Optional[str] = None,
+            userid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """通过 Bot API 10.2 原生 Rich Message 发送或更新候选页。"""
+        token = str(getattr(instance, "_telegram_token", "") or "").strip()
+        determine_chat = getattr(instance, "_determine_target_chat_id", None)
+        if not token or not callable(determine_chat):
+            return {"success": False, "error": "Telegram 实例缺少 Token 或 Chat ID"}
+        try:
+            chat_id = determine_chat(userid, original_chat_id)
+        except Exception as err:  # noqa: BLE001 - 兼容第三方 Telegram 模块实现。
+            return {"success": False, "error": f"无法确定 Chat ID：{err}"}
+        if chat_id in (None, ""):
+            return {"success": False, "error": "Telegram Chat ID 为空"}
+
+        # Rich Message 内嵌媒体在 Telegram 客户端会被旧页面缓存，即使
+        # editMessageText 已提交新的 photo block，详情仍可能显示总览拼图。
+        # 图片因此使用独立 Photo 消息，由 editMessageMedia 原地替换；下方
+        # Rich Message 仅承载标题、表格和按钮，由 editMessageText 原地更新。
+        method = "editMessageText" if original_message_id else "sendRichMessage"
+        api_template = "https://api.telegram.org/bot{0}/{1}"
+        try:
+            from telebot import apihelper
+
+            api_template = getattr(
+                apihelper,
+                "API_URL",
+                api_template,
+            )
+            api_url = str(api_template).format(token, method)
+            proxies = getattr(apihelper, "proxy", None)
+        except Exception:  # pragma: no cover - MP 正常 Telegram 环境必有 telebot。
+            api_url = f"https://api.telegram.org/bot{token}/{method}"
+            proxies = getattr(settings, "PROXY", None)
+
+        media_result = self._send_candidate_telegram_media(
+            token=token,
+            chat_id=chat_id,
+            image=image,
+            original_media_message_id=original_media_message_id,
+            api_template=api_template,
+            proxies=proxies,
+        )
+        if image and not media_result.get("success"):
+            return {
+                "success": False,
+                "error": (
+                    "Telegram 候选图片更新失败："
+                    f"{media_result.get('error') or '未知错误'}"
+                ),
+            }
+
+        markdown = str(rich_markdown or "").strip()
+        blocks = deepcopy(rich_blocks) if rich_blocks else []
+        rich_message: Dict[str, Any] = (
+            {
+                "blocks": blocks,
+                "skip_entity_detection": True,
+            }
+            if blocks else {
+                "markdown": markdown,
+                "skip_entity_detection": True,
+            }
+        )
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "rich_message": rich_message,
+            "reply_markup": self._candidate_telegram_reply_markup(buttons),
+        }
+        if original_message_id:
+            payload["message_id"] = int(original_message_id)
+        response = None
+        requester = None
+        try:
+            requester = RequestUtils(
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": str(getattr(settings, "USER_AGENT", "") or ""),
+                },
+                proxies=proxies,
+                timeout=20,
+            )
+            response = requester.post_res(api_url, json=payload)
+            result = response.json() if response is not None else {}
+        except Exception as err:  # noqa: BLE001 - Rich API 异常由旧消息路径兜底。
+            return {"success": False, "error": str(err)}
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+        if not isinstance(result, dict) or not result.get("ok"):
+            return {
+                "success": False,
+                "error": (
+                    result.get("description")
+                    if isinstance(result, dict)
+                    else "Telegram 未返回有效结果"
+                ),
+            }
+        message = result.get("result")
+        message = message if isinstance(message, dict) else {}
         result_chat = message.get("chat")
         result_chat = result_chat if isinstance(result_chat, dict) else {}
         result_chat_id = result_chat.get("id") or chat_id
@@ -3865,6 +3968,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "success": True,
             "rich_message": True,
             "message_id": message.get("message_id") or original_message_id,
+            "media_message_id": media_result.get("message_id"),
             "chat_id": result_chat_id,
         }
 
@@ -4640,6 +4744,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "preference": self._config.get("notification_candidate_preference"),
             "collage": collage,
             "message_id": (delivery or {}).get("message_id"),
+            "media_message_id": (delivery or {}).get("media_message_id"),
             "chat_id": (delivery or {}).get("chat_id"),
             "realtime": bool(realtime),
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -4651,6 +4756,32 @@ class TmdbRecognizeEnhancer(_PluginBase):
         ]
         self._save_notification_approvals(approvals)
         return batch_id
+
+    def _remember_notification_candidate_media_message(
+            self,
+            *,
+            batch_id: str,
+            batch: Dict[str, Any],
+            delivery: Dict[str, Any],
+    ) -> None:
+        """记录独立视觉消息 ID，并兼容升级前已创建的单消息批次。"""
+        media_message_id = self._safe_int(
+            delivery.get("media_message_id"), 0,
+        )
+        if not media_message_id or self._safe_int(
+                batch.get("media_message_id"), 0,
+        ) == media_message_id:
+            return
+        batch["media_message_id"] = media_message_id
+        approvals = self._read_notification_approvals()
+        batches = (
+            approvals.get("batches")
+            if isinstance(approvals.get("batches"), dict)
+            else {}
+        )
+        batches[batch_id] = batch
+        approvals["batches"] = batches
+        self._save_notification_approvals(approvals)
 
     @staticmethod
     def _new_notification_candidate_batch_id(
@@ -5200,7 +5331,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return
 
         if not tmdb_id:
-            self._send_candidate_instance_notification(
+            delivery = self._send_candidate_instance_notification(
                 title="TMDBID 格式不正确",
                 text="请输入纯数字 TMDBID。当前输入已取消，请在候选详情中重新点击“指定 TMDB”。",
                 buttons=[],
@@ -5252,7 +5383,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 batch_id=batch_id, batch=batch, notice=notice,
             )
         )
-        self._send_candidate_instance_notification(
+        delivery = self._send_candidate_instance_notification(
             title=view["title"],
             text=view["text"],
             buttons=view["buttons"],
@@ -5263,11 +5394,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
             channel=channel,
             service=service,
             original_message_id=payload.get("original_message_id"),
+            original_media_message_id=batch.get("media_message_id"),
             original_chat_id=payload.get("original_chat_id"),
             rich_markdown=view.get("rich_markdown", ""),
             rich_text=view.get("rich_text", ""),
             rich_blocks=view.get("rich_blocks"),
         )
+        if delivery.get("success"):
+            self._remember_notification_candidate_media_message(
+                batch_id=batch_id,
+                batch=batch,
+                delivery=delivery,
+            )
 
     @staticmethod
     def _notification_fingerprint(
@@ -5598,6 +5736,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     channel=channel,
                     service=service,
                     original_message_id=data.get("original_message_id"),
+                    original_media_message_id=batch.get("media_message_id"),
                     original_chat_id=data.get("original_chat_id"),
                     rich_markdown=view.get("rich_markdown", ""),
                     rich_text=view.get("rich_text", ""),
@@ -5615,7 +5754,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     batch_id=batch_id, batch=batch, page=page,
                 )
             )
-            self._send_candidate_instance_notification(
+            delivery = self._send_candidate_instance_notification(
                 title=view["title"],
                 text=view["text"],
                 buttons=view["buttons"],
@@ -5632,11 +5771,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 channel=channel,
                 service=service,
                 original_message_id=data.get("original_message_id"),
+                original_media_message_id=batch.get("media_message_id"),
                 original_chat_id=data.get("original_chat_id"),
                 rich_markdown=view.get("rich_markdown", ""),
                 rich_text=view.get("rich_text", ""),
                 rich_blocks=view.get("rich_blocks"),
             )
+            if delivery.get("success"):
+                self._remember_notification_candidate_media_message(
+                    batch_id=batch_id,
+                    batch=batch,
+                    delivery=delivery,
+                )
             return
 
         pending = self._notification_batch_pending_items(batch)
@@ -5662,6 +5808,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 channel=channel,
                 service=service,
                 original_message_id=data.get("original_message_id"),
+                original_media_message_id=batch.get("media_message_id"),
                 original_chat_id=data.get("original_chat_id"),
                 rich_markdown=view.get("rich_markdown", ""),
                 rich_text=view.get("rich_text", ""),
@@ -5738,6 +5885,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             channel=channel,
             service=service,
             original_message_id=data.get("original_message_id"),
+            original_media_message_id=batch.get("media_message_id"),
             original_chat_id=data.get("original_chat_id"),
             rich_markdown=view.get("rich_markdown", ""),
             rich_text=view.get("rich_text", ""),
@@ -5747,6 +5895,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
             logger.warning(
                 f"[媒体整理增强] 候选审批已执行，但 Telegram 原消息更新失败："
                 f"批次={batch_id}，动作={api_action}"
+            )
+        else:
+            self._remember_notification_candidate_media_message(
+                batch_id=batch_id,
+                batch=batch,
+                delivery=delivery,
             )
 
     def _maybe_enqueue_strm_sync(self, data: Any) -> None:

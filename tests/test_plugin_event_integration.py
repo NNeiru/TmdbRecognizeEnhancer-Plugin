@@ -2799,7 +2799,7 @@ def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
     plugin = _plugin_with_runtime(module, SimpleNamespace())
     image_path = tmp_path / "overview.jpg"
     image_path.write_bytes(b"jpeg")
-    captured = {}
+    captured = {"requests": []}
 
     class FakeResponse:
         def json(self):
@@ -2818,6 +2818,7 @@ def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
         def post_res(self, url, **kwargs):
             captured["url"] = url
             captured["request"] = kwargs
+            captured["requests"].append((url, kwargs))
             return FakeResponse()
 
     monkeypatch.setattr(module, "RequestUtils", FakeRequestUtils)
@@ -2840,15 +2841,22 @@ def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
     assert result["success"] is True
     assert result["rich_message"] is True
     assert captured["url"].endswith("/sendRichMessage")
-    rich_message = json.loads(captured["request"]["data"]["rich_message"])
-    reply_markup = json.loads(captured["request"]["data"]["reply_markup"])
-    media_id = rich_message["media"][0]["id"]
-    assert media_id.startswith("candidate_")
-    assert f"tg://photo?id={media_id}" in rich_message["markdown"]
-    assert "候选视觉" not in rich_message["markdown"]
-    assert rich_message["media"][0]["media"]["media"].startswith("attach://")
+    media_request = next(
+        kwargs for url, kwargs in captured["requests"]
+        if url.endswith("/sendPhoto")
+    )
+    rich_request = next(
+        kwargs for url, kwargs in captured["requests"]
+        if url.endswith("/sendRichMessage")
+    )
+    rich_message = rich_request["json"]["rich_message"]
+    reply_markup = rich_request["json"]["reply_markup"]
+    assert "media" not in rich_message
+    assert "![]" not in rich_message["markdown"]
     assert reply_markup["inline_keyboard"][0][0]["style"] == "success"
-    assert "candidate_cover_file" in captured["request"]["files"]
+    assert media_request["files"]
+    assert media_request["data"]["photo"].startswith("attach://")
+    assert result["media_message_id"] == 321
     assert captured["closed"] is True
 
 
@@ -2897,6 +2905,7 @@ def test_candidate_rich_telegram_edits_blocks_and_replaces_photo(monkeypatch):
             buttons=[],
             image=image,
             original_message_id=321,
+            original_media_message_id=320,
             original_chat_id="654",
         )
         assert result["success"] is True
@@ -2909,10 +2918,15 @@ def test_candidate_rich_telegram_edits_blocks_and_replaces_photo(monkeypatch):
     second = edits[1]["json"]["rich_message"]
     assert edits[0]["json"]["message_id"] == 321
     assert first["blocks"][0]["type"] == "heading"
-    assert first["blocks"][1]["type"] == "photo"
-    assert second["blocks"][1]["type"] == "photo"
-    assert first["blocks"][1]["photo"]["media"] == "https://image/collage.jpg"
-    assert second["blocks"][1]["photo"]["media"] == "https://image/poster.jpg"
+    assert len(first["blocks"]) == 1
+    assert len(second["blocks"]) == 1
+    media_edits = [
+        kwargs for url, kwargs in captured if url.endswith("/editMessageMedia")
+    ]
+    assert len(media_edits) == 2
+    assert media_edits[0]["json"]["media"]["media"] == "https://image/collage.jpg"
+    assert media_edits[1]["json"]["media"]["media"] == "https://image/poster.jpg"
+    assert media_edits[0]["json"]["message_id"] == 320
     assert not any(url.endswith("/deleteMessage") for url, _ in captured)
 
 
