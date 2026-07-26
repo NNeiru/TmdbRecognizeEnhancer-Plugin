@@ -113,7 +113,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.24"
+    plugin_version = "0.8.25"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3692,7 +3692,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self,
             image: str,
     ) -> Dict[str, Any]:
-        """读取真实图片并生成 Rich Message 原生图片区块上传附件。"""
+        """读取真实图片并生成 Rich Message 媒体上传附件。"""
         image_value = str(image or "").strip()
         if not image_value:
             return {"success": True, "digest": "", "files": None}
@@ -3738,10 +3738,17 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
         digest = hashlib.sha256(normalized).hexdigest()
         attachment_key = f"candidate_cover_{digest[:24]}"
+        # Bot API 10.2 会把 media id 暴露为 Markdown 中的 tg:// 引用。
+        # 即使来回切换到同一张海报，每次请求也使用不同 id，避免客户端按
+        # Rich Message 区块位置复用上一次渲染的组合图。
+        media_id = (
+            f"candidate_{digest[:20]}_{time.time_ns():x}"
+        )[:64]
         prepared.seek(0)
         return {
             "success": True,
             "digest": digest,
+            "media_id": media_id,
             "attachment_key": attachment_key,
             "media": f"attach://{attachment_key}",
             "files": {
@@ -3753,6 +3760,25 @@ class TmdbRecognizeEnhancer(_PluginBase):
             },
             "handle": prepared,
         }
+
+    @staticmethod
+    def _candidate_markdown_with_photo(
+            markdown: str,
+            media_id: str,
+    ) -> str:
+        """把显式上传媒体作为独立 Markdown 区块插入首个标题后。"""
+        content = str(markdown or "").strip()
+        photo_block = f"![](tg://photo?id={media_id})"
+        if not content:
+            return photo_block
+        lines = content.splitlines()
+        if lines and re.match(r"^\s{0,3}#{1,6}\s+", lines[0]):
+            tail = "\n".join(lines[1:]).lstrip()
+            return (
+                f"{lines[0].rstrip()}\n\n{photo_block}"
+                + (f"\n\n{tail}" if tail else "")
+            )
+        return f"{photo_block}\n\n{content}"
 
     @staticmethod
     def _telegram_rich_photo_identity(
@@ -3864,9 +3890,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if chat_id in (None, ""):
             return {"success": False, "error": "Telegram Chat ID 为空"}
 
-        # 图片与正文作为同一棵原生 Rich Message 区块树提交。所有图片都先由
-        # 插件读取并作为新附件上传，不让 Telegram 直接拉取远程 URL；编辑结果
-        # 还会核对 photo file_unique_id，避免把“文字更新成功”误判成“换图成功”。
+        # Bot API 10.2 起，图片通过 InputRichMessage.media 显式绑定到 Markdown
+        # 中唯一的 tg://photo?id= 引用。相比直接改 InputRichBlockPhoto，这能让
+        # 客户端明确识别“媒体引用已经变化”，同时保留 Markdown 原生表格。
+        # 图片仍由插件作为附件上传，不依赖第三方图床。
         method = "editMessageText" if original_message_id else "sendRichMessage"
         api_template = "https://api.telegram.org/bot{0}/{1}"
         try:
@@ -3894,6 +3921,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     f"{photo.get('error') or '未知错误'}"
                 ),
             }
+        legacy_blocks = deepcopy(blocks)
         if image:
             photo_block = {
                 "type": "photo",
@@ -3902,15 +3930,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "media": photo["media"],
                 },
             }
-            if blocks:
+            if legacy_blocks:
                 insert_at = (
                     1
-                    if blocks[0].get("type") == "heading"
+                    if legacy_blocks[0].get("type") == "heading"
                     else 0
                 )
-                blocks.insert(insert_at, photo_block)
+                legacy_blocks.insert(insert_at, photo_block)
             else:
-                blocks = [
+                legacy_blocks = [
                     {
                         "type": "heading",
                         "size": 2,
@@ -3922,27 +3950,47 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         "text": markdown,
                     },
                 ]
-        rich_message: Dict[str, Any] = (
-            {
-                "blocks": blocks,
-                "skip_entity_detection": True,
-            }
-            if blocks else {
-                "markdown": markdown,
-                "skip_entity_detection": True,
-            }
-        )
-        payload: Dict[str, Any] = {
-            "chat_id": chat_id,
-            "rich_message": rich_message,
-            "reply_markup": self._candidate_telegram_reply_markup(buttons),
-        }
-        if original_message_id:
-            payload["message_id"] = int(original_message_id)
+        rich_messages: List[Tuple[str, Dict[str, Any]]] = []
+        if image and markdown and photo.get("media_id"):
+            media_id = str(photo["media_id"])
+            rich_messages.append((
+                "markdown_media",
+                {
+                    "markdown": self._candidate_markdown_with_photo(
+                        markdown,
+                        media_id,
+                    ),
+                    "media": [{
+                        "id": media_id,
+                        "media": {
+                            "type": "photo",
+                            "media": photo["media"],
+                        },
+                    }],
+                    "skip_entity_detection": True,
+                },
+            ))
+        rich_messages.append((
+            "legacy_blocks" if legacy_blocks else "markdown",
+            (
+                {
+                    "blocks": legacy_blocks,
+                    "skip_entity_detection": True,
+                }
+                if legacy_blocks else {
+                    "markdown": markdown,
+                    "skip_entity_detection": True,
+                }
+            ),
+        ))
+
         response = None
         requester = None
         files = photo.get("files")
         image_handle = photo.get("handle")
+        result: Dict[str, Any] = {}
+        rich_mode = ""
+        errors: List[str] = []
         try:
             requester = RequestUtils(
                 headers={
@@ -3952,22 +4000,55 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 proxies=proxies,
                 timeout=20,
             )
-            if files:
-                response = requester.post_res(
-                    api_url,
-                    data={
-                        key: (
-                            json.dumps(value, ensure_ascii=False)
-                            if isinstance(value, (dict, list))
-                            else str(value)
-                        )
-                        for key, value in payload.items()
-                    },
-                    files=files,
+            for attempt, (mode, rich_message) in enumerate(rich_messages):
+                payload: Dict[str, Any] = {
+                    "chat_id": chat_id,
+                    "rich_message": rich_message,
+                    "reply_markup": self._candidate_telegram_reply_markup(
+                        buttons,
+                    ),
+                }
+                if original_message_id:
+                    payload["message_id"] = int(original_message_id)
+                if image_handle is not None:
+                    image_handle.seek(0)
+                if files:
+                    response = requester.post_res(
+                        api_url,
+                        data={
+                            key: (
+                                json.dumps(value, ensure_ascii=False)
+                                if isinstance(value, (dict, list))
+                                else str(value)
+                            )
+                            for key, value in payload.items()
+                        },
+                        files=files,
+                    )
+                else:
+                    response = requester.post_res(api_url, json=payload)
+                current = response.json() if response is not None else {}
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                response = None
+                if isinstance(current, dict) and current.get("ok"):
+                    result = current
+                    rich_mode = mode
+                    break
+                description = (
+                    current.get("description")
+                    if isinstance(current, dict)
+                    else "Telegram 未返回有效结果"
                 )
-            else:
-                response = requester.post_res(api_url, json=payload)
-            result = response.json() if response is not None else {}
+                errors.append(f"{mode}: {description}")
+                if attempt + 1 < len(rich_messages):
+                    logger.info(
+                        "[媒体整理增强] Telegram Rich Markdown 媒体"
+                        "不可用，回退图片区块格式："
+                        f"{description}"
+                    )
         except Exception as err:  # noqa: BLE001 - Rich API 异常由旧消息路径兜底。
             return {"success": False, "error": str(err)}
         finally:
@@ -3982,11 +4063,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not isinstance(result, dict) or not result.get("ok"):
             return {
                 "success": False,
-                "error": (
-                    result.get("description")
-                    if isinstance(result, dict)
-                    else "Telegram 未返回有效结果"
-                ),
+                "error": "；".join(errors) or "Telegram 未返回有效结果",
             }
         message = result.get("result")
         message = message if isinstance(message, dict) else {}
@@ -4023,7 +4100,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if image:
             logger.info(
                 "[媒体整理增强] Telegram Rich Message 图片已确认："
-                f"method={method} digest={image_digest[:12]} "
+                f"method={method} mode={rich_mode} "
+                f"digest={image_digest[:12]} "
                 f"file_unique_id={photo_unique_id}"
             )
 
@@ -4047,6 +4125,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "photo_file_id": photo_identity["file_id"],
             "photo_unique_id": photo_unique_id,
             "image_digest": image_digest,
+            "rich_media_mode": rich_mode,
             "chat_id": result_chat_id,
         }
 

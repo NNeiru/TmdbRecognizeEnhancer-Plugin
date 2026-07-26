@@ -2861,8 +2861,12 @@ def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
     )
     rich_message = json.loads(rich_request["data"]["rich_message"])
     reply_markup = json.loads(rich_request["data"]["reply_markup"])
-    assert rich_message["blocks"][1]["type"] == "photo"
-    assert rich_message["blocks"][1]["photo"]["media"].startswith("attach://")
+    assert rich_message["markdown"].startswith("# 候选\n\n![](tg://photo?id=")
+    assert len(rich_message["media"]) == 1
+    media = rich_message["media"][0]
+    assert media["id"] in rich_message["markdown"]
+    assert media["media"]["type"] == "photo"
+    assert media["media"]["media"].startswith("attach://")
     assert reply_markup["inline_keyboard"][0][0]["style"] == "success"
     assert rich_request["files"]
     assert not any(
@@ -2871,6 +2875,7 @@ def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
     assert result["media_message_id"] is None
     assert result["photo_unique_id"] == "photo-unique"
     assert result["image_digest"]
+    assert result["rich_media_mode"] == "markdown_media"
     assert captured["closed"] is True
 
 
@@ -2968,12 +2973,13 @@ def test_candidate_rich_telegram_edits_blocks_and_replaces_photo(monkeypatch):
     first = json.loads(edits[0]["data"]["rich_message"])
     second = json.loads(edits[1]["data"]["rich_message"])
     assert edits[0]["data"]["message_id"] == "321"
-    assert first["blocks"][0]["type"] == "heading"
-    assert first["blocks"][1]["type"] == "photo"
-    assert second["blocks"][1]["type"] == "photo"
-    assert first["blocks"][1]["photo"]["media"].startswith("attach://")
-    assert second["blocks"][1]["photo"]["media"].startswith("attach://")
-    assert first["blocks"][1]["photo"]["media"] != second["blocks"][1]["photo"]["media"]
+    assert first["markdown"].startswith("# 候选\n\n![](tg://photo?id=")
+    assert second["markdown"].startswith("# 候选\n\n![](tg://photo?id=")
+    assert first["media"][0]["id"] != second["media"][0]["id"]
+    assert first["media"][0]["id"] in first["markdown"]
+    assert second["media"][0]["id"] in second["markdown"]
+    assert first["media"][0]["media"]["media"].startswith("attach://")
+    assert second["media"][0]["media"]["media"].startswith("attach://")
     assert not any(
         url.endswith("/editMessageMedia") for url, _ in captured
     )
@@ -2981,6 +2987,84 @@ def test_candidate_rich_telegram_edits_blocks_and_replaces_photo(monkeypatch):
         1 for url, _ in captured if url.endswith("/deleteMessage")
     ) == 1
     assert second_result["photo_unique_id"] == "photo-unique-2"
+
+
+def test_candidate_rich_telegram_falls_back_when_media_field_is_unsupported(
+        monkeypatch, tmp_path,
+):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    image_path = tmp_path / "overview.jpg"
+    image_path.write_bytes(b"jpeg")
+    captured = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+        def close(self):
+            pass
+
+    class FakeRequestUtils:
+        def __init__(self, **kwargs):
+            pass
+
+        def post_res(self, url, **kwargs):
+            captured.append((url, kwargs))
+            rich_message = json.loads(kwargs["data"]["rich_message"])
+            if "media" in rich_message:
+                return FakeResponse({
+                    "ok": False,
+                    "description": "Bad Request: field media is unsupported",
+                })
+            return FakeResponse({
+                "ok": True,
+                "result": {
+                    "message_id": 321,
+                    "chat": {"id": 654},
+                    "rich_message": {
+                        "blocks": [{
+                            "type": "photo",
+                            "photo": [{
+                                "file_id": "legacy-file",
+                                "file_unique_id": "legacy-unique",
+                                "width": 1000,
+                                "height": 1500,
+                            }],
+                        }],
+                    },
+                },
+            })
+
+    monkeypatch.setattr(module, "RequestUtils", FakeRequestUtils)
+    instance = SimpleNamespace(
+        _telegram_token="secret-token",
+        _determine_target_chat_id=lambda userid, chat_id: chat_id or "123",
+    )
+
+    result = plugin._send_candidate_rich_telegram(
+        instance=instance,
+        rich_markdown="# 候选",
+        rich_blocks=[{
+            "type": "heading",
+            "size": 2,
+            "text": "候选",
+        }],
+        buttons=[],
+        image=str(image_path),
+    )
+
+    assert result["success"] is True
+    assert result["rich_media_mode"] == "legacy_blocks"
+    assert result["photo_unique_id"] == "legacy-unique"
+    assert len(captured) == 2
+    first = json.loads(captured[0][1]["data"]["rich_message"])
+    second = json.loads(captured[1][1]["data"]["rich_message"])
+    assert "media" in first
+    assert second["blocks"][1]["type"] == "photo"
 
 
 def test_candidate_rich_telegram_rejects_unchanged_photo_identity(monkeypatch):
