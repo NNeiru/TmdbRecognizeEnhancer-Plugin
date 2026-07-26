@@ -2805,7 +2805,21 @@ def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
         def json(self):
             return {
                 "ok": True,
-                "result": {"message_id": 321, "chat": {"id": 654}},
+                "result": {
+                    "message_id": 321,
+                    "chat": {"id": 654},
+                    "rich_message": {
+                        "blocks": [{
+                            "type": "photo",
+                            "photo": [{
+                                "file_id": "photo-file",
+                                "file_unique_id": "photo-unique",
+                                "width": 1000,
+                                "height": 1500,
+                            }],
+                        }],
+                    },
+                },
             }
 
         def close(self):
@@ -2841,22 +2855,22 @@ def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
     assert result["success"] is True
     assert result["rich_message"] is True
     assert captured["url"].endswith("/sendRichMessage")
-    media_request = next(
-        kwargs for url, kwargs in captured["requests"]
-        if url.endswith("/sendPhoto")
-    )
     rich_request = next(
         kwargs for url, kwargs in captured["requests"]
         if url.endswith("/sendRichMessage")
     )
-    rich_message = rich_request["json"]["rich_message"]
-    reply_markup = rich_request["json"]["reply_markup"]
-    assert "media" not in rich_message
-    assert "![]" not in rich_message["markdown"]
+    rich_message = json.loads(rich_request["data"]["rich_message"])
+    reply_markup = json.loads(rich_request["data"]["reply_markup"])
+    assert rich_message["blocks"][1]["type"] == "photo"
+    assert rich_message["blocks"][1]["photo"]["media"].startswith("attach://")
     assert reply_markup["inline_keyboard"][0][0]["style"] == "success"
-    assert media_request["files"]
-    assert media_request["data"]["photo"].startswith("attach://")
-    assert result["media_message_id"] == 321
+    assert rich_request["files"]
+    assert not any(
+        url.endswith("/sendPhoto") for url, _ in captured["requests"]
+    )
+    assert result["media_message_id"] is None
+    assert result["photo_unique_id"] == "photo-unique"
+    assert result["image_digest"]
     assert captured["closed"] is True
 
 
@@ -2881,53 +2895,154 @@ def test_candidate_rich_telegram_edits_blocks_and_replaces_photo(monkeypatch):
 
         def post_res(self, url, **kwargs):
             captured.append((url, kwargs))
+            if url.endswith("/deleteMessage"):
+                return FakeResponse({"ok": True, "result": True})
+            edit_count = sum(
+                1 for item_url, _ in captured
+                if item_url.endswith("/editMessageText")
+            )
             return FakeResponse({
                 "ok": True,
-                "result": {"message_id": 322, "chat": {"id": 654}},
+                "result": {
+                    "message_id": 322,
+                    "chat": {"id": 654},
+                    "rich_message": {
+                        "blocks": [{
+                            "type": "photo",
+                            "photo": [{
+                                "file_id": f"photo-file-{edit_count}",
+                                "file_unique_id": f"photo-unique-{edit_count}",
+                                "width": 1000,
+                                "height": 1500,
+                            }],
+                        }],
+                    },
+                },
             })
 
     monkeypatch.setattr(module, "RequestUtils", FakeRequestUtils)
-    plugin._fetch_candidate_poster = Mock(return_value=None)
+    plugin._fetch_candidate_poster = Mock(
+        side_effect=[b"collage-image", b"poster-image"],
+    )
     instance = SimpleNamespace(
         _telegram_token="secret-token",
         _determine_target_chat_id=lambda userid, chat_id: chat_id or "123",
     )
 
-    for image in ("https://image/collage.jpg", "https://image/poster.jpg"):
-        result = plugin._send_candidate_rich_telegram(
-            instance=instance,
-            rich_markdown="# 候选",
-            rich_blocks=[{
-                "type": "heading",
-                "size": 2,
-                "text": "候选",
-            }],
-            buttons=[],
-            image=image,
-            original_message_id=321,
-            original_media_message_id=320,
-            original_chat_id="654",
-        )
-        assert result["success"] is True
+    first_result = plugin._send_candidate_rich_telegram(
+        instance=instance,
+        rich_markdown="# 候选",
+        rich_blocks=[{
+            "type": "heading",
+            "size": 2,
+            "text": "候选",
+        }],
+        buttons=[],
+        image="https://image/collage.jpg",
+        original_message_id=321,
+        original_media_message_id=320,
+        original_chat_id="654",
+    )
+    assert first_result["success"] is True
+    second_result = plugin._send_candidate_rich_telegram(
+        instance=instance,
+        rich_markdown="# 候选",
+        rich_blocks=[{
+            "type": "heading",
+            "size": 2,
+            "text": "候选",
+        }],
+        buttons=[],
+        image="https://image/poster.jpg",
+        original_message_id=321,
+        original_photo_unique_id=first_result["photo_unique_id"],
+        original_image_digest=first_result["image_digest"],
+        original_chat_id="654",
+    )
+    assert second_result["success"] is True
 
     edits = [
         kwargs for url, kwargs in captured if url.endswith("/editMessageText")
     ]
     assert len(edits) == 2
-    first = edits[0]["json"]["rich_message"]
-    second = edits[1]["json"]["rich_message"]
-    assert edits[0]["json"]["message_id"] == 321
+    first = json.loads(edits[0]["data"]["rich_message"])
+    second = json.loads(edits[1]["data"]["rich_message"])
+    assert edits[0]["data"]["message_id"] == "321"
     assert first["blocks"][0]["type"] == "heading"
-    assert len(first["blocks"]) == 1
-    assert len(second["blocks"]) == 1
-    media_edits = [
-        kwargs for url, kwargs in captured if url.endswith("/editMessageMedia")
-    ]
-    assert len(media_edits) == 2
-    assert media_edits[0]["json"]["media"]["media"] == "https://image/collage.jpg"
-    assert media_edits[1]["json"]["media"]["media"] == "https://image/poster.jpg"
-    assert media_edits[0]["json"]["message_id"] == 320
-    assert not any(url.endswith("/deleteMessage") for url, _ in captured)
+    assert first["blocks"][1]["type"] == "photo"
+    assert second["blocks"][1]["type"] == "photo"
+    assert first["blocks"][1]["photo"]["media"].startswith("attach://")
+    assert second["blocks"][1]["photo"]["media"].startswith("attach://")
+    assert first["blocks"][1]["photo"]["media"] != second["blocks"][1]["photo"]["media"]
+    assert not any(
+        url.endswith("/editMessageMedia") for url, _ in captured
+    )
+    assert sum(
+        1 for url, _ in captured if url.endswith("/deleteMessage")
+    ) == 1
+    assert second_result["photo_unique_id"] == "photo-unique-2"
+
+
+def test_candidate_rich_telegram_rejects_unchanged_photo_identity(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+
+    class FakeResponse:
+        def json(self):
+            return {
+                "ok": True,
+                "result": {
+                    "message_id": 322,
+                    "chat": {"id": 654},
+                    "rich_message": {
+                        "blocks": [{
+                            "type": "photo",
+                            "photo": [{
+                                "file_id": "same-file",
+                                "file_unique_id": "same-photo",
+                                "width": 1000,
+                                "height": 1500,
+                            }],
+                        }],
+                    },
+                },
+            }
+
+        def close(self):
+            pass
+
+    class FakeRequestUtils:
+        def __init__(self, **kwargs):
+            pass
+
+        def post_res(self, url, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "RequestUtils", FakeRequestUtils)
+    plugin._fetch_candidate_poster = Mock(return_value=b"new-poster-image")
+    instance = SimpleNamespace(
+        _telegram_token="secret-token",
+        _determine_target_chat_id=lambda userid, chat_id: chat_id or "123",
+    )
+
+    result = plugin._send_candidate_rich_telegram(
+        instance=instance,
+        rich_markdown="# 候选",
+        rich_blocks=[{
+            "type": "heading",
+            "size": 2,
+            "text": "候选",
+        }],
+        buttons=[],
+        image="https://image/poster.jpg",
+        original_message_id=321,
+        original_photo_unique_id="same-photo",
+        original_image_digest="old-image-digest",
+        original_chat_id="654",
+    )
+
+    assert result["success"] is False
+    assert "旧的 RichBlockPhoto" in result["error"]
 
 
 def test_notification_candidate_collage_uses_local_versioned_endpoint(
