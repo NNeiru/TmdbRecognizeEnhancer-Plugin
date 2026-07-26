@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import html as html_utils
+import json
 import re
 import threading
 import time
@@ -112,7 +113,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.17"
+    plugin_version = "0.8.18"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3457,6 +3458,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             original_chat_id: Optional[str] = None,
             force_reply: bool = False,
             userid: Optional[str] = None,
+            rich_markdown: str = "",
             rich_text: str = "",
     ) -> Dict[str, Any]:
         """绕过 MP 定时队列，向具体通知实例立即发送候选交互消息。"""
@@ -3470,14 +3472,31 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not service_info or not getattr(service_info, "instance", None):
             return {"success": False, "error": "notification instance unavailable"}
 
-        # Telegram 的 MP direct-message 路径未传递 buttons；直接调用已选实例。
-        # 正文采用 Telegram HTML 富文本，避免 MarkdownV2 对番名标点的严格转义。
+        # Telegram 的 MP 包装器尚未支持 Bot API 10.2 Rich Message。
+        # 候选页优先直接调用 sendRichMessage/editMessageText；旧 API、旧本地
+        # Bot API Server 或旧消息编辑失败时，再回退到 MP 原有 HTML 消息。
         if (
                 MessageChannel is not None
                 and channel == getattr(MessageChannel, "Telegram", None)
                 and callable(getattr(service_info.instance, "send_msg", None))
         ):
             instance = service_info.instance
+            if rich_markdown and not force_reply:
+                rich_result = self._send_candidate_rich_telegram(
+                    instance=instance,
+                    rich_markdown=rich_markdown,
+                    buttons=buttons,
+                    image=image,
+                    original_message_id=original_message_id,
+                    original_chat_id=original_chat_id,
+                    userid=userid,
+                )
+                if rich_result.get("success"):
+                    return rich_result
+                logger.warning(
+                    "[媒体整理增强] Telegram Rich Message 发送失败，"
+                    f"已回退兼容消息：{rich_result.get('error') or '未知错误'}"
+                )
             local_image = None
             if image and original_message_id and original_chat_id:
                 try:
@@ -3567,6 +3586,197 @@ class TmdbRecognizeEnhancer(_PluginBase):
         except Exception as err:  # noqa: BLE001 - 渠道异常不能中断候选扫描。
             logger.error(f"[媒体整理增强] 通知实例 {service} 发送候选失败：{err}")
             return {"success": False, "error": str(err)}
+
+    @staticmethod
+    def _rich_markdown_escape(value: Any) -> str:
+        """转义来自 TMDB/AniList/用户输入的 Rich Markdown 行内文本。"""
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        for character in ("\\", "`", "*", "_", "[", "]", "<", ">", "|", "~"):
+            text = text.replace(character, f"\\{character}")
+        return text
+
+    @classmethod
+    def _rich_markdown_table_cell(cls, value: Any) -> str:
+        return cls._rich_markdown_escape(value).replace("\n", " ")
+
+    @staticmethod
+    def _candidate_telegram_reply_markup(
+            buttons: List[List[dict]],
+    ) -> Dict[str, Any]:
+        """生成原生 Bot API 键盘，保留新版彩色按钮属性。"""
+        keyboard: List[List[Dict[str, Any]]] = []
+        for row in buttons or []:
+            button_row: List[Dict[str, Any]] = []
+            for button in row:
+                item: Dict[str, Any] = {
+                    "text": str(button.get("text") or ""),
+                }
+                for key in (
+                        "url",
+                        "callback_data",
+                        "style",
+                        "icon_custom_emoji_id",
+                ):
+                    if button.get(key) not in (None, ""):
+                        item[key] = button[key]
+                button_row.append(item)
+            if button_row:
+                keyboard.append(button_row)
+        return {"inline_keyboard": keyboard}
+
+    @staticmethod
+    def _inject_rich_message_media(markdown: str) -> str:
+        """把视觉媒体放到主标题之后，形成真正的 Rich Message 媒体块。"""
+        media_block = '![](tg://photo?id=candidate_cover "候选视觉")'
+        parts = markdown.split("\n\n", 1)
+        if len(parts) == 2:
+            return f"{parts[0]}\n\n{media_block}\n\n{parts[1]}"
+        return f"{markdown}\n\n{media_block}"
+
+    def _send_candidate_rich_telegram(
+            self,
+            *,
+            instance: Any,
+            rich_markdown: str,
+            buttons: List[List[dict]],
+            image: str = "",
+            original_message_id: Optional[int] = None,
+            original_chat_id: Optional[str] = None,
+            userid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """通过 Bot API 10.2 原生 Rich Message 发送或更新候选页。"""
+        token = str(getattr(instance, "_telegram_token", "") or "").strip()
+        determine_chat = getattr(instance, "_determine_target_chat_id", None)
+        if not token or not callable(determine_chat):
+            return {"success": False, "error": "Telegram 实例缺少 Token 或 Chat ID"}
+        try:
+            chat_id = determine_chat(userid, original_chat_id)
+        except Exception as err:  # noqa: BLE001 - 兼容第三方 Telegram 模块实现。
+            return {"success": False, "error": f"无法确定 Chat ID：{err}"}
+        if chat_id in (None, ""):
+            return {"success": False, "error": "Telegram Chat ID 为空"}
+
+        method = "editMessageText" if original_message_id else "sendRichMessage"
+        try:
+            from telebot import apihelper
+
+            api_template = getattr(
+                apihelper,
+                "API_URL",
+                "https://api.telegram.org/bot{0}/{1}",
+            )
+            api_url = str(api_template).format(token, method)
+            proxies = getattr(apihelper, "proxy", None)
+        except Exception:  # pragma: no cover - MP 正常 Telegram 环境必有 telebot。
+            api_url = f"https://api.telegram.org/bot{token}/{method}"
+            proxies = getattr(settings, "PROXY", None)
+
+        markdown = str(rich_markdown or "").strip()
+        rich_message: Dict[str, Any] = {
+            "markdown": markdown,
+            "skip_entity_detection": True,
+        }
+        files = None
+        image_handle = None
+        image_value = str(image or "").strip()
+        if image_value:
+            local_path = None
+            try:
+                path = Path(image_value)
+                if path.is_file():
+                    local_path = path
+            except (OSError, ValueError):
+                local_path = None
+            if local_path:
+                image_handle = local_path.open("rb")
+                media_value = "attach://candidate_cover_file"
+                files = {
+                    "candidate_cover_file": (
+                        local_path.name,
+                        image_handle,
+                        "image/jpeg",
+                    ),
+                }
+            elif image_value.startswith(("https://", "http://")):
+                media_value = image_value
+            else:
+                media_value = ""
+            if media_value:
+                rich_message["markdown"] = self._inject_rich_message_media(
+                    markdown,
+                )
+                rich_message["media"] = [{
+                    "id": "candidate_cover",
+                    "media": {
+                        "type": "photo",
+                        "media": media_value,
+                    },
+                }]
+
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "rich_message": rich_message,
+            "reply_markup": self._candidate_telegram_reply_markup(buttons),
+        }
+        if original_message_id:
+            payload["message_id"] = int(original_message_id)
+
+        response = None
+        try:
+            requester = RequestUtils(
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": str(getattr(settings, "USER_AGENT", "") or ""),
+                },
+                proxies=proxies,
+                timeout=20,
+            )
+            if files:
+                response = requester.post_res(
+                    api_url,
+                    data={
+                        key: (
+                            json.dumps(value, ensure_ascii=False)
+                            if isinstance(value, (dict, list))
+                            else str(value)
+                        )
+                        for key, value in payload.items()
+                    },
+                    files=files,
+                )
+            else:
+                response = requester.post_res(api_url, json=payload)
+            result = response.json() if response is not None else {}
+        except Exception as err:  # noqa: BLE001 - Rich API 异常由旧消息路径兜底。
+            return {"success": False, "error": str(err)}
+        finally:
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            if image_handle is not None:
+                image_handle.close()
+
+        if not isinstance(result, dict) or not result.get("ok"):
+            return {
+                "success": False,
+                "error": (
+                    result.get("description")
+                    if isinstance(result, dict)
+                    else "Telegram 未返回有效结果"
+                ),
+            }
+        message = result.get("result")
+        message = message if isinstance(message, dict) else {}
+        result_chat = message.get("chat")
+        result_chat = result_chat if isinstance(result_chat, dict) else {}
+        return {
+            "success": True,
+            "rich_message": True,
+            "message_id": message.get("message_id") or original_message_id,
+            "chat_id": result_chat.get("id") or chat_id,
+        }
 
     @staticmethod
     def _build_candidate_telegram_keyboard(
@@ -3793,9 +4003,17 @@ class TmdbRecognizeEnhancer(_PluginBase):
         )
         if not pending:
             completed_text = notice or f"本批次 {total} 部候选均已处理。"
+            rich_completed = self._rich_markdown_escape(completed_text)
             return {
                 "title": f"批次处理完成 · {quarter}",
                 "text": completed_text,
+                "rich_markdown": (
+                    "# ✅ 批次处理完成\n\n"
+                    f"=={self._rich_markdown_escape(quarter)}==\n\n"
+                    "---\n\n"
+                    f"- [x] {rich_completed}\n"
+                    f"- [x] 共处理 **{total}** 部候选"
+                ),
                 "rich_text": (
                     f"<blockquote>{html_utils.escape(completed_text)}</blockquote>"
                 ),
@@ -3836,6 +4054,35 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "也可在总览直接处理整批。</blockquote>"
             ),
         ])
+        rich_notice = ""
+        if notice:
+            rich_notice = (
+                f"> {self._rich_markdown_escape(notice)}\n\n"
+            )
+        rich_markdown = (
+            f"# {'🎬' if candidate_type == 'ready' else '⚠️'} "
+            f"{self._rich_markdown_escape(kind_text)}\n\n"
+            f"{rich_notice}"
+            f"=={self._rich_markdown_escape(quarter)} · "
+            f"{len(pending)} 部待审批==\n\n"
+            "| 批次状态 | 数量 |\n"
+            "|:--|--:|\n"
+            f"| 尚待处理 | **{len(pending)}** |\n"
+            f"| 已处理 | {handled} / {total} |\n"
+            f"| 详情页 | {page_count} |\n\n"
+            "---\n\n"
+            f"- [{'x' if handled else ' '}] 已处理候选\n"
+            "- [ ] 逐项核对海报与 TMDB 信息\n"
+            f"- [ ] {'选择编集方式或忽略候选' if candidate_type == 'ready' else '重新扫描、人工指定 TMDB 或忽略'}\n\n"
+            "<details><summary>批次说明与操作提示</summary>\n\n"
+            f"- 来源：**{self._rich_markdown_escape(
+                '实时新增' if batch.get('realtime') else '计划批次'
+            )}**\n"
+            f"- 季度：`{self._rich_markdown_escape(quarter)}`\n"
+            "- 进入详情页后，每页只展示一个 TMDB 候选及其海报。\n"
+            "- 总览按钮可一次处理整批，详情按钮只处理当前条目。\n\n"
+            "</details>"
+        )
         buttons = [[{
             "text": f"📋 查看详情 1/{page_count}",
             "style": "primary",
@@ -3889,6 +4136,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return {
             "title": f"待审批 · {quarter} · {len(pending)} 部",
             "text": "\n".join(lines),
+            "rich_markdown": rich_markdown,
             "rich_text": "\n".join(rich_lines),
             "buttons": buttons,
             "image": str(batch.get("collage") or ""),
@@ -3975,6 +4223,108 @@ class TmdbRecognizeEnhancer(_PluginBase):
             f"<blockquote>第 <b>{page + 1}</b> / {page_count} 页"
             f"　·　尚待处理 <b>{len(pending)}</b> 部</blockquote>"
         )
+        focus = page_items[0]
+        focus_title = self._notification_candidate_text(
+            focus.get("title") or focus.get("original_title") or "未命名",
+            120,
+        )
+        original_title = self._notification_candidate_text(
+            focus.get("original_title"), 180,
+        )
+        score = focus.get("score")
+        platform = str(focus.get("platform") or "未知").replace("_", " ")
+        date_value = str(focus.get("date") or "未提供")
+        episode_count = self._safe_int(focus.get("episode_count"), 0)
+        traits = [
+            value for value, enabled in (
+                ("续作", focus.get("has_prequel")),
+                ("多季", focus.get("is_multi_season")),
+            )
+            if enabled
+        ]
+        rich_status = (
+            f"TMDB {focus.get('tmdb_id') or '—'}"
+            if candidate_type == "ready"
+            else "等待重新扫描或人工补充"
+        )
+        rich_markdown_lines = [
+            f"# {'🎞' if candidate_type == 'ready' else '🔎'} "
+            f"{self._rich_markdown_escape(focus_title)}",
+            "",
+        ]
+        if notice:
+            rich_markdown_lines.extend([
+                f"> {self._rich_markdown_escape(notice)}",
+                "",
+            ])
+        rich_markdown_lines.extend([
+            (
+                f"=={'匹配完成' if candidate_type == 'ready' else '扫描未通过'}"
+                f" · 第 {page + 1}/{page_count} 页=="
+            ),
+            "",
+            "| 项目 | 信息 |",
+            "|:--|:--|",
+            (
+                f"| 状态 | **{self._rich_markdown_table_cell(rich_status)}** |"
+            ),
+            (
+                f"| 匹配分 | "
+                f"{self._rich_markdown_table_cell(
+                    f'{score} 分' if score is not None else '—'
+                )} |"
+            ),
+            f"| 载体 | {self._rich_markdown_table_cell(platform)} |",
+            f"| 开播 | {self._rich_markdown_table_cell(date_value)} |",
+            (
+                f"| 集数 | "
+                f"{self._rich_markdown_table_cell(
+                    f'{episode_count} 集' if episode_count else '未提供'
+                )} |"
+            ),
+            (
+                f"| 特征 | "
+                f"{self._rich_markdown_table_cell(' · '.join(traits) or '普通条目')} |"
+            ),
+            "",
+            "---",
+            "",
+            "- [ ] 当前条目尚未处理",
+            (
+                "- [ ] 选择 **TMDB 默认编集**、**优先剧集组** 或忽略"
+                if candidate_type == "ready"
+                else "- [ ] 重新扫描、人工指定 TMDB 或忽略"
+            ),
+            "",
+            "<details><summary>匹配依据与原始信息</summary>",
+            "",
+        ])
+        if original_title:
+            rich_markdown_lines.append(
+                f"- 原始标题：{self._rich_markdown_escape(original_title)}"
+            )
+        if candidate_type == "ready":
+            rich_markdown_lines.extend([
+                f"- TMDB ID：`{focus.get('tmdb_id') or '—'}`",
+                (
+                    f"- 匹配得分：**{self._rich_markdown_escape(
+                        score if score is not None else '未提供'
+                    )}**"
+                ),
+            ])
+        else:
+            rich_markdown_lines.append(
+                "- 失败原因："
+                f"{self._rich_markdown_escape(
+                    focus.get('scan_error') or '未匹配到可信 TMDB 候选'
+                )}"
+            )
+        rich_markdown_lines.extend([
+            f"- 批次剩余：**{len(pending)}** 部",
+            "",
+            "</details>",
+        ])
+        rich_markdown = "\n".join(rich_markdown_lines)
 
         nav = []
         if page > 0:
@@ -4066,6 +4416,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 f" · {page + 1}/{page_count}"
             ),
             "text": "\n".join(lines),
+            "rich_markdown": rich_markdown,
             "rich_text": "\n".join(rich_lines),
             "buttons": buttons,
             "image": image,
@@ -4193,7 +4544,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
             buttons=view["buttons"],
             channel=target[0],
             service=target[1],
-            image=view["image"],
+            image=(
+                str(self._notification_collage_path(batch_id))
+                if self._notification_collage_path(batch_id).is_file()
+                else view["image"]
+            ),
+            rich_markdown=view.get("rich_markdown", ""),
             rich_text=view.get("rich_text", ""),
         )
         if not delivery.get("success"):
@@ -4742,6 +5098,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             service=service,
             original_message_id=payload.get("original_message_id"),
             original_chat_id=payload.get("original_chat_id"),
+            rich_markdown=view.get("rich_markdown", ""),
             rich_text=view.get("rich_text", ""),
         )
 
@@ -5075,6 +5432,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     service=service,
                     original_message_id=data.get("original_message_id"),
                     original_chat_id=data.get("original_chat_id"),
+                    rich_markdown=view.get("rich_markdown", ""),
                     rich_text=view.get("rich_text", ""),
                 )
             return
@@ -5107,6 +5465,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 service=service,
                 original_message_id=data.get("original_message_id"),
                 original_chat_id=data.get("original_chat_id"),
+                rich_markdown=view.get("rich_markdown", ""),
                 rich_text=view.get("rich_text", ""),
             )
             return
@@ -5135,6 +5494,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 service=service,
                 original_message_id=data.get("original_message_id"),
                 original_chat_id=data.get("original_chat_id"),
+                rich_markdown=view.get("rich_markdown", ""),
                 rich_text=view.get("rich_text", ""),
             )
             return
@@ -5209,6 +5569,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             service=service,
             original_message_id=data.get("original_message_id"),
             original_chat_id=data.get("original_chat_id"),
+            rich_markdown=view.get("rich_markdown", ""),
             rich_text=view.get("rich_text", ""),
         )
         if not delivery.get("success"):

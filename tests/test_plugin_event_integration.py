@@ -1,6 +1,7 @@
 """名称识别事件与 MP 运行时元数据的轻量接入测试。"""
 
 import importlib.util
+import json
 import sys
 from io import BytesIO
 from enum import Enum
@@ -2627,10 +2628,21 @@ def test_notification_candidate_batch_renders_summary_and_pages(monkeypatch):
 
     assert "7 部" in summary["title"]
     assert "共 7 页" in summary["text"]
+    assert summary["rich_markdown"].startswith("# 🎬 集数偏移候选")
+    assert "| 批次状态 | 数量 |" in summary["rich_markdown"]
+    assert "- [ ] 逐项核对海报与 TMDB 信息" in summary["rich_markdown"]
+    assert "<details><summary>批次说明与操作提示</summary>" in summary[
+        "rich_markdown"
+    ]
     assert "<blockquote>" in summary["rich_text"]
     assert summary["image"].endswith("collage.jpg")
     assert second_page["page_item_ids"] == ["anime:4"]
     assert "番剧 4" in second_page["text"]
+    assert second_page["rich_markdown"].startswith("# 🎞 番剧 4")
+    assert "| 项目 | 信息 |" in second_page["rich_markdown"]
+    assert "<details><summary>匹配依据与原始信息</summary>" in second_page[
+        "rich_markdown"
+    ]
     assert "<b>4. 番剧 4</b>" in second_page["rich_text"]
     assert second_page["image"].endswith("/4.jpg")
     assert any(
@@ -2740,7 +2752,65 @@ def test_notification_candidate_overview_restores_local_collage(
 
     sent = plugin._send_candidate_instance_notification.call_args.kwargs
     assert sent["image"] == str(collage_path)
+    assert sent["rich_markdown"].startswith("# 🎬 集数偏移候选")
     assert "<blockquote>" in sent["rich_text"]
+
+
+def test_candidate_rich_telegram_uses_bot_api_10_2_and_media(
+        monkeypatch, tmp_path,
+):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    image_path = tmp_path / "overview.jpg"
+    image_path.write_bytes(b"jpeg")
+    captured = {}
+
+    class FakeResponse:
+        def json(self):
+            return {
+                "ok": True,
+                "result": {"message_id": 321, "chat": {"id": 654}},
+            }
+
+        def close(self):
+            captured["closed"] = True
+
+    class FakeRequestUtils:
+        def __init__(self, **kwargs):
+            captured["request_options"] = kwargs
+
+        def post_res(self, url, **kwargs):
+            captured["url"] = url
+            captured["request"] = kwargs
+            return FakeResponse()
+
+    monkeypatch.setattr(module, "RequestUtils", FakeRequestUtils)
+    instance = SimpleNamespace(
+        _telegram_token="secret-token",
+        _determine_target_chat_id=lambda userid, chat_id: chat_id or "123",
+    )
+
+    result = plugin._send_candidate_rich_telegram(
+        instance=instance,
+        rich_markdown="# 候选\n\n| 状态 | 数量 |\n|:--|--:|\n| 待处理 | 1 |",
+        buttons=[[{
+            "text": "加入",
+            "callback_data": "callback",
+            "style": "success",
+        }]],
+        image=str(image_path),
+    )
+
+    assert result["success"] is True
+    assert result["rich_message"] is True
+    assert captured["url"].endswith("/sendRichMessage")
+    rich_message = json.loads(captured["request"]["data"]["rich_message"])
+    reply_markup = json.loads(captured["request"]["data"]["reply_markup"])
+    assert "tg://photo?id=candidate_cover" in rich_message["markdown"]
+    assert rich_message["media"][0]["media"]["media"].startswith("attach://")
+    assert reply_markup["inline_keyboard"][0][0]["style"] == "success"
+    assert "candidate_cover_file" in captured["request"]["files"]
+    assert captured["closed"] is True
 
 
 def test_notification_candidate_collage_uses_local_versioned_endpoint(
