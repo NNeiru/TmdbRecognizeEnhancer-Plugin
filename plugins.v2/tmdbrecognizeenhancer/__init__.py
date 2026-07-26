@@ -50,6 +50,11 @@ try:
 except ImportError:  # pragma: no cover - 仅用于兼容缺少异步事件枚举的旧版 MP。
     EventType = None
 
+try:
+    from app.schemas.types import NotificationType
+except ImportError:  # pragma: no cover - 旧版 MP 可继续记录，但不能重发增强通知。
+    NotificationType = None
+
 from .emby_episode_group_sync import EmbyEpisodeGroupSynchronizer
 from .anime_cross_id import AnimeCrossIdDatabase
 from .emby_media_info import build_sync_payload, is_acceptable as media_info_acceptable
@@ -57,6 +62,17 @@ from .episode_normalizer import EpisodeNormalizer
 from .media_probe import MediaFileProbe, StaticFfprobeProvisioner
 from .strm_media_info_sync import StrmMediaInfoSynchronizer
 from .metadata_tools import ReleaseGroupRegistry, RenameFieldRegistry
+from .notification_enhancer import (
+    FAILURE_CATEGORIES,
+    build_record,
+    classify_failure,
+    compact_records,
+    extract_notice,
+    extract_reason,
+    normalize_failure_policies,
+    notification_kind,
+    summarize_digest,
+)
 from .performance_diagnostics import PerformanceDiagnostics
 from .recognition_rules import FIELD_SPECS, RecognitionRuleRegistry
 from .release_group_arranger import ReleaseGroupArrangementRegistry
@@ -75,7 +91,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.7"
+    plugin_version = "0.8.8"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -93,6 +109,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
     DATA_KEY_RELEASE_GROUP_ARRANGEMENTS = "release_group_arrangements"
     DATA_KEY_EMBY_EPISODE_GROUP_JOBS = "emby_episode_group_jobs"
     DATA_KEY_STRM_MEDIA_INFO_JOBS = "strm_media_info_jobs"
+    DATA_KEY_NOTIFICATION_RECORDS = "notification_enhancer_records"
+    DATA_KEY_NOTIFICATION_APPROVALS = "notification_episode_approvals"
     # 季度目录匹配使用独立策略，不继承整理识别的 max_queries、降级开关等参数。
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
@@ -188,6 +206,23 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "strm_media_info_sync_retry_seconds": 30,
         "strm_media_info_sync_max_wait_minutes": 30,
         "strm_media_info_sync_path_mappings": [],
+        # 入库通知增强
+        "notification_enhancer_enabled": False,
+        "notification_mode": "observe",
+        "notification_success_enabled": True,
+        "notification_failure_enabled": True,
+        "notification_plugin_enabled": True,
+        "notification_include_paths": True,
+        "notification_passthrough_manual": True,
+        "notification_record_limit": 200,
+        "notification_failure_policies": {
+            item["key"]: "notify" for item in FAILURE_CATEGORIES
+        },
+        "notification_episode_candidates_enabled": False,
+        "notification_candidate_region": "japan",
+        "notification_candidate_platforms": ["TV", "TV SHORT"],
+        "notification_candidate_sequel_only": True,
+        "notification_candidate_preference": "group_preferred",
     }
 
     # 这组配置由集数偏移页的独立接口维护。主设置页可能长期保留旧快照，
@@ -211,6 +246,24 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "strm_media_info_sync_retry_seconds",
         "strm_media_info_sync_max_wait_minutes",
         "strm_media_info_sync_path_mappings",
+    )
+
+    # 通知页独立保存；主设置页的旧快照不能覆盖刚保存的接管策略。
+    NOTIFICATION_CONFIG_KEYS = (
+        "notification_enhancer_enabled",
+        "notification_mode",
+        "notification_success_enabled",
+        "notification_failure_enabled",
+        "notification_plugin_enabled",
+        "notification_include_paths",
+        "notification_passthrough_manual",
+        "notification_record_limit",
+        "notification_failure_policies",
+        "notification_episode_candidates_enabled",
+        "notification_candidate_region",
+        "notification_candidate_platforms",
+        "notification_candidate_sequel_only",
+        "notification_candidate_preference",
     )
 
     RENAME_SEPARATOR_FIELDS = {
@@ -283,6 +336,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._strm_sync_thread: Optional[threading.Thread] = None
         self._strm_sync_worker_error = ""
         self._strm_sync = StrmMediaInfoSynchronizer(self._get_emby_services)
+        self._notification_lock = threading.RLock()
+        self._notification_recent_lock = threading.RLock()
+        self._notification_recent: Dict[str, Dict[str, Any]] = {}
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
         """加载配置并启停名称识别事件处理器。"""
@@ -751,6 +807,55 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "summary": "试算命名阶段映射规则",
             },
             {
+                "path": "/notification-enhancer",
+                "endpoint": self.get_notification_enhancer_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取入库通知增强状态、记录与候选审批",
+            },
+            {
+                "path": "/notification-enhancer/config",
+                "endpoint": self.save_notification_enhancer_config_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "保存入库通知增强设置",
+            },
+            {
+                "path": "/notification-enhancer/test",
+                "endpoint": self.test_notification_enhancer_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "发送入库通知增强测试消息",
+            },
+            {
+                "path": "/notification-enhancer/records/clear",
+                "endpoint": self.clear_notification_records_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "清空入库通知记录",
+            },
+            {
+                "path": "/notification-enhancer/digest/send",
+                "endpoint": self.send_notification_digest_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "立即发送待汇总的入库失败摘要",
+            },
+            {
+                "path": "/notification-enhancer/candidates",
+                "endpoint": self.query_notification_candidates_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "查询季度集数规则审批候选",
+            },
+            {
+                "path": "/notification-enhancer/candidates/action",
+                "endpoint": self.action_notification_candidates_api,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "加入或忽略季度集数规则候选",
+            },
+            {
                 "path": "/diagnostics",
                 "endpoint": self.get_diagnostics_api,
                 "methods": ["GET"],
@@ -828,6 +933,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         "enabled": bool(self._config.get("strm_media_info_sync_enabled")),
                         "status": self._strm_sync_module_status(),
                         **self._strm_sync_counts(),
+                    },
+                    "notification_enhancer": {
+                        "enabled": bool(self._config.get("notification_enhancer_enabled")),
+                        "mode": self._config.get("notification_mode"),
+                        "status": (
+                            "已停用"
+                            if not self._config.get("notification_enhancer_enabled")
+                            else "仅记录"
+                            if self._config.get("notification_mode") == "observe"
+                            else "并行增强"
+                            if self._config.get("notification_mode") == "parallel"
+                            else "接管发送"
+                        ),
+                        "record_count": len(self._read_notification_records()),
                     },
                     "release_group_assist": {
                         "enabled": bool(self._config.get("release_group_assist_enabled")),
@@ -2494,6 +2613,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         item["scan_error"] = str(err)
                         updated = item
                     self._merge_catalog_scan_item(quarter, updated)
+            self._maybe_notify_episode_candidates(quarter)
         finally:
             with self._catalog_lock:
                 self._catalog_scans.discard(quarter)
@@ -2657,16 +2777,659 @@ class TmdbRecognizeEnhancer(_PluginBase):
             },
         )
 
+    # ------------------------------------------------------------------
+    # 入库通知增强
+    # ------------------------------------------------------------------
+
+    def _notification_active(self) -> bool:
+        return bool(
+            self.get_state()
+            and self._config.get("notification_enhancer_enabled")
+        )
+
+    def _read_notification_records(self) -> List[Dict[str, Any]]:
+        stored = self.get_data(self.DATA_KEY_NOTIFICATION_RECORDS) or []
+        return deepcopy(stored) if isinstance(stored, list) else []
+
+    def _append_notification_record(self, record: Dict[str, Any]) -> None:
+        with self._notification_lock:
+            records = [record, *self._read_notification_records()]
+            self.save_data(
+                self.DATA_KEY_NOTIFICATION_RECORDS,
+                compact_records(
+                    records,
+                    self._safe_int(self._config.get("notification_record_limit"), 200),
+                ),
+            )
+
+    def _read_notification_approvals(self) -> Dict[str, Any]:
+        stored = self.get_data(self.DATA_KEY_NOTIFICATION_APPROVALS) or {}
+        if not isinstance(stored, dict):
+            stored = {}
+        stored.setdefault("ignored", [])
+        stored.setdefault("notified", [])
+        stored.setdefault("batches", {})
+        return deepcopy(stored)
+
+    def _save_notification_approvals(self, value: Dict[str, Any]) -> None:
+        ignored = list(dict.fromkeys(str(item) for item in value.get("ignored") or []))[-1000:]
+        notified = list(dict.fromkeys(str(item) for item in value.get("notified") or []))[-1000:]
+        batches = value.get("batches") if isinstance(value.get("batches"), dict) else {}
+        value.update({
+            "ignored": ignored,
+            "notified": notified,
+            "batches": dict(list(batches.items())[-100:]),
+        })
+        self.save_data(self.DATA_KEY_NOTIFICATION_APPROVALS, value)
+
+    def _notification_config_data(self) -> Dict[str, Any]:
+        return {
+            key: deepcopy(self._config.get(key, self.DEFAULT_CONFIG.get(key)))
+            for key in self.NOTIFICATION_CONFIG_KEYS
+        }
+
+    def _notification_status_data(self) -> Dict[str, Any]:
+        records = self._read_notification_records()
+        policies = normalize_failure_policies(
+            self._config.get("notification_failure_policies")
+        )
+        return {
+            "active": self._notification_active(),
+            "config": self._notification_config_data(),
+            "failure_categories": [
+                {
+                    "key": item["key"],
+                    "label": item["label"],
+                    "description": item["description"],
+                    "icon": item["icon"],
+                    "policy": policies[item["key"]],
+                    "locked": item["key"] == "unknown",
+                }
+                for item in FAILURE_CATEGORIES
+            ],
+            "records": records,
+            "record_counts": {
+                "total": len(records),
+                "notified": sum(1 for item in records if item.get("action") == "notified"),
+                "suppressed": sum(1 for item in records if item.get("action") == "suppressed"),
+                "digest": summarize_digest(records).get("total", 0),
+            },
+            "takeover_note": (
+                "接管模式会用“插件”通知重新发送整理消息。请在 MoviePilot 通知渠道中"
+                "关闭原生“整理入库”；如需接管失败通知，再关闭“手动处理”。"
+            ),
+        }
+
+    def get_notification_enhancer_api(self) -> schemas.Response:
+        """获取通知模块配置、运行记录和当前季度候选。"""
+        data = self._notification_status_data()
+        data["candidates"] = self._notification_candidates(
+            self._current_quarter_key()
+        )
+        return schemas.Response(success=True, data=data)
+
+    def save_notification_enhancer_config_api(
+            self, payload: dict = Body(...),
+    ) -> schemas.Response:
+        """独立保存通知配置，避免其它页面旧快照覆盖。"""
+        submitted = dict(payload or {})
+        with self._config_lock:
+            merged = self._current_config()
+            for key in self.NOTIFICATION_CONFIG_KEYS:
+                if key in submitted:
+                    merged[key] = deepcopy(submitted[key])
+            self._config = self._normalize_config(merged)
+            self.update_config(self._current_config())
+        return schemas.Response(
+            success=True,
+            message="入库通知增强设置已保存",
+            data=self._notification_status_data(),
+        )
+
+    def clear_notification_records_api(self) -> schemas.Response:
+        self.save_data(self.DATA_KEY_NOTIFICATION_RECORDS, [])
+        return schemas.Response(
+            success=True, message="通知记录已清空",
+            data=self._notification_status_data(),
+        )
+
+    def send_notification_digest_api(self) -> schemas.Response:
+        """把当前待汇总失败压缩成一条通知，并标记为已发送。"""
+        if not self._config.get("notification_plugin_enabled"):
+            return schemas.Response(
+                success=False, message="请先启用“允许插件发送通知”",
+            )
+        with self._notification_lock:
+            records = self._read_notification_records()
+            pending = [
+                item for item in records
+                if item.get("policy") == "digest"
+                and item.get("action") == "digest_pending"
+            ]
+            if not pending:
+                return schemas.Response(
+                    success=True, message="当前没有待发送的失败摘要",
+                    data=self._notification_status_data(),
+                )
+            category_counts: Dict[str, int] = {}
+            for item in pending:
+                label = str((item.get("category") or {}).get("label") or "未分类异常")
+                category_counts[label] = category_counts.get(label, 0) + 1
+            lines = [
+                f"• {label}：{count} 条"
+                for label, count in sorted(
+                    category_counts.items(), key=lambda pair: pair[1], reverse=True,
+                )
+            ]
+            lines.extend(
+                f"\n{index}. {item.get('title')}"
+                for index, item in enumerate(pending[:8], 1)
+            )
+            if len(pending) > 8:
+                lines.append(f"\n…另有 {len(pending) - 8} 条")
+            self._send_enhanced_notification(
+                title=f"入库失败摘要 · {len(pending)} 条",
+                text="\n".join(lines),
+                source_notice={},
+            )
+            pending_ids = {str(item.get("id")) for item in pending}
+            for item in records:
+                if str(item.get("id")) in pending_ids:
+                    item["action"] = "digest_sent"
+            self.save_data(
+                self.DATA_KEY_NOTIFICATION_RECORDS,
+                compact_records(
+                    records,
+                    self._safe_int(self._config.get("notification_record_limit"), 200),
+                ),
+            )
+        return schemas.Response(
+            success=True, message=f"已发送 {len(pending)} 条失败摘要",
+            data=self._notification_status_data(),
+        )
+
+    def test_notification_enhancer_api(
+            self, payload: dict = Body(default={}),
+    ) -> schemas.Response:
+        """发送一条真实 Plugin 类型测试通知。"""
+        payload = payload or {}
+        scene = str(payload.get("scene") or "success").strip().lower()
+        if scene == "failure":
+            category = classify_failure("测试：目标目录权限不足")
+            title = f"⚠ 入库失败 · {category['label']}"
+            text = "测试媒体 S01E01\n原因：目标目录权限不足\n\n这是一条测试消息，没有执行文件操作。"
+        else:
+            category = {}
+            title = "✅ 入库完成 · 通知增强测试"
+            text = "测试媒体 S01E01\n这是一条测试消息，没有执行文件操作。"
+        self._send_enhanced_notification(
+            title=title, text=text, source_notice={},
+        )
+        self._append_notification_record(build_record(
+            scene=scene, title=title, text=text, category=category,
+            action="notified", source="test",
+        ))
+        return schemas.Response(
+            success=True, message="测试消息已提交到“插件”通知渠道",
+            data=self._notification_status_data(),
+        )
+
+    def _notification_candidates(
+            self,
+            quarter: str,
+            options: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """从已有季度看板筛出需要用户审批、且尚未维护的 TV 续作。"""
+        cached = self._read_season_catalog_cache().get(quarter) or {}
+        items = cached.get("items") if isinstance(cached, dict) else []
+        approvals = self._read_notification_approvals()
+        ignored = set(str(value) for value in approvals.get("ignored") or [])
+        maintained = {
+            self._safe_int(rule.get("tmdb_id"), 0)
+            for rule in self._read_episode_rules()
+        }
+        options = options if isinstance(options, dict) else {}
+        region = str(
+            options.get("region")
+            or self._config.get("notification_candidate_region")
+            or "japan"
+        )
+        platforms = set(
+            str(value).strip().upper()
+            for value in (
+                options.get("platforms")
+                or self._config.get("notification_candidate_platforms")
+                or []
+            )
+        )
+        sequel_only = (
+            bool(options.get("sequel_only"))
+            if options.get("sequel_only") is not None
+            else bool(self._config.get("notification_candidate_sequel_only"))
+        )
+        candidates: List[Dict[str, Any]] = []
+        for item in items or []:
+            item_id = str(item.get("id") or "")
+            match = item.get("tmdb_match") or {}
+            best = match.get("best") or {}
+            tmdb_id = self._safe_int(best.get("tmdb_id"), 0)
+            if not item_id or item_id in ignored or not match.get("accepted") or not tmdb_id:
+                continue
+            if tmdb_id in maintained:
+                continue
+            if region != "all" and str(item.get("region") or "") != region:
+                continue
+            if platforms and str(item.get("platform") or "").strip().upper() not in platforms:
+                continue
+            if (
+                    sequel_only
+                    and not (item.get("has_prequel") or item.get("is_multi_season"))
+            ):
+                continue
+            candidates.append({
+                "id": item_id,
+                "quarter": quarter,
+                "title": item.get("display_name") or item.get("name_cn") or item.get("name"),
+                "original_title": item.get("name") or "",
+                "tmdb_id": tmdb_id,
+                "poster": item.get("poster") or "",
+                "platform": item.get("platform") or "",
+                "region": item.get("region") or "",
+                "has_prequel": bool(item.get("has_prequel")),
+                "is_multi_season": bool(item.get("is_multi_season")),
+                "score": best.get("score"),
+            })
+        return candidates
+
+    def _maybe_notify_episode_candidates(self, quarter: str) -> None:
+        """季度扫描完成后，只为首次出现的新候选发送一条可审批通知。"""
+        if not (
+                self._notification_active()
+                and self._config.get("notification_plugin_enabled")
+                and self._config.get("notification_episode_candidates_enabled")
+                and self._config.get("notification_mode") in ("parallel", "takeover")
+        ):
+            return
+        candidates = self._notification_candidates(quarter)
+        if not candidates:
+            return
+        approvals = self._read_notification_approvals()
+        notified = set(str(value) for value in approvals.get("notified") or [])
+        fresh = [item for item in candidates if str(item.get("id")) not in notified]
+        if not fresh:
+            return
+        item_ids = [str(item.get("id")) for item in fresh]
+        batch_id = hashlib.sha1(
+            f"{quarter}|{'|'.join(item_ids)}".encode("utf-8", errors="ignore")
+        ).hexdigest()[:12]
+        batches = approvals.get("batches") if isinstance(approvals.get("batches"), dict) else {}
+        batches[batch_id] = {
+            "quarter": quarter,
+            "item_ids": item_ids,
+            "preference": self._config.get("notification_candidate_preference"),
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        approvals["batches"] = batches
+        approvals["notified"] = [*(approvals.get("notified") or []), *item_ids]
+        self._save_notification_approvals(approvals)
+        preview = "\n".join(
+            f"• {item.get('title')} · TMDB {item.get('tmdb_id')}"
+            for item in fresh[:8]
+        )
+        if len(fresh) > 8:
+            preview += f"\n…另有 {len(fresh) - 8} 部"
+        plugin_id = self.__class__.__name__
+        self._send_enhanced_notification(
+            title=f"待审批：{quarter} 集数偏移候选 {len(fresh)} 部",
+            text=(
+                f"{preview}\n\n默认目标："
+                f"{'优先剧集组' if self._config.get('notification_candidate_preference') == 'group_preferred' else 'TMDB 默认编集'}"
+            ),
+            source_notice={},
+            buttons=[[
+                {
+                    "text": "按推荐批量加入",
+                    "callback_data": f"[PLUGIN]{plugin_id}|notify-candidates:approve:{batch_id}",
+                },
+                {
+                    "text": "忽略本批",
+                    "callback_data": f"[PLUGIN]{plugin_id}|notify-candidates:ignore:{batch_id}",
+                },
+            ]],
+        )
+
+    def query_notification_candidates_api(
+            self, payload: dict = Body(default={}),
+    ) -> schemas.Response:
+        quarter = str((payload or {}).get("quarter") or self._current_quarter_key())
+        if not re.fullmatch(r"\d{4}-Q[1-4]", quarter):
+            return schemas.Response(success=False, message="季度格式应为 2026-Q3")
+        return schemas.Response(
+            success=True,
+            data={
+                "quarter": quarter,
+                "items": self._notification_candidates(quarter, {
+                    "region": (payload or {}).get("region"),
+                    "platforms": (payload or {}).get("platforms"),
+                    "sequel_only": (payload or {}).get("sequel_only"),
+                }),
+            },
+        )
+
+    def action_notification_candidates_api(
+            self, payload: dict = Body(...),
+    ) -> schemas.Response:
+        """批量加入或忽略当前季度候选。"""
+        payload = payload or {}
+        quarter = str(payload.get("quarter") or self._current_quarter_key())
+        action = str(payload.get("action") or "").strip().lower()
+        item_ids = list(dict.fromkeys(
+            str(value) for value in payload.get("item_ids") or [] if str(value)
+        ))
+        if not item_ids:
+            return schemas.Response(success=False, message="请选择至少一个候选")
+        candidate_options = {
+            "region": payload.get("region"),
+            "platforms": payload.get("platforms"),
+            "sequel_only": payload.get("sequel_only"),
+        }
+        if action == "ignore":
+            approvals = self._read_notification_approvals()
+            approvals["ignored"] = [*(approvals.get("ignored") or []), *item_ids]
+            self._save_notification_approvals(approvals)
+            return schemas.Response(
+                success=True, message=f"已忽略 {len(item_ids)} 条候选",
+                data={
+                    "quarter": quarter,
+                    "items": self._notification_candidates(quarter, candidate_options),
+                },
+            )
+        if action not in ("add_default", "add_group"):
+            return schemas.Response(success=False, message="不支持的审批动作")
+        cached = self._read_season_catalog_cache().get(quarter) or {}
+        catalog = cached.get("items") if isinstance(cached, dict) else []
+        index = {str(item.get("id")): item for item in catalog or []}
+        preference = "group_preferred" if action == "add_group" else "default"
+        rules = self._read_episode_rules()
+        added, failed = [], []
+        for item_id in item_ids:
+            item = index.get(item_id)
+            if not item:
+                failed.append({"id": item_id, "reason": "季度缓存中不存在"})
+                continue
+            try:
+                added.append(self._add_catalog_item_to_rules(item, preference, rules))
+            except Exception as err:  # noqa: BLE001 - 批量审批逐条报告
+                failed.append({"id": item_id, "reason": str(err)})
+        if added:
+            self.save_data(self.DATA_KEY_EPISODE_RULES, rules)
+        return schemas.Response(
+            success=True,
+            message=f"已加入 {len(added)} 条，失败 {len(failed)} 条",
+            data={
+                "quarter": quarter,
+                "added": added,
+                "failed": failed,
+                "items": self._notification_candidates(quarter, candidate_options),
+            },
+        )
+
+    def _send_enhanced_notification(
+            self,
+            *,
+            title: str,
+            text: str,
+            source_notice: Dict[str, Any],
+            buttons: Optional[List[List[dict]]] = None,
+    ) -> None:
+        """统一使用 Plugin 类型发送，避免递归接管自身通知。"""
+        if NotificationType is None:
+            logger.warning("[媒体整理增强] 当前 MoviePilot 缺少 NotificationType，无法发送增强通知")
+            return
+        kwargs: Dict[str, Any] = {
+            "source": "TmdbRecognizeEnhancer.Notification",
+        }
+        for key in ("image", "link", "userid", "username", "channel", "targets"):
+            if source_notice.get(key):
+                kwargs[key] = source_notice[key]
+        resolved_buttons = buttons if buttons is not None else source_notice.get("buttons")
+        if resolved_buttons:
+            kwargs["buttons"] = resolved_buttons
+        self.post_message(
+            mtype=NotificationType.Plugin,
+            title=title,
+            text=text,
+            **kwargs,
+        )
+
+    def _remember_transfer_notice_context(
+            self, data: Any, scene: str, event_kind: str = "",
+    ) -> None:
+        """短暂保留结构化整理事件，补齐随后 NoticeMessage 缺失的路径。"""
+        fileitem = self._event_get(data, "fileitem")
+        transferinfo = self._event_get(data, "transferinfo")
+        mediainfo = self._event_get(data, "mediainfo")
+        target_item = self._event_get(transferinfo, "target_item")
+        source_path = str(self._event_get(fileitem, "path") or "")
+        target_path = str(self._event_get(target_item, "path") or "")
+        title = str(
+            self._event_get(mediainfo, "title_year")
+            or self._event_get(mediainfo, "title")
+            or Path(source_path).name
+            or "未命名媒体"
+        )
+        context = {
+            "scene": scene,
+            "title": title,
+            "source_path": source_path,
+            "target_path": target_path,
+            "reason": str(self._event_get(transferinfo, "message") or ""),
+            "history_id": self._event_get(data, "transfer_history_id"),
+            "event_kind": event_kind,
+            "created_ts": time.time(),
+        }
+        with self._notification_recent_lock:
+            self._notification_recent[f"{scene}:{time.time_ns()}"] = context
+            self._notification_recent = {
+                key: value for key, value in self._notification_recent.items()
+                if time.time() - self._safe_float(value.get("created_ts"), 0) < 180
+            }
+
+    def _recent_transfer_context(
+            self, scene: str, notice_title: str = "",
+    ) -> Dict[str, Any]:
+        with self._notification_recent_lock:
+            matches = [
+                value for value in self._notification_recent.values()
+                if value.get("scene") == scene
+                and time.time() - self._safe_float(value.get("created_ts"), 0) < 180
+            ]
+        if not matches:
+            return {}
+        title_key = self._normalize_text(notice_title)
+        if title_key:
+            correlated = [
+                value for value in matches
+                if (
+                    self._normalize_text(value.get("title")) in title_key
+                    or title_key in self._normalize_text(value.get("title"))
+                )
+            ]
+            if correlated:
+                matches = correlated
+        return max(matches, key=lambda value: value.get("created_ts") or 0)
+
+    def _handle_notice_message(self, event: Event) -> None:
+        if not self._notification_active() or not event or not event.event_data:
+            return
+        notice = extract_notice(event.event_data)
+        if str(notice.get("source") or "").startswith("TmdbRecognizeEnhancer.Notification"):
+            return
+        scene = notification_kind(notice)
+        mode = str(self._config.get("notification_mode") or "observe")
+        if scene == "other":
+            # 接管“手动处理”渠道时回送非整理类消息，避免用户为屏蔽原生失败通知
+            # 而意外丢失其它人工干预消息。
+            mtype = str(getattr(notice.get("mtype") or notice.get("type"), "value", notice.get("mtype") or notice.get("type") or ""))
+            if (
+                    mode == "takeover"
+                    and self._config.get("notification_plugin_enabled")
+                    and self._config.get("notification_passthrough_manual")
+                    and mtype == "手动处理"
+            ):
+                self._send_enhanced_notification(
+                    title=str(notice.get("title") or "手动处理"),
+                    text=str(notice.get("text") or ""),
+                    source_notice=notice,
+                )
+            return
+        if scene == "success" and not self._config.get("notification_success_enabled"):
+            return
+        if scene == "failure" and not self._config.get("notification_failure_enabled"):
+            return
+        title = str(notice.get("title") or ("入库完成" if scene == "success" else "入库失败"))
+        original_text = str(notice.get("text") or "")
+        context = self._recent_transfer_context(scene, title)
+        category: Dict[str, Any] = {}
+        policy = "notify"
+        if scene == "failure":
+            reason = context.get("reason") or extract_reason(original_text)
+            category = classify_failure(
+                reason,
+                event_kind=str(context.get("event_kind") or ""),
+                title=title,
+            )
+            policy = normalize_failure_policies(
+                self._config.get("notification_failure_policies")
+            ).get(category["key"], "notify")
+            enhanced_title = f"⚠ 入库失败 · {category['label']}"
+            enhanced_text = f"{title}\n原因：{reason or '未知'}"
+        else:
+            enhanced_title = f"✅ {title.replace('！', '').replace('!', '')}"
+            enhanced_text = original_text
+        if self._config.get("notification_include_paths") and context:
+            path_lines = []
+            if context.get("source_path"):
+                path_lines.append(f"来源：{context['source_path']}")
+            if context.get("target_path"):
+                path_lines.append(f"目标：{context['target_path']}")
+            if path_lines:
+                enhanced_text = "\n".join(
+                    value for value in (enhanced_text, *path_lines) if value
+                )
+        action = "observed"
+        if scene == "failure" and policy == "silent":
+            action = "suppressed"
+        elif scene == "failure" and policy == "digest":
+            action = "digest_pending"
+        elif (
+                mode in ("parallel", "takeover")
+                and self._config.get("notification_plugin_enabled")
+        ):
+            self._send_enhanced_notification(
+                title=enhanced_title,
+                text=enhanced_text,
+                source_notice=notice,
+            )
+            action = "notified"
+        self._append_notification_record(build_record(
+            scene=scene,
+            title=title,
+            text=enhanced_text,
+            category=category,
+            policy=policy,
+            action=action,
+            source=str(notice.get("source") or "MoviePilot"),
+            details=context,
+        ))
+
     @eventmanager.register(getattr(EventType, "TransferComplete", "transfer.complete"))
     def on_transfer_complete(self, event: Event) -> None:
         """整理完成后分发 Emby 剧集组联动与神医媒体信息推送任务。"""
         if not event or not event.event_data:
             return
+        if self._notification_active():
+            self._remember_transfer_notice_context(event.event_data, "success")
         try:
             self._maybe_enqueue_strm_sync(event.event_data)
         except Exception as err:
             logger.error(f"[媒体整理增强] 神医媒体信息推送排队失败：{err}")
         self._on_transfer_complete_episode_group(event)
+
+    @eventmanager.register(getattr(EventType, "TransferFailed", "transfer.failed"))
+    def on_transfer_failed(self, event: Event) -> None:
+        """缓存媒体文件整理失败上下文，实际通知由 NoticeMessage 统一决策。"""
+        if self._notification_active() and event and event.event_data:
+            self._remember_transfer_notice_context(
+                event.event_data, "failure", "transfer.failed",
+            )
+
+    @eventmanager.register(getattr(
+        EventType, "SubtitleTransferFailed", "transfer.subtitle.failed",
+    ))
+    def on_subtitle_transfer_failed(self, event: Event) -> None:
+        if self._notification_active() and event and event.event_data:
+            self._remember_transfer_notice_context(
+                event.event_data, "failure", "transfer.subtitle.failed",
+            )
+
+    @eventmanager.register(getattr(
+        EventType, "AudioTransferFailed", "transfer.audio.failed",
+    ))
+    def on_audio_transfer_failed(self, event: Event) -> None:
+        if self._notification_active() and event and event.event_data:
+            self._remember_transfer_notice_context(
+                event.event_data, "failure", "transfer.audio.failed",
+            )
+
+    @eventmanager.register(getattr(EventType, "NoticeMessage", "notice.message"))
+    def on_notice_message(self, event: Event) -> None:
+        """观察 MP 最终渲染后的通知，并按策略记录或重新发送。"""
+        try:
+            self._handle_notice_message(event)
+        except Exception as err:  # noqa: BLE001 - 通知增强不得影响原整理链
+            logger.error(f"[媒体整理增强] 入库通知处理失败：{err}")
+
+    @eventmanager.register(getattr(EventType, "MessageAction", "message.action"))
+    def on_notification_message_action(self, event: Event) -> None:
+        """处理支持交互按钮的渠道回传的季度候选审批动作。"""
+        if not event or not isinstance(event.event_data, dict):
+            return
+        data = event.event_data
+        if str(data.get("plugin_id") or "") != self.__class__.__name__:
+            return
+        content = str(data.get("text") or "")
+        match = re.fullmatch(r"notify-candidates:(approve|ignore):([0-9a-f]{12})", content)
+        if not match:
+            return
+        action, batch_id = match.groups()
+        approvals = self._read_notification_approvals()
+        batch = (approvals.get("batches") or {}).get(batch_id) or {}
+        quarter = str(batch.get("quarter") or "")
+        item_ids = list(batch.get("item_ids") or [])
+        if not quarter or not item_ids:
+            return
+        if action == "ignore":
+            result = self.action_notification_candidates_api({
+                "quarter": quarter, "item_ids": item_ids, "action": "ignore",
+            })
+            message = result.message or "候选已忽略"
+        else:
+            preference = str(batch.get("preference") or "group_preferred")
+            result = self.action_notification_candidates_api({
+                "quarter": quarter,
+                "item_ids": item_ids,
+                "action": "add_group" if preference == "group_preferred" else "add_default",
+            })
+            message = result.message or "候选已加入"
+        self._send_enhanced_notification(
+            title="集数偏移候选处理完成",
+            text=message,
+            source_notice={
+                "userid": data.get("userid"),
+                "channel": data.get("channel"),
+            },
+        )
 
     def _maybe_enqueue_strm_sync(self, data: Any) -> None:
         """为每个整理完成的视频文件排队媒体信息推送（电影与剧集都适用）。"""
@@ -6369,6 +7132,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "custom_rename_fields_enabled", "rename_mapping_enabled", "media_probe_enabled",
             "media_probe_subtitle_to_customization", "media_probe_iso_enabled",
             "release_group_normalize_unknown_connectors",
+            "notification_enhancer_enabled", "notification_success_enabled",
+            "notification_failure_enabled", "notification_plugin_enabled",
+            "notification_include_paths", "notification_passthrough_manual",
+            "notification_episode_candidates_enabled",
+            "notification_candidate_sequel_only",
         )
         for key in bool_keys:
             merged[key] = bool(merged.get(key))
@@ -6391,6 +7159,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "strm_media_info_sync_max_wait_minutes": (1, 1440),
             "media_probe_timeout": (3, 30),
             "anime_cross_id_update_interval_hours": (1, 168),
+            "notification_record_limit": (20, 500),
         }
         for key, (minimum, maximum) in ranges.items():
             merged[key] = max(minimum, min(maximum, self._safe_int(merged.get(key), int(self.DEFAULT_CONFIG[key]))))
@@ -6426,6 +7195,43 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged["web_search_engine"] = engine if engine in self._web_search_engines else "auto"
         mode = str(merged.get("recognition_mode") or "tmdb_first").strip().lower()
         merged["recognition_mode"] = mode if mode in ("tmdb_first", "scored") else "tmdb_first"
+        notification_mode = str(
+            merged.get("notification_mode") or "observe"
+        ).strip().lower()
+        merged["notification_mode"] = (
+            notification_mode
+            if notification_mode in ("observe", "parallel", "takeover")
+            else "observe"
+        )
+        merged["notification_failure_policies"] = normalize_failure_policies(
+            merged.get("notification_failure_policies")
+        )
+        candidate_region = str(
+            merged.get("notification_candidate_region") or "japan"
+        ).strip().lower()
+        merged["notification_candidate_region"] = (
+            candidate_region
+            if candidate_region in ("all", "japan", "china", "other")
+            else "japan"
+        )
+        candidate_platforms = merged.get("notification_candidate_platforms") or []
+        if isinstance(candidate_platforms, str):
+            candidate_platforms = re.split(r"[\s,;，；]+", candidate_platforms)
+        if not isinstance(candidate_platforms, (list, tuple, set)):
+            candidate_platforms = []
+        merged["notification_candidate_platforms"] = list(dict.fromkeys(
+            str(value).strip().upper()
+            for value in candidate_platforms
+            if str(value).strip()
+        ))[:12] or ["TV", "TV SHORT"]
+        candidate_preference = str(
+            merged.get("notification_candidate_preference") or "group_preferred"
+        ).strip().lower()
+        merged["notification_candidate_preference"] = (
+            candidate_preference
+            if candidate_preference in ("default", "group_preferred")
+            else "group_preferred"
+        )
         candidate_lists: Dict[str, List[int]] = {}
         for key in ("tmdb_exclude_ids", "tmdb_prefer_ids"):
             raw_values = merged.get(key) or []

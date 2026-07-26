@@ -4,6 +4,7 @@ import StrategySettings from './StrategySettings.vue'
 import EpisodeNormalizer from './EpisodeNormalizer.vue'
 import MetadataTools from './MetadataTools.vue'
 import PerformanceDiagnostics from './PerformanceDiagnostics.vue'
+import NotificationEnhancer from './NotificationEnhancer.vue'
 import ModuleHeader from './ModuleHeader.vue'
 import { cloneConfig, ensureUiVersion, mediaTypeText, scoreColor, UI_VERSION, unwrapResponse } from '../utils'
 
@@ -210,6 +211,26 @@ function mergeEmbySyncConfig(sync = {}) {
   }
 }
 
+function mergeNotificationConfig(saved = {}) {
+  status.value = {
+    ...status.value,
+    config: { ...(status.value.config || {}), ...(saved || {}) },
+    modules: {
+      ...(status.value.modules || {}),
+      notification_enhancer: {
+        ...(status.value.modules?.notification_enhancer || {}),
+        enabled: Boolean(saved.notification_enhancer_enabled),
+        mode: saved.notification_mode || 'observe',
+        status: !saved.notification_enhancer_enabled
+          ? '已停用'
+          : saved.notification_mode === 'observe'
+            ? '仅记录'
+            : saved.notification_mode === 'parallel' ? '并行增强' : '接管发送',
+      },
+    },
+  }
+}
+
 async function runPreview() {
   previewing.value = true
   error.value = ''
@@ -330,6 +351,7 @@ onMounted(loadStatus)
           <VTab value="media" prepend-icon="mdi-waveform">媒体信息识别</VTab>
           <VTab value="naming" prepend-icon="mdi-rename-box-outline">命名规则</VTab>
           <VTab value="preview" prepend-icon="mdi-flask-outline">综合试跑</VTab>
+          <VTab value="notifications" prepend-icon="mdi-bell-cog-outline">入库通知</VTab>
           <VTab value="history" prepend-icon="mdi-text-box-search-outline">日志</VTab>
           <VTab value="diagnostics" prepend-icon="mdi-speedometer">性能诊断</VTab>
         </VTabs>
@@ -378,6 +400,10 @@ onMounted(loadStatus)
                 <VCard variant="outlined" class="module-card">
                   <VCardItem><template #prepend><VAvatar color="orange" variant="tonal"><VIcon icon="mdi-rename-box-outline" /></VAvatar></template><VCardTitle>命名规则</VCardTitle><VCardSubtitle>{{ modules.rename_mapping?.status || '状态未知' }}</VCardSubtitle></VCardItem>
                   <VCardText><VSwitch v-model="config.rename_mapping_enabled" color="orange" label="启用模块" hide-details /><div class="status-line"><span>结构化与文本规则</span><strong>{{ modules.rename_mapping?.rule_count || 0 }} 条</strong></div><div class="status-line"><span>作用范围</span><strong>制作组 / 标题 / 路径 / 字幕</strong></div></VCardText>
+                </VCard>
+                <VCard variant="outlined" class="module-card">
+                  <VCardItem><template #prepend><VAvatar color="primary" variant="tonal"><VIcon icon="mdi-bell-cog-outline" /></VAvatar></template><VCardTitle>入库通知增强</VCardTitle><VCardSubtitle>{{ modules.notification_enhancer?.status || '已停用' }}</VCardSubtitle></VCardItem>
+                  <VCardText><VSwitch v-model="config.notification_enhancer_enabled" color="primary" label="启用模块" hide-details /><div class="status-line"><span>运行方式</span><strong>{{ config.notification_mode === 'takeover' ? '接管发送' : config.notification_mode === 'parallel' ? '并行增强' : '仅观察' }}</strong></div><div class="status-line"><span>通知记录</span><strong>{{ modules.notification_enhancer?.record_count || 0 }} 条</strong></div></VCardText>
                 </VCard>
               </div>
             </div>
@@ -591,6 +617,16 @@ onMounted(loadStatus)
                 </div>
               </div>
               <div v-else class="empty-preview"><VIcon icon="mdi-text-box-search-outline" size="60" /><div class="text-h6 mt-3">{{ history.length ? '当前筛选没有日志' : '尚无模块日志' }}</div></div>
+            </div>
+          </section>
+
+          <section v-if="tab === 'notifications'" class="workspace-panel">
+            <div class="tab-content">
+              <NotificationEnhancer
+                :api="api"
+                :plugin-base="pluginBase"
+                @config-saved="mergeNotificationConfig"
+              />
             </div>
           </section>
 
