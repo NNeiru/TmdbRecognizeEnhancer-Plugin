@@ -116,7 +116,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.36"
+    plugin_version = "0.8.37"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -397,6 +397,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._notification_recent_lock = threading.RLock()
         self._notification_recent: Dict[str, Dict[str, Any]] = {}
         self._notification_notice_tokens: List[Dict[str, Any]] = []
+        self._notification_fallback_tokens: List[Dict[str, Any]] = []
         self._notification_outgoing_lock = threading.RLock()
         self._notification_outgoing: Dict[str, float] = {}
         self._notification_telegram_send_lock = threading.RLock()
@@ -6470,30 +6471,65 @@ class TmdbRecognizeEnhancer(_PluginBase):
             }
         return context
 
-    def _remember_ingest_notice_token(self, scene: str, title: str) -> None:
-        """登记 MP 已产生的整理通知，供结构化事件兜底去重。"""
+    @staticmethod
+    def _notification_token_title_related(left: Any, right: Any) -> bool:
+        left_key = TmdbRecognizeEnhancer._normalize_text(left)
+        right_key = TmdbRecognizeEnhancer._normalize_text(right)
+        return bool(
+            left_key and right_key
+            and (left_key in right_key or right_key in left_key)
+        )
+
+    def _claim_ingest_native_notice(self, scene: str, title: str) -> bool:
+        """原生通知原子认领；若兜底已发送则返回 True，阻止迟到重复。"""
         now = time.time()
         with self._notification_recent_lock:
             self._notification_notice_tokens = [
                 item for item in self._notification_notice_tokens
-                if now - self._safe_float(item.get("created_ts"), 0) < 15
+                if now - self._safe_float(item.get("created_ts"), 0) < 30
             ]
+            self._notification_fallback_tokens = [
+                item for item in self._notification_fallback_tokens
+                if now - self._safe_float(item.get("created_ts"), 0) < 30
+            ]
+            matches = [
+                (index, item)
+                for index, item in enumerate(self._notification_fallback_tokens)
+                if item.get("scene") == scene
+                and (
+                    self._notification_token_title_related(
+                        title, item.get("title"),
+                    )
+                    or now - self._safe_float(item.get("created_ts"), 0) <= 12
+                )
+            ]
+            if matches:
+                self._notification_fallback_tokens.pop(matches[-1][0])
+                return True
             self._notification_notice_tokens.append({
                 "scene": scene,
                 "title": str(title or ""),
                 "created_ts": now,
             })
+            return False
 
-    def _consume_ingest_notice_token(
+    def _claim_ingest_fallback(
             self,
             scene: str,
             title: str,
             event_created_ts: float,
     ) -> bool:
-        """消费一条相邻的 MP 原生通知；标题相关项优先，兼容完全自定义模板。"""
+        """兜底原子认领；若原生通知已到则返回 True，否则登记兜底发送。"""
         now = time.time()
-        normalized_title = self._normalize_text(title)
         with self._notification_recent_lock:
+            self._notification_notice_tokens = [
+                item for item in self._notification_notice_tokens
+                if now - self._safe_float(item.get("created_ts"), 0) < 30
+            ]
+            self._notification_fallback_tokens = [
+                item for item in self._notification_fallback_tokens
+                if now - self._safe_float(item.get("created_ts"), 0) < 30
+            ]
             candidates = [
                 (index, item)
                 for index, item in enumerate(self._notification_notice_tokens)
@@ -6506,22 +6542,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
             related = [
                 (index, item)
                 for index, item in candidates
-                if normalized_title
-                and (
-                    normalized_title in self._normalize_text(item.get("title"))
-                    or self._normalize_text(item.get("title")) in normalized_title
+                if self._notification_token_title_related(
+                    title, item.get("title"),
                 )
             ]
             selected = related[-1:] or candidates[-1:]
-            if not selected:
-                self._notification_notice_tokens = [
-                    item for item in self._notification_notice_tokens
-                    if now - self._safe_float(item.get("created_ts"), 0) < 15
-                ]
-                return False
-            selected_index = selected[0][0]
-            self._notification_notice_tokens.pop(selected_index)
-            return True
+            if selected:
+                self._notification_notice_tokens.pop(selected[0][0])
+                return True
+            self._notification_fallback_tokens.append({
+                "scene": scene,
+                "title": str(title or ""),
+                "created_ts": now,
+            })
+            return False
 
     def _send_transfer_event_notification_fallback(
             self,
@@ -6541,7 +6575,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return
         if scene == "failure" and not self._config.get("notification_failure_enabled"):
             return
-        if self._consume_ingest_notice_token(
+        if self._claim_ingest_fallback(
                 scene,
                 str(context.get("title") or ""),
                 self._safe_float(context.get("created_ts"), time.time()),
@@ -6581,7 +6615,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not context or not self._notification_active():
             return
         timer = threading.Timer(
-            1.5,
+            6.0,
             self._send_transfer_event_notification_fallback,
             args=(deepcopy(context),),
         )
@@ -6644,9 +6678,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return
         scene = notification_kind(notice)
         if scene in ("success", "failure") and remember_token:
-            self._remember_ingest_notice_token(
-                scene, str(notice.get("title") or ""),
-            )
+            if self._claim_ingest_native_notice(
+                    scene, str(notice.get("title") or ""),
+            ):
+                logger.info(
+                    f"[媒体整理增强] 已由整理事件兜底发送，忽略迟到的"
+                    f"{'成功' if scene == 'success' else '失败'}原生通知"
+                )
+                return
         mode = str(self._config.get("notification_mode") or "observe")
         if scene == "other":
             # 接管“手动处理”渠道时回送非整理类消息，避免用户为屏蔽原生失败通知

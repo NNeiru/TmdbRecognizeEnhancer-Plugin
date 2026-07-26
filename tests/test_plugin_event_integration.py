@@ -4094,20 +4094,53 @@ def test_transfer_event_fallback_deduplicates_existing_mp_notice(monkeypatch):
     })
     plugin._notification_active = Mock(return_value=True)
     plugin._handle_notice_message = Mock()
+    created_ts = __import__("time").time()
     plugin._notification_notice_tokens = [{
         "scene": "success",
         "title": "示例动画 (2026) 已入库",
-        "created_ts": 101.0,
+        "created_ts": created_ts + 0.1,
     }]
 
     plugin._send_transfer_event_notification_fallback({
         "scene": "success",
         "title": "示例动画 (2026)",
-        "created_ts": 100.0,
+        "created_ts": created_ts,
     })
 
     plugin._handle_notice_message.assert_not_called()
     assert plugin._notification_notice_tokens == []
+
+
+def test_late_mp_notice_is_suppressed_after_transfer_fallback(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_success_enabled": True,
+    })
+    plugin._notification_active = Mock(return_value=True)
+    plugin._send_enhanced_notification = Mock(return_value={
+        "success": True,
+        "direct": True,
+    })
+    created_ts = __import__("time").time()
+
+    plugin._send_transfer_event_notification_fallback({
+        "scene": "success",
+        "title": "碧蓝航线：微速前行！ (2021)",
+        "season_episode": "S02 E04",
+        "created_ts": created_ts,
+    })
+    plugin._handle_notice_message(SimpleNamespace(event_data={
+        "mtype": "整理入库",
+        "title": "碧蓝航线：微速前行！ (2021) S02 E04 已入库",
+        "text": "版本：Baha\n质量：WEB-DL 1080p",
+    }))
+
+    assert plugin._send_enhanced_notification.call_count == 1
+    assert plugin._notification_fallback_tokens == []
 
 
 def test_ingest_notification_preserves_mp_template_and_only_uses_paths_explicitly(
