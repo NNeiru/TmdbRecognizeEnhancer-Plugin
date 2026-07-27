@@ -122,7 +122,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.40"
+    plugin_version = "0.8.41"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -6533,11 +6533,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         payload = {
             "mtype": str(notice.get("mtype") or notice.get("type") or ""),
             "ctype": str(notice.get("ctype") or ""),
-            "source": str(notice.get("source") or ""),
             "title": str(notice.get("title") or ""),
             "text": str(notice.get("text") or ""),
-            "image": str(notice.get("image") or ""),
-            "link": str(notice.get("link") or ""),
         }
         return hashlib.sha1(
             json.dumps(

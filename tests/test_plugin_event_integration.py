@@ -4312,10 +4312,14 @@ def test_takeover_deduplicates_mp_recipient_split_notices(monkeypatch):
 
     plugin._handle_notice_message(SimpleNamespace(event_data={
         **base_notice,
+        "source": "管理员路由",
         "targets": {"telegram": ["admin"]},
     }))
     plugin._handle_notice_message(SimpleNamespace(event_data={
         **base_notice,
+        "source": "用户路由",
+        "image": "https://example.invalid/recipient-poster.jpg",
+        "link": "https://example.invalid/recipient-history",
         "targets": {"telegram": ["user"]},
     }))
 
