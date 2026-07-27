@@ -3726,6 +3726,51 @@ def test_notification_manual_tmdb_override_persists_catalog_match(monkeypatch):
     assert stored["tmdb_match"]["best"]["tmdb_id"] == 456
 
 
+def test_rescan_restores_tmdb_from_user_maintained_catalog_rule(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._data[plugin.DATA_KEY_EPISODE_RULES] = [{
+        "tmdb_id": 456,
+        "title": "示例动画",
+        "installments": [{"id": "catalog:anilist:3", "quarter": "2026-Q3"}],
+    }]
+
+    class FakeTmdbApi:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @staticmethod
+        def get_info(**kwargs):
+            assert kwargs["tmdbid"] == 456
+            return {
+                "name": "示例动画",
+                "seasons": [{"season_number": 1}],
+            }
+
+        @staticmethod
+        def close():
+            pass
+
+    monkeypatch.setattr(module, "TmdbApi", FakeTmdbApi)
+    plugin._fast_catalog_tmdb_match = Mock(
+        side_effect=AssertionError("已维护条目不应重新进行标题搜索"),
+    )
+    item = {
+        "id": "anilist:3",
+        "quarter": "2026-Q3",
+        "name": "Example Anime",
+        "scan_status": "failed",
+        "tmdb_match": {"accepted": False, "attempted": True},
+    }
+
+    result = plugin._scan_catalog_item(item)
+
+    assert result["scan_status"] == "matched"
+    assert result["tmdb_match"]["best"]["tmdb_id"] == 456
+    assert result["tmdb_match"]["best"]["source"] == "user-maintained"
+    assert "scan_error" not in result
+
+
 def test_ignored_candidate_stays_ignored_after_catalog_id_changes(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
@@ -3766,6 +3811,41 @@ def test_ignored_candidate_stays_ignored_after_catalog_id_changes(monkeypatch):
     }]
     snapshot = plugin._notification_candidate_snapshot("2026-Q3")
     assert snapshot == {"ready": [], "failed": []}
+
+
+def test_season_board_marks_and_can_filter_notification_ignored_items(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    item = {
+        "id": "anilist:12345",
+        "source": "anilist",
+        "quarter": "2026-Q3",
+        "anilist_id": 12345,
+        "name": "Ignored Anime",
+        "region": "japan",
+        "platform": "TV",
+        "scan_status": "failed",
+        "tmdb_match": {"accepted": False, "attempted": True},
+    }
+    plugin._data[plugin.DATA_KEY_SEASON_CATALOG] = {
+        "2026-Q3": {
+            "items": [item],
+            "schema_version": plugin.CATALOG_SCHEMA_VERSION,
+            "updated_at": "2026-07-27 10:00:00",
+        },
+    }
+    plugin._data[plugin.DATA_KEY_EPISODE_RULES] = []
+    plugin._data[plugin.DATA_KEY_NOTIFICATION_APPROVALS] = {
+        "ignored": [],
+        "ignored_keys": ["anilist:12345"],
+    }
+
+    response = plugin.query_season_catalog_api({
+        "year": 2026, "quarter": 3,
+    })
+
+    assert response.success is True
+    assert response.data["catalog"][0]["notification_ignored"] is True
 
 
 def test_notification_batch_uses_submitted_candidate_filters(monkeypatch):
@@ -4021,6 +4101,77 @@ def test_real_success_and_failure_records_use_channel_receipt(monkeypatch):
     assert failure["action"] == "delivery_failed"
     assert failure["details"]["notification_service"] == "入库失败通知"
     assert failure["details"]["delivery_error"] == "Telegram rejected message"
+
+
+def test_takeover_routes_subscribe_notice_to_selected_plugin_instance(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_default_service": "默认通知",
+        "notification_type_routes": module.normalize_notification_routes({
+            "subscribe": {
+                "policy": "notify",
+                "service": "订阅专用通知",
+            },
+        }),
+    })
+    plugin._notification_active = Mock(return_value=True)
+    plugin._notification_type_target = Mock(
+        return_value=("telegram", "订阅专用通知"),
+    )
+    plugin._send_enhanced_notification = Mock(return_value={
+        "success": True,
+        "direct": True,
+        "message_id": 88,
+        "chat_id": "subscribe-chat",
+    })
+
+    plugin._handle_notice_message(SimpleNamespace(event_data={
+        "mtype": "订阅",
+        "ctype": "SubscribeAdded",
+        "title": "新增订阅：示例动画",
+        "text": "已添加到订阅列表",
+    }))
+
+    sent = plugin._send_enhanced_notification.call_args.kwargs
+    assert sent["service"] == "订阅专用通知"
+    assert sent["channel"] == "telegram"
+    record = plugin.get_data(plugin.DATA_KEY_NOTIFICATION_RECORDS)[0]
+    assert record["scene"] == "other"
+    assert record["details"]["notification_type"] == "subscribe"
+    assert record["details"]["notification_type_label"] == "订阅"
+    assert record["action"] == "delivered"
+
+
+def test_generic_notification_record_and_silent_routes_do_not_send(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_type_routes": module.normalize_notification_routes({
+            "site": {"policy": "record"},
+            "agent": {"policy": "silent"},
+        }),
+    })
+    plugin._notification_active = Mock(return_value=True)
+    plugin._send_enhanced_notification = Mock()
+
+    plugin._handle_notice_message(SimpleNamespace(event_data={
+        "mtype": "站点", "title": "签到完成",
+    }))
+    plugin._handle_notice_message(SimpleNamespace(event_data={
+        "mtype": "智能体", "title": "任务完成",
+    }))
+
+    plugin._send_enhanced_notification.assert_not_called()
+    records = plugin.get_data(plugin.DATA_KEY_NOTIFICATION_RECORDS)
+    actions = {item["details"]["notification_type"]: item["action"] for item in records}
+    assert actions == {"site": "observed", "agent": "suppressed"}
 
 
 def test_candidate_filter_save_keeps_ingest_delivery_configuration(monkeypatch):

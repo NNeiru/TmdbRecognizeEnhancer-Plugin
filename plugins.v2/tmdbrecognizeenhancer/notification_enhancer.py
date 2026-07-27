@@ -91,7 +91,90 @@ FAILURE_CATEGORIES: tuple[Dict[str, Any], ...] = (
 )
 
 FAILURE_CATEGORY_MAP = {item["key"]: item for item in FAILURE_CATEGORIES}
-VALID_POLICIES = {"notify", "digest", "silent"}
+VALID_POLICIES = {"notify", "digest", "record", "silent"}
+
+NOTIFICATION_TYPES: tuple[Dict[str, Any], ...] = (
+    {
+        "key": "download",
+        "label": "资源下载",
+        "description": "下载任务新增、开始、完成及下载异常",
+        "icon": "mdi-download-circle-outline",
+    },
+    {
+        "key": "organize",
+        "label": "整理入库",
+        "description": "媒体整理成功与入库完成",
+        "icon": "mdi-folder-move-outline",
+    },
+    {
+        "key": "subscribe",
+        "label": "订阅",
+        "description": "订阅新增、命中、完成及订阅状态变化",
+        "icon": "mdi-rss-box",
+    },
+    {
+        "key": "site",
+        "label": "站点",
+        "description": "站点消息、签到、Cookie 与站点异常",
+        "icon": "mdi-web",
+    },
+    {
+        "key": "media_server",
+        "label": "媒体服务器",
+        "description": "Emby、Jellyfin 或 Plex 的媒体库消息",
+        "icon": "mdi-server-network",
+    },
+    {
+        "key": "manual",
+        "label": "手动处理",
+        "description": "需人工确认的处理结果与整理失败",
+        "icon": "mdi-hand-back-right-outline",
+    },
+    {
+        "key": "plugin",
+        "label": "插件",
+        "description": "其它插件主动发出的通知；本插件自发消息会自动去重",
+        "icon": "mdi-puzzle-outline",
+    },
+    {
+        "key": "agent",
+        "label": "智能体",
+        "description": "MoviePilot 智能体任务与执行结果",
+        "icon": "mdi-robot-outline",
+    },
+    {
+        "key": "other",
+        "label": "其它",
+        "description": "未归入以上类型的系统通知",
+        "icon": "mdi-bell-outline",
+    },
+)
+
+NOTIFICATION_TYPE_MAP = {item["key"]: item for item in NOTIFICATION_TYPES}
+VALID_ROUTE_POLICIES = {"notify", "record", "silent"}
+_NOTIFICATION_TYPE_ALIASES = {
+    "资源下载": "download",
+    "download": "download",
+    "整理入库": "organize",
+    "organize": "organize",
+    "订阅": "subscribe",
+    "subscribe": "subscribe",
+    "站点": "site",
+    "站点消息": "site",
+    "site": "site",
+    "sitemessage": "site",
+    "媒体服务器": "media_server",
+    "mediaserver": "media_server",
+    "手动处理": "manual",
+    "manual": "manual",
+    "插件": "plugin",
+    "plugin": "plugin",
+    "智能体": "agent",
+    "agent": "agent",
+    "其它": "other",
+    "其他": "other",
+    "other": "other",
+}
 
 
 def _text(value: Any) -> str:
@@ -146,6 +229,31 @@ def normalize_failure_policies(value: Any) -> Dict[str, str]:
             policy = "notify"
         policies[item["key"]] = policy
     return policies
+
+
+def notification_type_key(value: Any) -> str:
+    """把 MP 不同版本的 NotificationType 枚举或文本统一成稳定键。"""
+    normalized = re.sub(r"[\s_\-]+", "", _text(value)).casefold()
+    return _NOTIFICATION_TYPE_ALIASES.get(normalized, "other")
+
+
+def normalize_notification_routes(value: Any) -> Dict[str, Dict[str, str]]:
+    """补齐九类通知的接管策略、目标实例和可选模板。"""
+    source = value if isinstance(value, Mapping) else {}
+    routes: Dict[str, Dict[str, str]] = {}
+    for item in NOTIFICATION_TYPES:
+        raw = source.get(item["key"])
+        raw = raw if isinstance(raw, Mapping) else {}
+        policy = _text(raw.get("policy") or "notify").lower()
+        if policy not in VALID_ROUTE_POLICIES:
+            policy = "notify"
+        routes[item["key"]] = {
+            "policy": policy,
+            "service": _text(raw.get("service"))[:160],
+            "title_template": _text(raw.get("title_template"))[:12000],
+            "text_template": _text(raw.get("text_template"))[:12000],
+        }
+    return routes
 
 
 def notification_kind(data: Any) -> str:

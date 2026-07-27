@@ -24,6 +24,7 @@ const data = ref({
   records: [],
   record_counts: {},
   candidates: { ready: [], failed: [] },
+  notification_types: [],
   notification_services: [],
   notification_channels: [],
   candidate_schedule: {},
@@ -38,6 +39,7 @@ const manualCandidateItem = ref(null)
 const manualCandidateTmdbId = ref('')
 const recordFilter = ref('all')
 const showRecords = ref(false)
+const activeWorkspace = ref('routes')
 
 const config = computed(() => data.value.config || {})
 const modeItems = [
@@ -49,6 +51,17 @@ const policyItems = [
   { title: '立即通知', value: 'notify' },
   { title: '进入摘要', value: 'digest' },
   { title: '静默记录', value: 'silent' },
+]
+const routePolicyItems = [
+  { title: '接管发送', value: 'notify' },
+  { title: '仅记录', value: 'record' },
+  { title: '静默忽略', value: 'silent' },
+]
+const workspaceItems = [
+  { title: '通知路由', value: 'routes', icon: 'mdi-routes' },
+  { title: '失败策略', value: 'failures', icon: 'mdi-alert-decagram-outline' },
+  { title: '集数偏移审批', value: 'candidates', icon: 'mdi-counter' },
+  { title: '运行记录', value: 'records', icon: 'mdi-text-box-search-outline' },
 ]
 const recordActionText = {
   observed: '已观察',
@@ -74,6 +87,7 @@ const records = computed(() => (data.value.records || []).filter(item => {
 }))
 const readyCandidates = computed(() => data.value.candidates?.ready || [])
 const failedCandidates = computed(() => data.value.candidates?.failed || [])
+const notificationTypes = computed(() => data.value.notification_types || [])
 const notificationServiceItems = computed(() => (
   (data.value.notification_services || [])
     .filter(item => item.accepts_plugin)
@@ -195,6 +209,11 @@ async function queryCandidates(options = {}) {
     if (silent) candidateSyncing.value = false
     else candidateLoading.value = false
   }
+}
+
+function switchWorkspace(value) {
+  activeWorkspace.value = value
+  if (value === 'records') showRecords.value = true
 }
 
 async function candidateAction(action, candidateType = 'ready') {
@@ -397,8 +416,8 @@ onBeforeUnmount(() => {
 
     <ModuleHeader
       icon="mdi-bell-cog-outline"
-      title="入库通知增强"
-      subtitle="观察 MoviePilot 最终通知，按失败类型决定发送、摘要或静默，并补充整理上下文。"
+      title="通知接管"
+      subtitle="统一接管 MoviePilot 的下载、整理、订阅、站点、媒体服务器及其它系统通知。"
       color="primary"
     >
       <template #actions>
@@ -406,7 +425,7 @@ onBeforeUnmount(() => {
         <VBtn color="primary" prepend-icon="mdi-content-save" :loading="saving" @click="save">保存设置</VBtn>
       </template>
       <template #controls>
-        <VSwitch v-model="config.notification_enhancer_enabled" color="success" hide-details label="启用通知增强" />
+        <VSwitch v-model="config.notification_enhancer_enabled" color="success" hide-details label="启用通知接管" />
         <VChip :color="data.active ? 'success' : 'default'" variant="tonal" size="small">
           {{ data.active ? '正在运行' : '尚未运行' }}
         </VChip>
@@ -415,11 +434,24 @@ onBeforeUnmount(() => {
       </template>
     </ModuleHeader>
 
-    <section class="section-shell">
+    <nav class="notification-workspace-nav" aria-label="通知接管功能分区">
+      <button
+        v-for="item in workspaceItems"
+        :key="item.value"
+        type="button"
+        :class="{ active: activeWorkspace === item.value }"
+        @click="switchWorkspace(item.value)"
+      >
+        <VIcon :icon="item.icon" size="19" />
+        <span>{{ item.title }}</span>
+      </button>
+    </nav>
+
+    <section v-show="activeWorkspace === 'routes'" class="section-shell">
       <div class="section-heading">
         <div>
-          <h3>发送方式</h3>
-          <p>先选择插件介入范围；观察模式适合先验证分类结果。</p>
+          <h3>接管范围与通知路由</h3>
+          <p>先决定插件如何介入，再分别设置九类 MoviePilot 通知的处理方式和目标实例。</p>
         </div>
       </div>
       <div class="mode-grid">
@@ -439,32 +471,52 @@ onBeforeUnmount(() => {
       <VAlert v-if="config.notification_mode === 'takeover'" type="warning" variant="tonal" density="compact" class="mt-3">
         {{ data.takeover_note }}
       </VAlert>
-      <div class="option-row mt-3">
-        <VSwitch v-model="config.notification_success_enabled" color="success" hide-details label="增强成功通知" />
-        <VSwitch v-model="config.notification_failure_enabled" color="warning" hide-details label="处理失败通知" />
-        <VSwitch v-model="config.notification_passthrough_manual" color="primary" hide-details label="接管时转发其它人工通知" />
+      <div class="route-defaults">
+        <VSelect
+          v-model="config.notification_default_service"
+          :items="notificationServiceItems"
+          label="默认通知实例"
+          placeholder="各类型未指定实例时使用；留空则广播到插件渠道"
+          density="comfortable"
+          variant="outlined"
+          clearable
+          hide-details
+        />
+        <div class="route-legend">
+          <VIcon icon="mdi-information-outline" color="primary" />
+          <span>“接管发送”才会重发；“仅记录”只进入运行记录；“静默忽略”不会外发。</span>
+        </div>
       </div>
-      <div class="notification-route-grid">
-        <VSelect
-          v-model="config.notification_success_service"
-          :items="notificationServiceItems"
-          label="入库成功通知实例"
-          placeholder="留空则发送到全部插件通知渠道"
-          density="comfortable"
-          variant="outlined"
-          clearable
-          hide-details
-        />
-        <VSelect
-          v-model="config.notification_failure_service"
-          :items="notificationServiceItems"
-          label="入库失败通知实例"
-          placeholder="留空则发送到全部插件通知渠道"
-          density="comfortable"
-          variant="outlined"
-          clearable
-          hide-details
-        />
+      <div class="notification-type-grid">
+        <article v-for="item in notificationTypes" :key="item.key" class="notification-type-card">
+          <VAvatar size="38" color="primary" variant="tonal"><VIcon :icon="item.icon" size="20" /></VAvatar>
+          <div class="notification-type-copy">
+            <strong>{{ item.label }}</strong>
+            <small>{{ item.description }}</small>
+          </div>
+          <VSelect
+            v-model="config.notification_type_routes[item.key].policy"
+            :items="routePolicyItems"
+            density="compact"
+            variant="outlined"
+            hide-details
+            class="route-policy-select"
+          />
+          <VSelect
+            v-if="config.notification_type_routes[item.key].policy === 'notify'"
+            v-model="config.notification_type_routes[item.key].service"
+            :items="notificationServiceItems"
+            placeholder="沿用默认实例"
+            density="compact"
+            variant="outlined"
+            clearable
+            hide-details
+            class="route-service-select"
+          />
+          <div v-else class="route-service-placeholder">
+            {{ config.notification_type_routes[item.key].policy === 'record' ? '仅保留审计记录' : '不发送、不打扰' }}
+          </div>
+        </article>
       </div>
       <VExpansionPanels variant="accordion" class="notification-template-panels">
         <VExpansionPanel>
@@ -472,8 +524,8 @@ onBeforeUnmount(() => {
             <div class="template-panel-title">
               <VIcon icon="mdi-code-braces" color="primary" />
               <span>
-                <strong>通知样式与 Jinja2 模板</strong>
-                <small>默认原样使用 MoviePilot 已渲染的通知；只有模板显式引用路径时才会加入路径。</small>
+                <strong>通知模板与高级设置</strong>
+                <small>默认原样转发 MP 已渲染内容；整理成功、整理失败和其它通知可分别定制。</small>
               </span>
             </div>
           </VExpansionPanelTitle>
@@ -482,7 +534,8 @@ onBeforeUnmount(() => {
               MoviePilot 的系统通知模板会先完成渲染，<code>original_title</code> 与
               <code>original_text</code> 就是其最终结果。可用：
               <code>scene</code>、<code>category_label</code>、<code>reason</code>、
-              <code>source_path</code>、<code>target_path</code>、<code>current_time</code>。
+              <code>source_path</code>、<code>target_path</code>、<code>notification_type_label</code>、
+              <code>current_time</code>。
             </VAlert>
             <div class="notification-template-grid">
               <div class="notification-template-card success">
@@ -521,13 +574,36 @@ onBeforeUnmount(() => {
                   hide-details
                 />
               </div>
+              <div class="notification-template-card generic">
+                <h4><VIcon icon="mdi-bell-outline" /> 其它通知类型</h4>
+                <VTextField
+                  v-model="config.notification_generic_title_template"
+                  label="标题模板"
+                  variant="outlined"
+                  density="compact"
+                  hide-details
+                />
+                <VTextarea
+                  v-model="config.notification_generic_text_template"
+                  label="正文模板"
+                  variant="outlined"
+                  rows="4"
+                  auto-grow
+                  hide-details
+                />
+              </div>
+            </div>
+            <div class="option-row mt-3">
+              <VSwitch v-model="config.notification_success_enabled" color="success" hide-details label="处理整理成功" />
+              <VSwitch v-model="config.notification_failure_enabled" color="warning" hide-details label="处理整理失败" />
+              <VSwitch v-model="config.notification_passthrough_manual" color="primary" hide-details label="保留其它手动处理通知" />
             </div>
           </VExpansionPanelText>
         </VExpansionPanel>
       </VExpansionPanels>
     </section>
 
-    <section class="section-shell">
+    <section v-show="activeWorkspace === 'failures'" class="section-shell">
       <div class="section-heading">
         <div>
           <h3>失败类型策略</h3>
@@ -555,7 +631,7 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section class="section-shell">
+    <section v-show="activeWorkspace === 'candidates'" class="section-shell">
       <div class="section-heading responsive">
         <div>
           <h3>集数偏移通知与审批</h3>
@@ -772,7 +848,7 @@ onBeforeUnmount(() => {
       </VCard>
     </VDialog>
 
-    <section class="section-shell">
+    <section v-show="activeWorkspace === 'records'" class="section-shell">
       <button type="button" class="records-heading" @click="showRecords = !showRecords">
         <span>
           <strong>通知运行记录</strong>
@@ -790,7 +866,7 @@ onBeforeUnmount(() => {
         <div v-if="showRecords">
           <div class="record-toolbar">
             <VBtnToggle v-model="recordFilter" mandatory density="compact" color="primary" variant="outlined">
-              <VBtn value="all">全部</VBtn><VBtn value="success">成功</VBtn><VBtn value="failure">失败</VBtn>
+              <VBtn value="all">全部</VBtn><VBtn value="success">入库成功</VBtn><VBtn value="failure">入库失败</VBtn><VBtn value="other">其它通知</VBtn>
             </VBtnToggle>
             <VSpacer />
           <VBtn variant="text" color="error" prepend-icon="mdi-delete-outline" @click="clearRecords">清空</VBtn>
@@ -810,7 +886,7 @@ onBeforeUnmount(() => {
               />
               <div>
                 <strong>{{ item.title }}</strong>
-                <span>{{ item.created_at }} · {{ item.category?.label || '入库成功' }} · {{ recordActionText[item.action] || item.action }}</span>
+                <span>{{ item.created_at }} · {{ item.category?.label || item.details?.notification_type_label || '入库成功' }} · {{ recordActionText[item.action] || item.action }}</span>
                 <small v-if="item.action === 'delivery_failed'">
                   {{ item.details?.delivery_error || '目标通知实例未返回成功结果' }}
                 </small>
@@ -827,6 +903,34 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .notification-page { display: grid; gap: 16px; }
+.notification-workspace-nav {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 4px;
+  border: 1px solid rgba(var(--v-theme-on-surface), .09);
+  border-radius: 14px;
+  background: rgba(var(--v-theme-on-surface), .025);
+}
+.notification-workspace-nav button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 12px;
+  color: rgba(var(--v-theme-on-surface), .63);
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+  font-size: .82rem;
+  font-weight: 560;
+}
+.notification-workspace-nav button.active {
+  color: rgb(var(--v-theme-primary));
+  background: rgba(var(--v-theme-primary), .1);
+  box-shadow: inset 0 0 0 1px rgba(var(--v-theme-primary), .13);
+}
 .section-shell {
   padding: 18px;
   border: 1px solid rgba(var(--v-theme-on-surface), .1);
@@ -852,11 +956,53 @@ onBeforeUnmount(() => {
 }
 .option-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 22px; }
 .option-row.compact { margin-top: 12px; }
-.notification-route-grid {
+.route-defaults {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(260px, .72fr) minmax(320px, 1.28fr);
+  align-items: center;
   gap: 10px;
   margin-top: 14px;
+}
+.route-legend {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 56px;
+  padding: 9px 13px;
+  color: rgba(var(--v-theme-on-surface), .64);
+  border-radius: 12px;
+  background: rgba(var(--v-theme-primary), .055);
+  font-size: .77rem;
+}
+.notification-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 12px;
+}
+.notification-type-card {
+  display: grid;
+  grid-template-columns: 38px minmax(120px, 1fr) 132px minmax(145px, .8fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 76px;
+  padding: 10px 12px;
+  border: 1px solid rgba(var(--v-theme-on-surface), .075);
+  border-radius: 13px;
+  background: rgba(var(--v-theme-on-surface), .025);
+}
+.notification-type-copy { display: grid; min-width: 0; gap: 2px; }
+.notification-type-copy small {
+  overflow: hidden;
+  color: rgba(var(--v-theme-on-surface), .56);
+  font-size: .71rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.route-service-placeholder {
+  padding: 0 8px;
+  color: rgba(var(--v-theme-on-surface), .46);
+  font-size: .72rem;
 }
 .policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 .policy-card {
@@ -994,8 +1140,10 @@ onBeforeUnmount(() => {
 }
 .notification-template-card.success h4 { color: rgb(var(--v-theme-success)); }
 .notification-template-card.failure h4 { color: rgb(var(--v-theme-warning)); }
+.notification-template-card.generic h4 { color: rgb(var(--v-theme-primary)); }
 @media (max-width: 900px) {
-  .mode-grid, .policy-grid, .candidate-items, .delivery-grid, .notification-route-grid, .notification-template-grid { grid-template-columns: 1fr; }
+  .mode-grid, .policy-grid, .candidate-items, .delivery-grid, .route-defaults, .notification-type-grid, .notification-template-grid { grid-template-columns: 1fr; }
+  .notification-type-card { grid-template-columns: 38px minmax(120px, 1fr) 132px minmax(145px, .8fr); }
   .candidate-controls { grid-template-columns: 1fr 1fr; }
   .candidate-toolbar { align-items: flex-start; flex-wrap: wrap; }
   .candidate-actions { flex: 1 0 100%; justify-content: flex-start; padding-left: 34px; }
@@ -1020,5 +1168,14 @@ onBeforeUnmount(() => {
     width: 100%;
   }
   .manual-candidate-actions .v-btn { flex: 1 0 100%; }
+  .notification-workspace-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .notification-type-card {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+  .notification-type-card .route-policy-select,
+  .notification-type-card .route-service-select,
+  .notification-type-card .route-service-placeholder {
+    grid-column: 1 / -1;
+  }
 }
 </style>

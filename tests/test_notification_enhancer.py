@@ -78,3 +78,22 @@ def test_digest_summary_only_counts_pending_digest():
         {"policy": "digest", "action": "digest_sent", "category": {"key": "storage"}},
         {"policy": "notify", "action": "notified", "category": {"key": "recognition"}},
     ]) == {"total": 1, "categories": {"storage": 1}}
+
+
+def test_notification_type_routes_cover_all_moviepilot_types():
+    assert module.notification_type_key("资源下载") == "download"
+    assert module.notification_type_key("订阅") == "subscribe"
+    assert module.notification_type_key("媒体服务器") == "media_server"
+    assert module.notification_type_key("不存在的新类型") == "other"
+
+    routes = module.normalize_notification_routes({
+        "subscribe": {"policy": "record", "service": "订阅通知 · Telegram"},
+        "site": {"policy": "invalid"},
+    })
+    assert set(routes) == {
+        "download", "organize", "subscribe", "site", "media_server",
+        "manual", "plugin", "agent", "other",
+    }
+    assert routes["subscribe"]["policy"] == "record"
+    assert routes["subscribe"]["service"] == "订阅通知 · Telegram"
+    assert routes["site"]["policy"] == "notify"

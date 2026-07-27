@@ -89,13 +89,16 @@ from .strm_media_info_sync import StrmMediaInfoSynchronizer
 from .metadata_tools import ReleaseGroupRegistry, RenameFieldRegistry
 from .notification_enhancer import (
     FAILURE_CATEGORIES,
+    NOTIFICATION_TYPES,
     build_record,
     classify_failure,
     compact_records,
     extract_notice,
     extract_reason,
     normalize_failure_policies,
+    normalize_notification_routes,
     notification_kind,
+    notification_type_key,
     summarize_digest,
 )
 from .performance_diagnostics import PerformanceDiagnostics
@@ -116,7 +119,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.37"
+    plugin_version = "0.8.38"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -233,7 +236,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "strm_media_info_sync_retry_seconds": 30,
         "strm_media_info_sync_max_wait_minutes": 30,
         "strm_media_info_sync_path_mappings": [],
-        # 入库通知增强
+        # 通知接管
         "notification_enhancer_enabled": False,
         "notification_mode": "observe",
         "notification_success_enabled": True,
@@ -249,6 +252,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_failure_policies": {
             item["key"]: "notify" for item in FAILURE_CATEGORIES
         },
+        "notification_default_service": "",
+        "notification_type_routes": normalize_notification_routes({}),
+        "notification_generic_title_template": "{{ original_title }}",
+        "notification_generic_text_template": "{{ original_text }}",
         "notification_success_service": "",
         "notification_failure_service": "",
         "notification_episode_candidates_enabled": False,
@@ -305,6 +312,10 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_passthrough_manual",
         "notification_record_limit",
         "notification_failure_policies",
+        "notification_default_service",
+        "notification_type_routes",
+        "notification_generic_title_template",
+        "notification_generic_text_template",
         "notification_success_service",
         "notification_failure_service",
         "notification_episode_candidates_enabled",
@@ -895,21 +906,21 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "endpoint": self.get_notification_enhancer_api,
                 "methods": ["GET"],
                 "auth": "bear",
-                "summary": "获取入库通知增强状态、记录与候选审批",
+                "summary": "获取通知接管状态、路由、记录与候选审批",
             },
             {
                 "path": "/notification-enhancer/config",
                 "endpoint": self.save_notification_enhancer_config_api,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "保存入库通知增强设置",
+                "summary": "保存通知接管设置",
             },
             {
                 "path": "/notification-enhancer/test",
                 "endpoint": self.test_notification_enhancer_api,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "发送入库通知增强测试消息",
+                "summary": "发送通知接管测试消息",
             },
             {
                 "path": "/notification-enhancer/records/clear",
@@ -2385,6 +2396,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self._start_catalog_scan(quarter_key)
 
         episode_rules = self._read_episode_rules()
+        approvals = self._read_notification_approvals()
+        ignored_ids = {
+            str(value) for value in approvals.get("ignored") or []
+        }
+        ignored_keys = {
+            str(value) for value in approvals.get("ignored_keys") or []
+        }
         view = []
         for item in deepcopy(catalog or []):
             maintained_tmdb_id = self._catalog_maintained_tmdb_id(
@@ -2392,6 +2410,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
             )
             item["maintained"] = bool(maintained_tmdb_id)
             item["maintained_tmdb_id"] = maintained_tmdb_id or None
+            item["notification_ignored"] = (
+                str(item.get("id") or "") in ignored_ids
+                or bool(
+                    self._notification_candidate_identity_keys(item)
+                    .intersection(ignored_keys)
+                )
+            )
             view.append(item)
         scanning_count = sum(1 for item in view if item.get("scan_status") == "scanning")
         matched_count = sum(1 for item in view if item.get("scan_status") == "matched")
@@ -2724,6 +2749,30 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _scan_catalog_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """完成单条快速匹配及本地化详情补充。"""
         match = item.get("tmdb_match") or {}
+        locked_tmdb_id = (
+            self._safe_int(item.get("manual_tmdb_id"), 0)
+            or self._catalog_maintained_tmdb_id(item)
+        )
+        if locked_tmdb_id:
+            match = {
+                "accepted": True,
+                "attempted": True,
+                "reason": "用户指定或已维护规则锁定 TMDBID",
+                "margin": 100.0,
+                "best": {
+                    "tmdb_id": locked_tmdb_id,
+                    "name": (
+                        (match.get("best") or {}).get("name")
+                        or item.get("display_name")
+                        or item.get("name_cn")
+                        or item.get("name")
+                        or f"TMDB {locked_tmdb_id}"
+                    ),
+                    "media_type": MediaType.TV.value,
+                    "score": 100.0,
+                    "source": "user-maintained",
+                },
+            }
         if not match.get("accepted"):
             match = self._fast_catalog_tmdb_match(item)
         tmdb_id = self._safe_int((match.get("best") or {}).get("tmdb_id"), 0)
@@ -2777,7 +2826,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             )
             for key in (
                     "tmdb_match", "scan_status", "scan_error", "is_multi_season",
-                    "display_name", "name_cn", "aliases", "rule_eligible", "matched_media_type",
+                    "display_name", "name_cn", "aliases", "rule_eligible",
+                    "matched_media_type", "manual_tmdb_id",
             ):
                 if user_locked and key in ("tmdb_match", "display_name", "name_cn", "aliases"):
                     continue
@@ -2881,7 +2931,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         )
 
     # ------------------------------------------------------------------
-    # 入库通知增强
+    # 通知接管
     # ------------------------------------------------------------------
 
     def _notification_active(self) -> bool:
@@ -3052,6 +3102,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         policies = normalize_failure_policies(
             self._config.get("notification_failure_policies")
         )
+        routes = normalize_notification_routes(
+            self._config.get("notification_type_routes")
+        )
         notification_services = self._notification_service_options()
         return {
             "active": self._notification_active(),
@@ -3066,6 +3119,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "locked": item["key"] == "unknown",
                 }
                 for item in FAILURE_CATEGORIES
+            ],
+            "notification_types": [
+                {
+                    **deepcopy(item),
+                    "route": deepcopy(routes[item["key"]]),
+                }
+                for item in NOTIFICATION_TYPES
             ],
             "records": records,
             "record_counts": {
@@ -3092,13 +3152,14 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "notification_channels": notification_services,
             "candidate_schedule": self._notification_candidate_schedule_status(),
             "takeover_note": (
-                "接管模式会用“插件”通知重新发送整理消息。请在 MoviePilot 通知渠道中"
-                "关闭原生“整理入库”；如需接管失败通知，再关闭“手动处理”。"
+                "接管模式会把路由为“发送”的原生消息改由“插件”通知精确投递。"
+                "确认运行记录正常后，可在 MoviePilot 通知渠道里关闭相应原生通知类型，"
+                "但需保留“插件”类型。"
             ),
         }
 
     def get_notification_enhancer_api(self) -> schemas.Response:
-        """获取通知模块配置、运行记录和当前季度候选。"""
+        """获取完整通知接管配置、运行记录和当前季度候选。"""
         data = self._notification_status_data()
         data["candidates"] = self._notification_candidate_snapshot(
             self._current_quarter_key()
@@ -3130,7 +3191,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self._initialize_notification_candidate_realtime_baseline()
         return schemas.Response(
             success=True,
-            message="入库通知增强设置已保存",
+            message="通知接管设置已保存",
             data=self._notification_status_data(),
         )
 
@@ -3485,13 +3546,39 @@ class TmdbRecognizeEnhancer(_PluginBase):
     def _notification_scene_target(
             self, scene: str,
     ) -> Optional[Tuple[Any, str]]:
-        """分别解析入库成功与失败通知目标；留空表示沿用 MP 的全部插件渠道。"""
-        key = (
+        """解析入库成功与失败目标；依次回落类型路由和全局默认实例。"""
+        legacy_key = (
             "notification_failure_service"
             if str(scene or "").lower() == "failure"
             else "notification_success_service"
         )
-        return self._notification_service_target(self._config.get(key))
+        type_key = "manual" if str(scene or "").lower() == "failure" else "organize"
+        routes = normalize_notification_routes(
+            self._config.get("notification_type_routes")
+        )
+        configured = routes.get(type_key, {}).get("service")
+        if configured:
+            return self._notification_service_target(configured)
+        configured = self._config.get(legacy_key)
+        if configured:
+            return self._notification_service_target(configured)
+        return self._notification_service_target(
+            self._config.get("notification_default_service")
+        )
+
+    def _notification_type_target(
+            self, type_key: str,
+    ) -> Optional[Tuple[Any, str]]:
+        """解析普通通知类型的独立实例；未指定时使用全局默认实例。"""
+        routes = normalize_notification_routes(
+            self._config.get("notification_type_routes")
+        )
+        route = routes.get(type_key) or routes["other"]
+        configured = (
+            route.get("service")
+            or self._config.get("notification_default_service")
+        )
+        return self._notification_service_target(configured)
 
     def _notification_target_kwargs(self, scene: str) -> Dict[str, Any]:
         target = self._notification_scene_target(scene)
@@ -6665,6 +6752,90 @@ class TmdbRecognizeEnhancer(_PluginBase):
             logger.warning(f"[媒体整理增强] 入库通知 Jinja2 模板渲染失败：{err}")
             return fallback
 
+    def _handle_generic_notification(
+            self,
+            *,
+            notice: Dict[str, Any],
+            type_key: str,
+            mode: str,
+    ) -> None:
+        """按完整通知类型路由转发非整理消息，并留下可审计记录。"""
+        routes = normalize_notification_routes(
+            self._config.get("notification_type_routes")
+        )
+        route = routes.get(type_key) or routes["other"]
+        type_spec = next(
+            (item for item in NOTIFICATION_TYPES if item["key"] == type_key),
+            NOTIFICATION_TYPES[-1],
+        )
+        policy = str(route.get("policy") or "notify")
+        title = str(notice.get("title") or type_spec["label"])
+        original_text = str(notice.get("text") or "")
+        template_context = {
+            "original_title": title,
+            "original_text": original_text,
+            "title": title,
+            "text": original_text,
+            "scene": "other",
+            "notification_type": type_key,
+            "notification_type_label": type_spec["label"],
+            "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        title_template = (
+            route.get("title_template")
+            or self._config.get("notification_generic_title_template")
+        )
+        text_template = (
+            route.get("text_template")
+            or self._config.get("notification_generic_text_template")
+        )
+        enhanced_title = self._render_ingest_notification_template(
+            title_template, template_context, title,
+        )
+        enhanced_text = self._render_ingest_notification_template(
+            text_template, template_context, original_text,
+        )
+        action = "observed"
+        delivery: Dict[str, Any] = {}
+        target = self._notification_type_target(type_key)
+        if policy == "silent":
+            action = "suppressed"
+        elif (
+                policy == "notify"
+                and mode in ("parallel", "takeover")
+                and self._config.get("notification_plugin_enabled")
+        ):
+            delivery = self._send_enhanced_notification(
+                title=enhanced_title,
+                text=enhanced_text,
+                source_notice=notice,
+                **(
+                    {"channel": target[0], "service": target[1]}
+                    if target else {}
+                ),
+            )
+            action = (
+                "delivered" if delivery.get("success") else "delivery_failed"
+            ) if delivery.get("direct") else "notified"
+        self._append_notification_record(build_record(
+            scene="other",
+            title=title,
+            text=enhanced_text,
+            policy=policy,
+            action=action,
+            source=str(notice.get("source") or "MoviePilot"),
+            details={
+                "notification_type": type_key,
+                "notification_type_label": type_spec["label"],
+                "notification_service": (
+                    target[1] if target else ""
+                ),
+                "message_id": delivery.get("message_id"),
+                "chat_id": delivery.get("chat_id"),
+                "delivery_error": delivery.get("error"),
+            },
+        ))
+
     def _handle_notice_message(
             self,
             event: Event,
@@ -6677,6 +6848,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if self._is_outgoing_notification(notice):
             return
         scene = notification_kind(notice)
+        type_key = notification_type_key(
+            notice.get("mtype") or notice.get("type")
+        )
         if scene in ("success", "failure") and remember_token:
             if self._claim_ingest_native_notice(
                     scene, str(notice.get("title") or ""),
@@ -6688,25 +6862,22 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 return
         mode = str(self._config.get("notification_mode") or "observe")
         if scene == "other":
-            # 接管“手动处理”渠道时回送非整理类消息，避免用户为屏蔽原生失败通知
-            # 而意外丢失其它人工干预消息。
-            mtype = str(getattr(notice.get("mtype") or notice.get("type"), "value", notice.get("mtype") or notice.get("type") or ""))
             if (
-                    mode == "takeover"
-                    and self._config.get("notification_plugin_enabled")
-                    and self._config.get("notification_passthrough_manual")
-                    and mtype == "手动处理"
+                    type_key == "manual"
+                    and not self._config.get("notification_passthrough_manual")
             ):
-                self._send_enhanced_notification(
-                    title=str(notice.get("title") or "手动处理"),
-                    text=str(notice.get("text") or ""),
-                    source_notice=notice,
-                )
+                return
+            self._handle_generic_notification(
+                notice=notice, type_key=type_key, mode=mode,
+            )
             return
         if scene == "success" and not self._config.get("notification_success_enabled"):
             return
         if scene == "failure" and not self._config.get("notification_failure_enabled"):
             return
+        route_policy = normalize_notification_routes(
+            self._config.get("notification_type_routes")
+        ).get(type_key, {}).get("policy", "notify")
         title = str(notice.get("title") or ("入库完成" if scene == "success" else "入库失败"))
         original_text = str(notice.get("text") or "")
         context = self._recent_transfer_context(scene, title)
@@ -6724,6 +6895,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             ).get(category["key"], "notify")
         else:
             reason = ""
+        if route_policy in ("record", "silent"):
+            policy = route_policy
         template_context = {
             "original_title": title,
             "original_text": original_text,
@@ -6756,9 +6929,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
         action = "observed"
         if scene == "failure" and policy == "silent":
             action = "suppressed"
+        elif scene == "success" and policy == "silent":
+            action = "suppressed"
         elif scene == "failure" and policy == "digest":
             action = "digest_pending"
         elif (
+                policy == "notify"
+                and
                 mode in ("parallel", "takeover")
                 and self._config.get("notification_plugin_enabled")
         ):
@@ -10893,6 +11070,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def _normalize_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """合并默认值并限制数值配置范围。"""
+        supplied_routes = (
+            config.get("notification_type_routes")
+            if isinstance(config, dict) else None
+        )
+        migrate_legacy_notification_routes = not isinstance(
+            supplied_routes, dict
+        )
         merged = {**self.DEFAULT_CONFIG, **(config or {})}
         bool_keys = (
             "enabled", "recognizer_enabled", "show_sidebar_nav", "debug", "prefer_parsed_title",
@@ -10987,6 +11171,27 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged["notification_failure_policies"] = normalize_failure_policies(
             merged.get("notification_failure_policies")
         )
+        merged["notification_default_service"] = str(
+            merged.get("notification_default_service") or ""
+        ).strip()[:160]
+        merged["notification_type_routes"] = normalize_notification_routes(
+            merged.get("notification_type_routes")
+        )
+        if migrate_legacy_notification_routes:
+            legacy_success = str(
+                merged.get("notification_success_service") or ""
+            ).strip()[:160]
+            legacy_failure = str(
+                merged.get("notification_failure_service") or ""
+            ).strip()[:160]
+            if legacy_success:
+                merged["notification_type_routes"]["organize"]["service"] = (
+                    legacy_success
+                )
+            if legacy_failure:
+                merged["notification_type_routes"]["manual"]["service"] = (
+                    legacy_failure
+                )
         merged["notification_success_service"] = str(
             merged.get("notification_success_service") or ""
         ).strip()[:160]
@@ -10998,6 +11203,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "notification_success_text_template",
             "notification_failure_title_template",
             "notification_failure_text_template",
+            "notification_generic_title_template",
+            "notification_generic_text_template",
         ):
             fallback = str(self.DEFAULT_CONFIG.get(key) or "")
             value = merged.get(key)
@@ -11666,6 +11873,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         item["scan_status"] = "matched"
+        if tmdb_id_override:
+            item["manual_tmdb_id"] = tmdb_id
         item.pop("scan_error", None)
         return item["tmdb_match"]
 

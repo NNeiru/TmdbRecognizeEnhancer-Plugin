@@ -95,7 +95,14 @@ const filteredCatalog = computed(() => {
   return catalog.value.filter(item => {
     if (board.value.region !== 'all' && item.region !== board.value.region) return false
     if (board.value.platform !== 'all' && item.platform !== board.value.platform) return false
-    if (board.value.scanStatus !== 'all' && item.scan_status !== board.value.scanStatus) return false
+    if (
+      board.value.scanStatus !== 'all'
+      && (
+        board.value.scanStatus === 'ignored'
+          ? !item.notification_ignored
+          : item.scan_status !== board.value.scanStatus
+      )
+    ) return false
     if (board.value.multiOnly && !item.is_multi_season) return false
     if (!keyword) return true
     return [item.name, item.name_cn, ...(item.aliases || [])]
@@ -790,7 +797,7 @@ onMounted(async () => {
           <VSelect v-model="board.platform" :items="platforms" label="载体" hide-details density="compact" />
           <VSelect
             v-model="board.scanStatus" label="扫描状态" hide-details density="compact"
-            :items="[{title:'全部状态',value:'all'},{title:'正在扫描',value:'scanning'},{title:'已匹配',value:'matched'},{title:'匹配失败',value:'failed'}]"
+            :items="[{title:'全部状态',value:'all'},{title:'正在扫描',value:'scanning'},{title:'已匹配',value:'matched'},{title:'匹配失败',value:'failed'},{title:'通知已忽略',value:'ignored'}]"
           />
           <VSwitch v-model="board.multiOnly" label="仅续作/多季" color="secondary" hide-details density="compact" />
         </div>
@@ -838,6 +845,7 @@ onMounted(async () => {
                   </VChip>
                   <VChip v-else-if="item.scan_status === 'failed' && !item.maintained" size="x-small" color="warning" variant="tonal">匹配待补充</VChip>
                   <VChip v-if="item.maintained" size="x-small" color="success" prepend-icon="mdi-check">已维护</VChip>
+                  <VChip v-if="item.notification_ignored" size="x-small" color="default" variant="tonal" prepend-icon="mdi-bell-off-outline">通知已忽略</VChip>
                 </div>
                 <div v-if="item.tmdb_match?.best || item.maintained_tmdb_id" class="text-caption text-medium-emphasis mt-2 text-truncate" :title="`TMDB ${item.tmdb_match?.best?.tmdb_id || item.maintained_tmdb_id} · ${item.tmdb_match?.best?.name || '已维护规则'}`">
                   TMDB {{ item.tmdb_match?.best?.tmdb_id || item.maintained_tmdb_id }} · {{ item.tmdb_match?.best?.name || '已维护规则' }}
