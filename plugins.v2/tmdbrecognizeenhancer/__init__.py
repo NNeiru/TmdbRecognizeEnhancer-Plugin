@@ -122,7 +122,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.46"
+    plugin_version = "0.8.47"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -6191,6 +6191,34 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "direct": bool(channel is not None and service),
                 "error": "NotificationType unavailable",
             }
+        delivery_fingerprint = hashlib.sha1(
+            json.dumps(
+                {
+                    "channel": str(getattr(channel, "value", channel) or ""),
+                    "service": str(service or ""),
+                    "title": str(title or ""),
+                    "text": str(text or ""),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8", errors="ignore")
+        ).hexdigest()
+        if not self._claim_shared_notification(
+                "delivery",
+                delivery_fingerprint,
+                ttl=10.0,
+        ):
+            logger.info(
+                "[媒体整理增强] 热更新切换窗口内已发送相同通知，本次不再重复投递："
+                f"{title or '无标题'}"
+            )
+            return {
+                "success": True,
+                "direct": bool(channel is not None and service),
+                "deduplicated": True,
+                "error": None,
+            }
         self._remember_outgoing_notification(title=title, text=text)
         if channel is not None and service:
             return self._send_direct_instance_notification(
@@ -6521,6 +6549,52 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return expires > now
 
     @staticmethod
+    def _claim_shared_notification(
+            bucket: str,
+            fingerprint: str,
+            *,
+            ttl: float,
+    ) -> bool:
+        """在 MoviePilot 进程级事件管理器上原子认领通知。
+
+        插件热更新会替换运行实例，但 EventManager 单例持续存在。把短时防重
+        状态放在这个稳定对象上，可避免旧定时回调与新实例在切换窗口内各发
+        一次；完整重启会自然清空状态，不会留下跨重启脏记录。
+        """
+        try:
+            state = vars(eventmanager).setdefault(
+                "_tmdb_recognize_enhancer_notification_dedupe",
+                {
+                    "lock": threading.RLock(),
+                    "buckets": {},
+                },
+            )
+            lock = state.get("lock")
+            if lock is None:
+                lock = threading.RLock()
+                state["lock"] = lock
+            now = time.monotonic()
+            with lock:
+                buckets = state.setdefault("buckets", {})
+                claims = buckets.get(bucket)
+                if not isinstance(claims, dict):
+                    claims = {}
+                claims = {
+                    key: deadline
+                    for key, deadline in claims.items()
+                    if deadline > now
+                }
+                if claims.get(fingerprint, 0) > now:
+                    buckets[bucket] = claims
+                    return False
+                claims[fingerprint] = now + max(float(ttl), 0.1)
+                buckets[bucket] = claims
+                return True
+        except Exception:
+            # 测试桩或极旧 MP 若不允许给 EventManager 写属性，退回实例防重。
+            return True
+
+    @staticmethod
     def _incoming_notification_fingerprint(
             notice: Dict[str, Any],
     ) -> str:
@@ -6554,6 +6628,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
     ) -> bool:
         """原子认领 MP 通知；短时间内完全相同的后续广播返回 False。"""
         fingerprint = self._incoming_notification_fingerprint(notice)
+        if not self._claim_shared_notification(
+                "incoming",
+                fingerprint,
+                ttl=ttl,
+        ):
+            return False
         now = time.monotonic()
         # MoviePilot 热更新插件时可能保留旧运行实例，只替换类方法。新增的
         # 实例属性不能假定已经由 __init__ 创建，否则更新后第一个通知会因

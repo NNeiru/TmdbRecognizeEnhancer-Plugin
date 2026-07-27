@@ -44,14 +44,14 @@ const activeWorkspace = ref('routes')
 
 const config = computed(() => data.value.config || {})
 const modeItems = [
-  { title: '仅观察', value: 'observe', subtitle: '只分类和记录，不发送额外消息' },
-  { title: '并行增强', value: 'parallel', subtitle: '保留原生通知，同时发送增强通知' },
-  { title: '接管发送', value: 'takeover', subtitle: '由插件发送；需关闭原生渠道类型' },
+  { title: '仅观察', value: 'observe', subtitle: '保留 MP 原生发送；插件只分析和记录' },
+  { title: '并行增强', value: 'parallel', subtitle: 'MP 原生与插件增强消息都会发送，可能形成两条通知' },
+  { title: '接管发送', value: 'takeover', subtitle: '只由插件按下方路由发送；需关闭通知实例中的原生对应类型' },
 ]
 const policyItems = [
-  { title: '立即通知', value: 'notify' },
-  { title: '进入摘要', value: 'digest' },
-  { title: '静默记录', value: 'silent' },
+  { title: '立即通知', value: 'notify', subtitle: '本条失败立即发送到失败通知实例' },
+  { title: '进入摘要', value: 'digest', subtitle: '不立即发送；进入待摘要队列，之后合并发送' },
+  { title: '静默记录', value: 'silent', subtitle: '永不外发；只保留在插件运行记录中' },
 ]
 const routePolicyItems = [
   { title: '接管发送', value: 'notify' },
@@ -620,6 +620,11 @@ onBeforeUnmount(() => {
         </div>
         <VBtn variant="text" color="warning" prepend-icon="mdi-bell-alert-outline" :loading="testing" @click="sendTest('failure')">测试失败通知</VBtn>
       </div>
+      <VAlert type="info" variant="tonal" density="compact" class="mb-3">
+        <strong>策略区别：</strong>
+        “立即通知”逐条外发；“进入摘要”先进入待摘要队列，点击运行记录中的“发送待处理摘要”后才合并外发；
+        “静默记录”始终不外发，只在插件运行记录中留档。
+      </VAlert>
       <div class="policy-grid">
         <div v-for="item in data.failure_categories" :key="item.key" class="policy-card">
           <VAvatar size="38" color="primary" variant="tonal"><VIcon :icon="item.icon" size="20" /></VAvatar>

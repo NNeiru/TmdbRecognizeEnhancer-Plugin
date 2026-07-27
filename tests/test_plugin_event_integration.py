@@ -4048,6 +4048,49 @@ def test_real_notification_uses_same_direct_instance_path_as_test(monkeypatch):
     plugin.post_message.assert_not_called()
 
 
+def test_direct_delivery_deduplicates_across_hot_reload_instances(monkeypatch):
+    module = _load_plugin(monkeypatch)
+
+    class NotificationType:
+        Plugin = "插件"
+
+    class Notification:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    monkeypatch.setattr(module, "NotificationType", NotificationType)
+    monkeypatch.setattr(module.schemas, "Notification", Notification, raising=False)
+    chain = SimpleNamespace(send_direct_message=Mock(return_value={
+        "success": True,
+        "message_id": 321,
+        "chat_id": "654",
+    }))
+    first = _plugin_with_runtime(module, SimpleNamespace())
+    second = _plugin_with_runtime(module, SimpleNamespace())
+    first.chain = chain
+    second.chain = chain
+
+    first_delivery = first._send_enhanced_notification(
+        title="示例动画 S01E01 已入库",
+        text="质量：WEB-DL 1080p",
+        source_notice={},
+        channel="telegram",
+        service="入库通知",
+    )
+    second_delivery = second._send_enhanced_notification(
+        title="示例动画 S01E01 已入库",
+        text="质量：WEB-DL 1080p",
+        source_notice={},
+        channel="telegram",
+        service="入库通知",
+    )
+
+    assert first_delivery["success"] is True
+    assert second_delivery["success"] is True
+    assert second_delivery["deduplicated"] is True
+    chain.send_direct_message.assert_called_once()
+
+
 def test_real_success_and_failure_records_use_channel_receipt(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
@@ -4440,16 +4483,15 @@ def test_ingest_notification_preserves_mp_template_and_only_uses_paths_explicitl
             })
         ),
     })
-    # 模拟下一条独立 MP 通知，而不是同一接收目标拆分事件。
-    plugin._notification_incoming.clear()
+    # 模拟下一条内容不同的独立 MP 通知，而不是同一接收目标拆分事件。
     plugin._handle_notice_message(SimpleNamespace(event_data={
         "mtype": "整理入库",
         "title": "MP 模板标题",
-        "text": "MP 模板正文",
+        "text": "MP 模板正文（下一条）",
     }))
     customized = plugin._send_enhanced_notification.call_args.kwargs
     assert customized["title"] == "【完成】MP 模板标题"
-    assert customized["text"] == "MP 模板正文\n目标：/media/target.mkv"
+    assert customized["text"] == "MP 模板正文（下一条）\n目标：/media/target.mkv"
 
 
 def test_failed_digest_keeps_pending_records_when_direct_delivery_fails(

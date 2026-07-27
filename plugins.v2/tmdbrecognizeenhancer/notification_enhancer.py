@@ -43,13 +43,41 @@ FAILURE_CATEGORIES: tuple[Dict[str, Any], ...] = (
         ),
     },
     {
+        "key": "quality_guard",
+        "label": "已有更优版本",
+        "description": "媒体库已有同名且质量更好的文件，按质量策略停止覆盖",
+        "icon": "mdi-shield-star-outline",
+        "patterns": (
+            r"媒体库存在同名文件，且质量更好",
+            r"(?:已有|存在).*(?:更高|更好|更优).*(?:质量|版本)",
+            r"(?:质量|版本).*(?:更高|更好|更优)",
+            r"(?:higher|better).*(?:quality|version)",
+            r"(?:quality|version).*(?:higher|better)",
+        ),
+    },
+    {
         "key": "duplicate",
         "label": "重复或覆盖冲突",
-        "description": "目标已存在、重复入库或覆盖策略拒绝",
+        "description": "目标已存在、重复入库或不覆盖策略拒绝",
         "icon": "mdi-content-duplicate",
         "patterns": (
             r"已存在", r"重复", r"覆盖", r"冲突", r"duplicate", r"exist", r"overwrite",
-            r"目标文件.*相同",
+            r"目标文件.*相同", r"同名文件", r"插件决定不覆盖",
+        ),
+    },
+    {
+        "key": "remote_transfer",
+        "label": "上传或网盘传输失败",
+        "description": "上传到远程存储、从网盘下载或跨存储整理失败",
+        "icon": "mdi-cloud-alert-outline",
+        "patterns": (
+            r"上传.*(?:失败|异常|错误)", r"(?:失败|异常|错误).*上传",
+            r"(?:网盘|远程|云盘).*(?:下载|传输).*(?:失败|异常|错误)",
+            r"(?:下载|传输).*(?:网盘|远程|云盘).*(?:失败|异常|错误)",
+            r"不支持.*到.*的文件整理",
+            r"upload.*(?:fail|error)", r"(?:fail|error).*upload",
+            r"(?:remote|cloud).*(?:download|transfer).*(?:fail|error)",
+            r"rclone.*(?:fail|error)",
         ),
     },
     {
@@ -65,11 +93,12 @@ FAILURE_CATEGORIES: tuple[Dict[str, Any], ...] = (
     {
         "key": "file_operation",
         "label": "文件操作失败",
-        "description": "复制、移动、硬链接、软链接或删除失败",
+        "description": "复制、移动、链接、下载或删除等文件操作失败",
         "icon": "mdi-file-alert-outline",
         "patterns": (
             r"复制", r"移动", r"硬链接", r"软链接", r"链接失败", r"删除失败",
-            r"copy", r"move", r"link", r"rename", r"unlink",
+            r"下载失败", r"不支持的整理方式", r"整理后未获取到目标文件信息",
+            r"copy", r"move", r"link", r"rename", r"unlink", r"download.*fail",
         ),
     },
     {

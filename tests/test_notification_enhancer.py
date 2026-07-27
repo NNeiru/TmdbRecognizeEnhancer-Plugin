@@ -34,6 +34,24 @@ def test_classifies_structured_subtitle_failure_before_text():
     assert result["key"] == "subtitle_audio"
 
 
+def test_classifies_existing_better_quality_separately_from_duplicate():
+    result = module.classify_failure("媒体库存在同名文件，且质量更好")
+
+    assert result["key"] == "quality_guard"
+
+
+def test_classifies_remote_upload_and_download_failures():
+    upload = module.classify_failure(
+        "/downloads/example.mkv 上传 alist 失败"
+    )
+    download = module.classify_failure(
+        "/cloud/example.mkv 网盘下载失败"
+    )
+
+    assert upload["key"] == "remote_transfer"
+    assert download["key"] == "remote_transfer"
+
+
 def test_unknown_failure_cannot_be_silenced():
     policies = module.normalize_failure_policies({
         "recognition": "silent",
