@@ -69,7 +69,6 @@ const recordActionText = {
   notified: '已提交到 MP',
   delivered: '渠道确认送达',
   delivery_failed: '渠道发送失败',
-  native_passthrough: '沿用 MP 原生投递',
   suppressed: '已静默',
   digest_pending: '等待摘要',
   digest_sent: '摘要已提交',

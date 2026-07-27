@@ -122,7 +122,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.43"
+    plugin_version = "0.8.44"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -3092,7 +3092,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "channel": channel.value,
                 "service_type": str(getattr(conf, "type", None) or ""),
                 "accepts_plugin": accepts_plugin,
-                "switchs": sorted(switchs),
                 "subtitle": (
                     "可接收插件通知"
                     if accepts_plugin else "尚未启用“插件”通知类型"
@@ -6639,31 +6638,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self._notification_delivery = deliveries
             return True
 
-    def _notification_service_accepts_native_notice(
-            self,
-            *,
-            service: str,
-            notice: Dict[str, Any],
-    ) -> bool:
-        """判断目标实例是否已直接接收当前 MP 原生通知类型。"""
-        service = str(service or "").strip()
-        if not service:
-            return False
-        selected = next(
-            (
-                item for item in self._notification_service_options()
-                if str(item.get("value") or "") == service
-            ),
-            None,
-        )
-        if not selected:
-            return False
-        raw_type = notice.get("mtype") or notice.get("type")
-        type_value = str(getattr(raw_type, "value", raw_type) or "")
-        return type_value in {
-            str(value) for value in (selected.get("switchs") or [])
-        }
-
     def _remember_transfer_notice_context(
             self, data: Any, scene: str, event_kind: str = "",
     ) -> Dict[str, Any]:
@@ -6967,18 +6941,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
             action = "suppressed"
         elif (
                 policy == "notify"
-                and mode == "takeover"
-                and target
-                and self._notification_service_accepts_native_notice(
-                    service=target[1], notice=notice,
-                )
-        ):
-            # NoticeMessage 是异步广播，触发时 MP 原生消息已经进入同一实例的
-            # 发送队列。该实例若也接受原生类型，则只沿用原生投递，避免插件
-            # 再向同一个实例补发完全相同的内容。
-            action = "native_passthrough"
-        elif (
-                policy == "notify"
                 and mode in ("parallel", "takeover")
                 and self._config.get("notification_plugin_enabled")
         ):
@@ -7136,15 +7098,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
             action = "suppressed"
         elif scene == "failure" and policy == "digest":
             action = "digest_pending"
-        elif (
-                policy == "notify"
-                and mode == "takeover"
-                and target_service
-                and self._notification_service_accepts_native_notice(
-                    service=target_service, notice=notice,
-                )
-        ):
-            action = "native_passthrough"
         elif (
                 policy == "notify"
                 and

@@ -4363,7 +4363,7 @@ def test_takeover_deduplicates_hidden_native_type_differences(monkeypatch):
     assert len(plugin.get_data(plugin.DATA_KEY_NOTIFICATION_RECORDS)) == 1
 
 
-def test_takeover_uses_native_delivery_when_target_accepts_original_type(
+def test_takeover_does_not_depend_on_native_notification_switch_shape(
         monkeypatch,
 ):
     module = _load_plugin(monkeypatch)
@@ -4383,7 +4383,10 @@ def test_takeover_uses_native_delivery_when_target_accepts_original_type(
         "value": "PiliPili入库通知",
         "switchs": ["整理入库", "插件"],
     }])
-    plugin._send_enhanced_notification = Mock()
+    plugin._send_enhanced_notification = Mock(return_value={
+        "success": True,
+        "direct": True,
+    })
 
     plugin._handle_notice_message(SimpleNamespace(event_data={
         "mtype": "整理入库",
@@ -4392,10 +4395,10 @@ def test_takeover_uses_native_delivery_when_target_accepts_original_type(
         "text": "版本：Baha\n质量：WEB-DL 1080p",
     }))
 
-    plugin._send_enhanced_notification.assert_not_called()
+    plugin._send_enhanced_notification.assert_called_once()
     records = plugin.get_data(plugin.DATA_KEY_NOTIFICATION_RECORDS)
     assert len(records) == 1
-    assert records[0]["action"] == "native_passthrough"
+    assert records[0]["action"] == "delivered"
 
 
 def test_takeover_keeps_distinct_ingest_notice_content(monkeypatch):
