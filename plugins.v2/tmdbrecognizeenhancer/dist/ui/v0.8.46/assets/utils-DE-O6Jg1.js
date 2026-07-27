@@ -1,3 +1,11 @@
+const _export_sfc = (sfc, props) => {
+  const target = sfc.__vccOpts || sfc;
+  for (const [key, val] of props) {
+    target[key] = val;
+  }
+  return target;
+};
+
 const DEFAULT_CONFIG = {
   enabled: false,
   recognizer_enabled: true,
@@ -125,7 +133,7 @@ const DEFAULT_CONFIG = {
   notification_candidate_message_style: "rich",
   notification_candidate_custom_emoji_id: ""
 };
-const UI_VERSION = "0.8.45";
+const UI_VERSION = "0.8.46";
 function ensureUiVersion(backendVersion) {
   const backend = String(backendVersion || "").trim();
   if (!backend || backend === UI_VERSION || typeof window === "undefined") return false;
@@ -164,4 +172,4 @@ function mediaTypeText(value) {
   return "未知";
 }
 
-export { UI_VERSION as U, cloneConfig as c, ensureUiVersion as e, mediaTypeText as m, scoreColor as s, unwrapResponse as u };
+export { UI_VERSION as U, _export_sfc as _, cloneConfig as c, ensureUiVersion as e, mediaTypeText as m, scoreColor as s, unwrapResponse as u };
