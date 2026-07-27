@@ -4202,7 +4202,7 @@ def test_candidate_filter_save_keeps_ingest_delivery_configuration(monkeypatch):
     assert plugin._config["notification_failure_service"] == "入库失败通知"
 
 
-def test_transfer_event_fallback_sends_when_mp_notice_is_absent(monkeypatch):
+def test_transfer_success_event_never_sends_per_file_fallback(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
     plugin._config.update({
@@ -4224,17 +4224,11 @@ def test_transfer_event_fallback_sends_when_mp_notice_is_absent(monkeypatch):
 
     plugin._send_transfer_event_notification_fallback(context)
 
-    plugin._handle_notice_message.assert_called_once()
-    event = plugin._handle_notice_message.call_args.args[0]
-    assert event.event_data["type"] == "整理入库"
-    assert event.event_data["title"] == "示例动画 (2026) S01E03"
-    assert event.event_data["image"] == "https://example.invalid/poster.jpg"
-    assert plugin._handle_notice_message.call_args.kwargs == {
-        "remember_token": False,
-    }
+    plugin._handle_notice_message.assert_not_called()
+    assert plugin._notification_fallback_tokens == []
 
 
-def test_transfer_event_fallback_deduplicates_existing_mp_notice(monkeypatch):
+def test_transfer_success_event_does_not_consume_native_notice_token(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
     plugin._config.update({
@@ -4259,10 +4253,10 @@ def test_transfer_event_fallback_deduplicates_existing_mp_notice(monkeypatch):
     })
 
     plugin._handle_notice_message.assert_not_called()
-    assert plugin._notification_notice_tokens == []
+    assert len(plugin._notification_notice_tokens) == 1
 
 
-def test_late_mp_notice_is_suppressed_after_transfer_fallback(monkeypatch):
+def test_native_mp_success_notice_is_not_suppressed_by_transfer_event(monkeypatch):
     module = _load_plugin(monkeypatch)
     plugin = _plugin_with_runtime(module, SimpleNamespace())
     plugin._config.update({
@@ -4333,9 +4327,15 @@ def test_ingest_notification_preserves_mp_template_and_only_uses_paths_explicitl
     assert "/media/target.mkv" not in sent["text"]
 
     plugin._config.update({
-        "notification_success_title_template": "【完成】{{ original_title }}",
-        "notification_success_text_template": (
-            "{{ original_text }}\n目标：{{ target_path }}"
+        "notification_content_templates": (
+            module.normalize_notification_content_templates({
+                "organizeSuccess": {
+                    "title_template": "【完成】{{ original_title }}",
+                    "text_template": (
+                        "{{ original_text }}\n目标：{{ target_path }}"
+                    ),
+                },
+            })
         ),
     })
     plugin._handle_notice_message(SimpleNamespace(event_data={

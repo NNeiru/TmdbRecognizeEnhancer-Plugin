@@ -89,6 +89,7 @@ from .strm_media_info_sync import StrmMediaInfoSynchronizer
 from .metadata_tools import ReleaseGroupRegistry, RenameFieldRegistry
 from .notification_enhancer import (
     FAILURE_CATEGORIES,
+    NOTIFICATION_CONTENT_TEMPLATES,
     NOTIFICATION_TYPES,
     build_record,
     classify_failure,
@@ -96,7 +97,9 @@ from .notification_enhancer import (
     extract_notice,
     extract_reason,
     normalize_failure_policies,
+    normalize_notification_content_templates,
     normalize_notification_routes,
+    notification_content_key,
     notification_kind,
     notification_type_key,
     summarize_digest,
@@ -119,7 +122,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.38"
+    plugin_version = "0.8.39"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -254,6 +257,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         },
         "notification_default_service": "",
         "notification_type_routes": normalize_notification_routes({}),
+        "notification_content_templates": normalize_notification_content_templates({}),
         "notification_generic_title_template": "{{ original_title }}",
         "notification_generic_text_template": "{{ original_text }}",
         "notification_success_service": "",
@@ -314,6 +318,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
         "notification_failure_policies",
         "notification_default_service",
         "notification_type_routes",
+        "notification_content_templates",
         "notification_generic_title_template",
         "notification_generic_text_template",
         "notification_success_service",
@@ -3126,6 +3131,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "route": deepcopy(routes[item["key"]]),
                 }
                 for item in NOTIFICATION_TYPES
+            ],
+            "notification_content_templates": [
+                deepcopy(item) for item in NOTIFICATION_CONTENT_TEMPLATES
             ],
             "records": records,
             "record_counts": {
@@ -6648,8 +6656,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self,
             context: Dict[str, Any],
     ) -> None:
-        """MP 未产生 NoticeMessage 时，以整理事实事件兜底发送一次。"""
+        """MP 未产生失败 NoticeMessage 时，以整理事实事件兜底发送一次。
+
+        TransferComplete 是逐文件事件，而 MP 的入库成功通知是在整批任务完成后
+        才渲染。这里不能用逐文件事件兜底成功通知，否则多文件任务会提前发出
+        “媒体文件已整理完成”，还会抢先于 MP 的完整 Jinja2 入库模板。
+        """
         scene = str(context.get("scene") or "")
+        if scene != "failure":
+            return
         if not self._notification_active():
             return
         if str(self._config.get("notification_mode") or "observe") not in (
@@ -6676,13 +6691,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
             )
             if value
         ) or "未命名媒体"
-        if scene == "failure":
-            title = f"{title} 入库失败！"
-            text = f"原因：{context.get('reason') or '未知'}"
-            notice_type = "手动处理"
-        else:
-            text = "媒体文件已整理完成"
-            notice_type = "整理入库"
+        title = f"{title} 入库失败！"
+        text = f"原因：{context.get('reason') or '未知'}"
+        notice_type = "手动处理"
         self._handle_notice_message(
             SimpleNamespace(event_data={
                 "source": "MoviePilot",
@@ -6781,11 +6792,19 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "notification_type_label": type_spec["label"],
             "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+        content_key = notification_content_key(notice.get("ctype"))
+        content_template = normalize_notification_content_templates(
+            self._config.get("notification_content_templates")
+        ).get(content_key, {})
         title_template = (
+            content_template.get("title_template")
+            or
             route.get("title_template")
             or self._config.get("notification_generic_title_template")
         )
         text_template = (
+            content_template.get("text_template")
+            or
             route.get("text_template")
             or self._config.get("notification_generic_text_template")
         )
@@ -6916,13 +6935,20 @@ class TmdbRecognizeEnhancer(_PluginBase):
             "notification_failure" if scene == "failure"
             else "notification_success"
         )
+        content_template = {}
+        if scene == "success":
+            content_template = normalize_notification_content_templates(
+                self._config.get("notification_content_templates")
+            ).get("organizeSuccess", {})
         enhanced_title = self._render_ingest_notification_template(
-            self._config.get(f"{template_prefix}_title_template"),
+            content_template.get("title_template")
+            or self._config.get(f"{template_prefix}_title_template"),
             template_context,
             title,
         )
         enhanced_text = self._render_ingest_notification_template(
-            self._config.get(f"{template_prefix}_text_template"),
+            content_template.get("text_template")
+            or self._config.get(f"{template_prefix}_text_template"),
             template_context,
             original_text,
         )
@@ -6981,10 +7007,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         if not event or not event.event_data:
             return
         if self._notification_active():
-            context = self._remember_transfer_notice_context(
+            self._remember_transfer_notice_context(
                 event.event_data, "success",
             )
-            self._schedule_transfer_event_notification_fallback(context)
         try:
             self._maybe_enqueue_strm_sync(event.event_data)
         except Exception as err:
@@ -11074,8 +11099,15 @@ class TmdbRecognizeEnhancer(_PluginBase):
             config.get("notification_type_routes")
             if isinstance(config, dict) else None
         )
+        supplied_content_templates = (
+            config.get("notification_content_templates")
+            if isinstance(config, dict) else None
+        )
         migrate_legacy_notification_routes = not isinstance(
             supplied_routes, dict
+        )
+        migrate_legacy_content_templates = not isinstance(
+            supplied_content_templates, dict
         )
         merged = {**self.DEFAULT_CONFIG, **(config or {})}
         bool_keys = (
@@ -11177,6 +11209,40 @@ class TmdbRecognizeEnhancer(_PluginBase):
         merged["notification_type_routes"] = normalize_notification_routes(
             merged.get("notification_type_routes")
         )
+        if migrate_legacy_content_templates:
+            merged["notification_content_templates"] = (
+                normalize_notification_content_templates({
+                    "organizeSuccess": {
+                        "title_template": merged.get(
+                            "notification_success_title_template"
+                        ),
+                        "text_template": merged.get(
+                            "notification_success_text_template"
+                        ),
+                    },
+                    **{
+                        key: {
+                            "title_template": merged.get(
+                                "notification_generic_title_template"
+                            ),
+                            "text_template": merged.get(
+                                "notification_generic_text_template"
+                            ),
+                        }
+                        for key in (
+                            "downloadAdded",
+                            "subscribeAdded",
+                            "subscribeComplete",
+                        )
+                    },
+                })
+            )
+        else:
+            merged["notification_content_templates"] = (
+                normalize_notification_content_templates(
+                    merged.get("notification_content_templates")
+                )
+            )
         if migrate_legacy_notification_routes:
             legacy_success = str(
                 merged.get("notification_success_service") or ""

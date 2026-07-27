@@ -25,6 +25,7 @@ const data = ref({
   record_counts: {},
   candidates: { ready: [], failed: [] },
   notification_types: [],
+  notification_content_templates: [],
   notification_services: [],
   notification_channels: [],
   candidate_schedule: {},
@@ -88,6 +89,7 @@ const records = computed(() => (data.value.records || []).filter(item => {
 const readyCandidates = computed(() => data.value.candidates?.ready || [])
 const failedCandidates = computed(() => data.value.candidates?.failed || [])
 const notificationTypes = computed(() => data.value.notification_types || [])
+const notificationContentTemplates = computed(() => data.value.notification_content_templates || [])
 const notificationServiceItems = computed(() => (
   (data.value.notification_services || [])
     .filter(item => item.accepts_plugin)
@@ -525,7 +527,7 @@ onBeforeUnmount(() => {
               <VIcon icon="mdi-code-braces" color="primary" />
               <span>
                 <strong>通知模板与高级设置</strong>
-                <small>默认原样转发 MP 已渲染内容；整理成功、整理失败和其它通知可分别定制。</small>
+                <small>完整覆盖 MP 的四种内置模板，并为入库失败和其它通知提供独立模板。</small>
               </span>
             </div>
           </VExpansionPanelTitle>
@@ -538,17 +540,22 @@ onBeforeUnmount(() => {
               <code>current_time</code>。
             </VAlert>
             <div class="notification-template-grid">
-              <div class="notification-template-card success">
-                <h4><VIcon icon="mdi-check-circle-outline" /> 入库成功</h4>
+              <div
+                v-for="item in notificationContentTemplates"
+                :key="item.key"
+                class="notification-template-card content"
+              >
+                <h4><VIcon :icon="item.icon" /> {{ item.label }}</h4>
+                <p>{{ item.description }}</p>
                 <VTextField
-                  v-model="config.notification_success_title_template"
+                  v-model="config.notification_content_templates[item.key].title_template"
                   label="标题模板"
                   variant="outlined"
                   density="compact"
                   hide-details
                 />
                 <VTextarea
-                  v-model="config.notification_success_text_template"
+                  v-model="config.notification_content_templates[item.key].text_template"
                   label="正文模板"
                   variant="outlined"
                   rows="4"
@@ -558,6 +565,7 @@ onBeforeUnmount(() => {
               </div>
               <div class="notification-template-card failure">
                 <h4><VIcon icon="mdi-alert-circle-outline" /> 入库失败</h4>
+                <p>MoviePilot 手动处理类中的整理失败通知。</p>
                 <VTextField
                   v-model="config.notification_failure_title_template"
                   label="标题模板"
@@ -575,7 +583,8 @@ onBeforeUnmount(() => {
                 />
               </div>
               <div class="notification-template-card generic">
-                <h4><VIcon icon="mdi-bell-outline" /> 其它通知类型</h4>
+                <h4><VIcon icon="mdi-bell-outline" /> 其它通知</h4>
+                <p>不属于上面四种 MP 内置模板的通知默认使用此项。</p>
                 <VTextField
                   v-model="config.notification_generic_title_template"
                   label="标题模板"
@@ -982,24 +991,35 @@ onBeforeUnmount(() => {
 }
 .notification-type-card {
   display: grid;
-  grid-template-columns: 38px minmax(120px, 1fr) 132px minmax(145px, .8fr);
+  grid-template-columns: 38px minmax(132px, .72fr) minmax(180px, 1fr);
+  grid-template-rows: auto auto;
   align-items: center;
   gap: 10px;
-  min-height: 76px;
-  padding: 10px 12px;
+  min-height: 112px;
+  padding: 12px 14px;
   border: 1px solid rgba(var(--v-theme-on-surface), .075);
   border-radius: 13px;
   background: rgba(var(--v-theme-on-surface), .025);
 }
-.notification-type-copy { display: grid; min-width: 0; gap: 2px; }
+.notification-type-card > .v-avatar { grid-column: 1; grid-row: 1; }
+.notification-type-copy {
+  display: grid;
+  grid-column: 2 / -1;
+  grid-row: 1;
+  min-width: 0;
+  gap: 2px;
+}
 .notification-type-copy small {
-  overflow: hidden;
   color: rgba(var(--v-theme-on-surface), .56);
   font-size: .71rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.45;
+  white-space: normal;
 }
+.route-policy-select { grid-column: 2; grid-row: 2; }
+.route-service-select,
 .route-service-placeholder {
+  grid-column: 3;
+  grid-row: 2;
   padding: 0 8px;
   color: rgba(var(--v-theme-on-surface), .46);
   font-size: .72rem;
@@ -1138,12 +1158,20 @@ onBeforeUnmount(() => {
   gap: 7px;
   margin: 0;
 }
+.notification-template-card p {
+  min-height: 2.5em;
+  margin: -5px 0 0;
+  color: rgba(var(--v-theme-on-surface), .58);
+  font-size: .74rem;
+  line-height: 1.45;
+}
+.notification-template-card.content h4 { color: rgb(var(--v-theme-primary)); }
 .notification-template-card.success h4 { color: rgb(var(--v-theme-success)); }
 .notification-template-card.failure h4 { color: rgb(var(--v-theme-warning)); }
 .notification-template-card.generic h4 { color: rgb(var(--v-theme-primary)); }
 @media (max-width: 900px) {
   .mode-grid, .policy-grid, .candidate-items, .delivery-grid, .route-defaults, .notification-type-grid, .notification-template-grid { grid-template-columns: 1fr; }
-  .notification-type-card { grid-template-columns: 38px minmax(120px, 1fr) 132px minmax(145px, .8fr); }
+  .notification-type-card { grid-template-columns: 38px minmax(132px, .72fr) minmax(180px, 1fr); }
   .candidate-controls { grid-template-columns: 1fr 1fr; }
   .candidate-toolbar { align-items: flex-start; flex-wrap: wrap; }
   .candidate-actions { flex: 1 0 100%; justify-content: flex-start; padding-left: 34px; }
@@ -1172,10 +1200,15 @@ onBeforeUnmount(() => {
   .notification-type-card {
     grid-template-columns: 38px minmax(0, 1fr);
   }
+  .notification-type-card > .v-avatar { grid-column: 1; grid-row: 1; }
+  .notification-type-copy { grid-column: 2; grid-row: 1; }
   .notification-type-card .route-policy-select,
   .notification-type-card .route-service-select,
   .notification-type-card .route-service-placeholder {
     grid-column: 1 / -1;
   }
+  .notification-type-card .route-policy-select { grid-row: 2; }
+  .notification-type-card .route-service-select,
+  .notification-type-card .route-service-placeholder { grid-row: 3; }
 }
 </style>

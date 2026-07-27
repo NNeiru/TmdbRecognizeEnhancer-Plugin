@@ -89,6 +89,28 @@ export const DEFAULT_CONFIG = {
     subtitle_audio: 'notify',
     unknown: 'notify',
   },
+  notification_default_service: '',
+  notification_type_routes: {},
+  notification_content_templates: {
+    organizeSuccess: {
+      title_template: '{{ original_title }}',
+      text_template: '{{ original_text }}',
+    },
+    downloadAdded: {
+      title_template: '{{ original_title }}',
+      text_template: '{{ original_text }}',
+    },
+    subscribeAdded: {
+      title_template: '{{ original_title }}',
+      text_template: '{{ original_text }}',
+    },
+    subscribeComplete: {
+      title_template: '{{ original_title }}',
+      text_template: '{{ original_text }}',
+    },
+  },
+  notification_generic_title_template: '{{ original_title }}',
+  notification_generic_text_template: '{{ original_text }}',
   notification_episode_candidates_enabled: false,
   notification_candidate_service: '',
   notification_candidate_channel: '',

@@ -97,3 +97,28 @@ def test_notification_type_routes_cover_all_moviepilot_types():
     assert routes["subscribe"]["policy"] == "record"
     assert routes["subscribe"]["service"] == "订阅通知 · Telegram"
     assert routes["site"]["policy"] == "notify"
+
+
+def test_content_templates_cover_moviepilot_native_template_types():
+    assert module.notification_content_key("organizeSuccess") == "organizeSuccess"
+    assert module.notification_content_key("ContentType.SubscribeComplete") == (
+        "subscribeComplete"
+    )
+    assert module.notification_content_key("unknown") == ""
+
+    templates = module.normalize_notification_content_templates({
+        "downloadAdded": {
+            "title_template": "下载：{{ original_title }}",
+            "text_template": "",
+        },
+    })
+    assert set(templates) == {
+        "organizeSuccess",
+        "downloadAdded",
+        "subscribeAdded",
+        "subscribeComplete",
+    }
+    assert templates["downloadAdded"]["title_template"] == (
+        "下载：{{ original_title }}"
+    )
+    assert templates["downloadAdded"]["text_template"] == "{{ original_text }}"

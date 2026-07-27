@@ -152,6 +152,42 @@ NOTIFICATION_TYPES: tuple[Dict[str, Any], ...] = (
 
 NOTIFICATION_TYPE_MAP = {item["key"]: item for item in NOTIFICATION_TYPES}
 VALID_ROUTE_POLICIES = {"notify", "record", "silent"}
+
+# MoviePilot 当前内置的四种结构化通知模板。通知类型（mtype）决定投递范围，
+# 内容类型（ctype）决定使用哪一份 Jinja2 模板；二者不是同一层概念。
+NOTIFICATION_CONTENT_TEMPLATES: tuple[Dict[str, str], ...] = (
+    {
+        "key": "organizeSuccess",
+        "label": "资源入库",
+        "description": "媒体整理成功与入库完成",
+        "icon": "mdi-folder-check-outline",
+    },
+    {
+        "key": "downloadAdded",
+        "label": "资源下载",
+        "description": "资源加入下载器并开始下载",
+        "icon": "mdi-download-box-outline",
+    },
+    {
+        "key": "subscribeAdded",
+        "label": "添加订阅",
+        "description": "电影或剧集订阅创建成功",
+        "icon": "mdi-rss-plus",
+    },
+    {
+        "key": "subscribeComplete",
+        "label": "订阅完成",
+        "description": "订阅已完成或达到完结条件",
+        "icon": "mdi-check-decagram-outline",
+    },
+)
+NOTIFICATION_CONTENT_TEMPLATE_MAP = {
+    item["key"]: item for item in NOTIFICATION_CONTENT_TEMPLATES
+}
+_NOTIFICATION_CONTENT_ALIASES = {
+    re.sub(r"[^a-z0-9]+", "", item["key"].casefold()): item["key"]
+    for item in NOTIFICATION_CONTENT_TEMPLATES
+}
 _NOTIFICATION_TYPE_ALIASES = {
     "资源下载": "download",
     "download": "download",
@@ -254,6 +290,41 @@ def normalize_notification_routes(value: Any) -> Dict[str, Dict[str, str]]:
             "text_template": _text(raw.get("text_template"))[:12000],
         }
     return routes
+
+
+def notification_content_key(value: Any) -> str:
+    """把 ContentType 枚举或文本统一成 MoviePilot 的四个模板键。"""
+    normalized = re.sub(r"[^a-z0-9]+", "", _text(value).casefold())
+    direct = _NOTIFICATION_CONTENT_ALIASES.get(normalized)
+    if direct:
+        return direct
+    return next(
+        (
+            key for alias, key in _NOTIFICATION_CONTENT_ALIASES.items()
+            if normalized.endswith(alias)
+        ),
+        "",
+    )
+
+
+def normalize_notification_content_templates(
+        value: Any,
+) -> Dict[str, Dict[str, str]]:
+    """补齐四种 MP 内容模板的插件后二次模板。"""
+    source = value if isinstance(value, Mapping) else {}
+    templates: Dict[str, Dict[str, str]] = {}
+    for item in NOTIFICATION_CONTENT_TEMPLATES:
+        raw = source.get(item["key"])
+        raw = raw if isinstance(raw, Mapping) else {}
+        templates[item["key"]] = {
+            "title_template": (
+                _text(raw.get("title_template")) or "{{ original_title }}"
+            )[:12000],
+            "text_template": (
+                _text(raw.get("text_template")) or "{{ original_text }}"
+            )[:12000],
+        }
+    return templates
 
 
 def notification_kind(data: Any) -> str:
