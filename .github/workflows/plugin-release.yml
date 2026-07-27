@@ -81,14 +81,30 @@ jobs:
             local notes="$3"
             local tag="${plugin_id}_v${version}"
             local asset="tmdbrecognizeenhancer_v${version}.zip"
+            local stage
 
             git cat-file -e "${commit}^{commit}"
             rm -f "$asset"
+            stage="$(mktemp -d)"
             git archive \
               --format=zip \
               --prefix=tmdbrecognizeenhancer/ \
-              --output="$asset" \
+              --output="${stage}/source.zip" \
               "${commit}:${plugin_dir}"
+            unzip -q "${stage}/source.zip" -d "${stage}/package"
+
+            # 每个版本的联邦入口都有独立目录。安装包只需要当前入口；
+            # 历史目录留在 Git 中用于开发追溯，不再随每次更新重复下载。
+            if [ -d "${stage}/package/tmdbrecognizeenhancer/dist/ui" ]; then
+              find "${stage}/package/tmdbrecognizeenhancer/dist/ui" \
+                -mindepth 1 -maxdepth 1 -type d \
+                ! -name "v${version}" -exec rm -rf {} +
+            fi
+            (
+              cd "${stage}/package"
+              zip -qr "${GITHUB_WORKSPACE}/${asset}" tmdbrecognizeenhancer
+            )
+            rm -rf "$stage"
 
             if gh release view "$tag" >/dev/null 2>&1; then
               echo "Release $tag already exists, updating target and installable asset"

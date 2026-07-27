@@ -1,12 +1,15 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
-import StrategySettings from './StrategySettings.vue'
-import EpisodeNormalizer from './EpisodeNormalizer.vue'
-import MetadataTools from './MetadataTools.vue'
-import PerformanceDiagnostics from './PerformanceDiagnostics.vue'
-import NotificationEnhancer from './NotificationEnhancer.vue'
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import ModuleHeader from './ModuleHeader.vue'
 import { cloneConfig, ensureUiVersion, mediaTypeText, scoreColor, UI_VERSION, unwrapResponse } from '../utils'
+
+// 工作台模块较多，全部静态导入会让插件入口在打开前一次性解析数百 KB
+// 的页面代码。仅保留首页共用组件同步加载，其余模块切换到对应标签时再取。
+const StrategySettings = defineAsyncComponent(() => import('./StrategySettings.vue'))
+const EpisodeNormalizer = defineAsyncComponent(() => import('./EpisodeNormalizer.vue'))
+const MetadataTools = defineAsyncComponent(() => import('./MetadataTools.vue'))
+const PerformanceDiagnostics = defineAsyncComponent(() => import('./PerformanceDiagnostics.vue'))
+const NotificationEnhancer = defineAsyncComponent(() => import('./NotificationEnhancer.vue'))
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
