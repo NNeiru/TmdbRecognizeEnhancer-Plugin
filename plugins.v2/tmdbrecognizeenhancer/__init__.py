@@ -122,7 +122,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.42"
+    plugin_version = "0.8.43"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -418,6 +418,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._notification_outgoing: Dict[str, float] = {}
         self._notification_incoming_lock = threading.RLock()
         self._notification_incoming: Dict[str, float] = {}
+        self._notification_delivery_lock = threading.RLock()
+        self._notification_delivery: Dict[str, float] = {}
         self._notification_telegram_send_lock = threading.RLock()
         self._notification_rich_intent_lock = threading.RLock()
         self._notification_rich_intents: Dict[Tuple[str, str, str], int] = {}
@@ -3090,6 +3092,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 "channel": channel.value,
                 "service_type": str(getattr(conf, "type", None) or ""),
                 "accepts_plugin": accepts_plugin,
+                "switchs": sorted(switchs),
                 "subtitle": (
                     "可接收插件通知"
                     if accepts_plugin else "尚未启用“插件”通知类型"
@@ -6530,9 +6533,17 @@ class TmdbRecognizeEnhancer(_PluginBase):
         分别广播 NoticeMessage。插件最终只投递到用户指定的一个通知实例，
         因而不能把 targets 纳入指纹，否则同一消息会被接管发送多次。
         """
+        scene = notification_kind(notice)
         payload = {
-            "mtype": str(notice.get("mtype") or notice.get("type") or ""),
-            "ctype": str(notice.get("ctype") or ""),
+            # success/failure 的原始 mtype、ctype 在 MP 不同发送路径中可能不同，
+            # 但只要最终场景和可见内容一致，对用户就是同一条入库通知。
+            "route": (
+                f"ingest:{scene}"
+                if scene in ("success", "failure")
+                else notification_type_key(
+                    notice.get("mtype") or notice.get("type")
+                )
+            ),
             "title": str(notice.get("title") or ""),
             "text": str(notice.get("text") or ""),
         }
@@ -6580,6 +6591,78 @@ class TmdbRecognizeEnhancer(_PluginBase):
             incoming[fingerprint] = now + max(ttl, 0.1)
             self._notification_incoming = incoming
             return True
+
+    def _claim_notification_delivery(
+            self,
+            *,
+            scene: str,
+            title: str,
+            text: str,
+            service: str = "",
+            ttl: float = 8.0,
+    ) -> bool:
+        """按最终可见内容认领一次投递，拦截隐藏字段不同的重复事件。"""
+        fingerprint = hashlib.sha1(
+            json.dumps(
+                {
+                    "scene": str(scene or ""),
+                    "service": str(service or ""),
+                    "title": str(title or ""),
+                    "text": str(text or ""),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8", errors="ignore")
+        ).hexdigest()
+        now = time.monotonic()
+        delivery_lock = getattr(self, "_notification_delivery_lock", None)
+        if delivery_lock is None:
+            delivery_lock = (
+                getattr(self, "_notification_recent_lock", None)
+                or threading.RLock()
+            )
+            self._notification_delivery_lock = delivery_lock
+        with delivery_lock:
+            deliveries = getattr(self, "_notification_delivery", None)
+            if not isinstance(deliveries, dict):
+                deliveries = {}
+            deliveries = {
+                key: deadline
+                for key, deadline in deliveries.items()
+                if deadline > now
+            }
+            if deliveries.get(fingerprint, 0) > now:
+                self._notification_delivery = deliveries
+                return False
+            deliveries[fingerprint] = now + max(ttl, 0.1)
+            self._notification_delivery = deliveries
+            return True
+
+    def _notification_service_accepts_native_notice(
+            self,
+            *,
+            service: str,
+            notice: Dict[str, Any],
+    ) -> bool:
+        """判断目标实例是否已直接接收当前 MP 原生通知类型。"""
+        service = str(service or "").strip()
+        if not service:
+            return False
+        selected = next(
+            (
+                item for item in self._notification_service_options()
+                if str(item.get("value") or "") == service
+            ),
+            None,
+        )
+        if not selected:
+            return False
+        raw_type = notice.get("mtype") or notice.get("type")
+        type_value = str(getattr(raw_type, "value", raw_type) or "")
+        return type_value in {
+            str(value) for value in (selected.get("switchs") or [])
+        }
 
     def _remember_transfer_notice_context(
             self, data: Any, scene: str, event_kind: str = "",
@@ -6884,9 +6967,32 @@ class TmdbRecognizeEnhancer(_PluginBase):
             action = "suppressed"
         elif (
                 policy == "notify"
+                and mode == "takeover"
+                and target
+                and self._notification_service_accepts_native_notice(
+                    service=target[1], notice=notice,
+                )
+        ):
+            # NoticeMessage 是异步广播，触发时 MP 原生消息已经进入同一实例的
+            # 发送队列。该实例若也接受原生类型，则只沿用原生投递，避免插件
+            # 再向同一个实例补发完全相同的内容。
+            action = "native_passthrough"
+        elif (
+                policy == "notify"
                 and mode in ("parallel", "takeover")
                 and self._config.get("notification_plugin_enabled")
         ):
+            if not self._claim_notification_delivery(
+                    scene=f"other:{type_key}",
+                    title=enhanced_title,
+                    text=enhanced_text,
+                    service=target[1] if target else "",
+            ):
+                logger.info(
+                    "[媒体整理增强] 忽略最终内容完全相同的重复通知投递："
+                    f"{enhanced_title or title}"
+                )
+                return
             delivery = self._send_enhanced_notification(
                 title=enhanced_title,
                 text=enhanced_text,
@@ -7022,6 +7128,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             original_text,
         )
         action = "observed"
+        target_kwargs = self._notification_target_kwargs(scene)
+        target_service = str(target_kwargs.get("service") or "")
         if scene == "failure" and policy == "silent":
             action = "suppressed"
         elif scene == "success" and policy == "silent":
@@ -7030,15 +7138,35 @@ class TmdbRecognizeEnhancer(_PluginBase):
             action = "digest_pending"
         elif (
                 policy == "notify"
+                and mode == "takeover"
+                and target_service
+                and self._notification_service_accepts_native_notice(
+                    service=target_service, notice=notice,
+                )
+        ):
+            action = "native_passthrough"
+        elif (
+                policy == "notify"
                 and
                 mode in ("parallel", "takeover")
                 and self._config.get("notification_plugin_enabled")
         ):
+            if not self._claim_notification_delivery(
+                    scene=scene,
+                    title=enhanced_title,
+                    text=enhanced_text,
+                    service=target_service,
+            ):
+                logger.info(
+                    "[媒体整理增强] 忽略最终内容完全相同的重复通知投递："
+                    f"{enhanced_title or title}"
+                )
+                return
             delivery = self._send_enhanced_notification(
                 title=enhanced_title,
                 text=enhanced_text,
                 source_notice=notice,
-                **self._notification_target_kwargs(scene),
+                **target_kwargs,
             )
             if delivery.get("direct"):
                 action = (
@@ -7050,11 +7178,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 action = "notified"
             context = {
                 **context,
-                "notification_service": (
-                    self._config.get("notification_failure_service")
-                    if scene == "failure"
-                    else self._config.get("notification_success_service")
-                ),
+                "notification_service": target_service,
                 "message_id": delivery.get("message_id"),
                 "chat_id": delivery.get("chat_id"),
                 "delivery_error": delivery.get("error"),
