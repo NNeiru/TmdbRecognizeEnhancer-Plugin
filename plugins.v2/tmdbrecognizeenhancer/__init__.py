@@ -122,7 +122,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.39"
+    plugin_version = "0.8.40"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -416,6 +416,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._notification_fallback_tokens: List[Dict[str, Any]] = []
         self._notification_outgoing_lock = threading.RLock()
         self._notification_outgoing: Dict[str, float] = {}
+        self._notification_incoming_lock = threading.RLock()
+        self._notification_incoming: Dict[str, float] = {}
         self._notification_telegram_send_lock = threading.RLock()
         self._notification_rich_intent_lock = threading.RLock()
         self._notification_rich_intents: Dict[Tuple[str, str, str], int] = {}
@@ -6518,6 +6520,55 @@ class TmdbRecognizeEnhancer(_PluginBase):
             }
         return expires > now
 
+    @staticmethod
+    def _incoming_notification_fingerprint(
+            notice: Dict[str, Any],
+    ) -> str:
+        """生成与 MP 接收目标无关的通知指纹。
+
+        MoviePilot 会在管理员/用户隔离发送时，为同一条已渲染通知按 targets
+        分别广播 NoticeMessage。插件最终只投递到用户指定的一个通知实例，
+        因而不能把 targets 纳入指纹，否则同一消息会被接管发送多次。
+        """
+        payload = {
+            "mtype": str(notice.get("mtype") or notice.get("type") or ""),
+            "ctype": str(notice.get("ctype") or ""),
+            "source": str(notice.get("source") or ""),
+            "title": str(notice.get("title") or ""),
+            "text": str(notice.get("text") or ""),
+            "image": str(notice.get("image") or ""),
+            "link": str(notice.get("link") or ""),
+        }
+        return hashlib.sha1(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8", errors="ignore")
+        ).hexdigest()
+
+    def _claim_incoming_notification(
+            self,
+            notice: Dict[str, Any],
+            *,
+            ttl: float = 5.0,
+    ) -> bool:
+        """原子认领 MP 通知；短时间内完全相同的后续广播返回 False。"""
+        fingerprint = self._incoming_notification_fingerprint(notice)
+        now = time.monotonic()
+        with self._notification_incoming_lock:
+            self._notification_incoming = {
+                key: deadline
+                for key, deadline in self._notification_incoming.items()
+                if deadline > now
+            }
+            if self._notification_incoming.get(fingerprint, 0) > now:
+                return False
+            self._notification_incoming[fingerprint] = now + max(ttl, 0.1)
+            return True
+
     def _remember_transfer_notice_context(
             self, data: Any, scene: str, event_kind: str = "",
     ) -> Dict[str, Any]:
@@ -6865,6 +6916,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
             return
         notice = extract_notice(event.event_data)
         if self._is_outgoing_notification(notice):
+            return
+        if not self._claim_incoming_notification(notice):
+            logger.info(
+                "[媒体整理增强] 忽略 MoviePilot 接收目标拆分产生的重复通知："
+                f"{notice.get('title') or '无标题'}"
+            )
             return
         scene = notification_kind(notice)
         type_key = notification_type_key(

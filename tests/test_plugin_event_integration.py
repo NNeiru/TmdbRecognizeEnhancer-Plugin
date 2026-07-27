@@ -4288,6 +4288,70 @@ def test_native_mp_success_notice_is_not_suppressed_by_transfer_event(monkeypatc
     assert plugin._notification_fallback_tokens == []
 
 
+def test_takeover_deduplicates_mp_recipient_split_notices(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_success_enabled": True,
+    })
+    plugin._notification_active = Mock(return_value=True)
+    plugin._send_enhanced_notification = Mock(return_value={
+        "success": True,
+        "direct": True,
+    })
+    base_notice = {
+        "mtype": "整理入库",
+        "ctype": "organizeSuccess",
+        "title": "示例动画 (2026) S01 E03 已入库",
+        "text": "版本：Baha\n质量：WEB-DL 1080p",
+        "image": "https://example.invalid/poster.jpg",
+    }
+
+    plugin._handle_notice_message(SimpleNamespace(event_data={
+        **base_notice,
+        "targets": {"telegram": ["admin"]},
+    }))
+    plugin._handle_notice_message(SimpleNamespace(event_data={
+        **base_notice,
+        "targets": {"telegram": ["user"]},
+    }))
+
+    plugin._send_enhanced_notification.assert_called_once()
+    records = plugin.get_data(plugin.DATA_KEY_NOTIFICATION_RECORDS)
+    assert len(records) == 1
+
+
+def test_takeover_keeps_distinct_ingest_notice_content(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_success_enabled": True,
+    })
+    plugin._notification_active = Mock(return_value=True)
+    plugin._send_enhanced_notification = Mock(return_value={
+        "success": True,
+        "direct": True,
+    })
+
+    for version in ("Baha", "ADWeb"):
+        plugin._handle_notice_message(SimpleNamespace(event_data={
+            "mtype": "整理入库",
+            "ctype": "organizeSuccess",
+            "title": "示例动画 (2026) S01 E03 已入库",
+            "text": f"版本：{version}\n质量：WEB-DL 1080p",
+        }))
+
+    assert plugin._send_enhanced_notification.call_count == 2
+    records = plugin.get_data(plugin.DATA_KEY_NOTIFICATION_RECORDS)
+    assert len(records) == 2
+
+
 def test_ingest_notification_preserves_mp_template_and_only_uses_paths_explicitly(
         monkeypatch,
 ):
@@ -4338,6 +4402,8 @@ def test_ingest_notification_preserves_mp_template_and_only_uses_paths_explicitl
             })
         ),
     })
+    # 模拟下一条独立 MP 通知，而不是同一接收目标拆分事件。
+    plugin._notification_incoming.clear()
     plugin._handle_notice_message(SimpleNamespace(event_data={
         "mtype": "整理入库",
         "title": "MP 模板标题",
