@@ -4356,6 +4356,40 @@ def test_takeover_keeps_distinct_ingest_notice_content(monkeypatch):
     assert len(records) == 2
 
 
+def test_takeover_lazily_initializes_dedupe_state_after_hot_reload(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._config.update({
+        "notification_enhancer_enabled": True,
+        "notification_mode": "takeover",
+        "notification_plugin_enabled": True,
+        "notification_success_enabled": True,
+    })
+    plugin._notification_active = Mock(return_value=True)
+    plugin._send_enhanced_notification = Mock(return_value={
+        "success": True,
+        "direct": True,
+    })
+    # 模拟从未包含这两个属性的旧版本实例原位热更新。
+    del plugin._notification_incoming_lock
+    del plugin._notification_incoming
+    event = SimpleNamespace(event_data={
+        "mtype": "整理入库",
+        "ctype": "organizeSuccess",
+        "title": "热更新动画 (2026) S01 E01 已入库",
+        "text": "版本：WebRip\n质量：1080p",
+    })
+
+    plugin._handle_notice_message(event)
+    plugin._handle_notice_message(event)
+
+    plugin._send_enhanced_notification.assert_called_once()
+    assert isinstance(plugin._notification_incoming, dict)
+    assert plugin._notification_incoming_lock is plugin._notification_recent_lock
+    records = plugin.get_data(plugin.DATA_KEY_NOTIFICATION_RECORDS)
+    assert len(records) == 1
+
+
 def test_ingest_notification_preserves_mp_template_and_only_uses_paths_explicitly(
         monkeypatch,
 ):

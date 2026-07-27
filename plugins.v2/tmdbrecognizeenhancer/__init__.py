@@ -122,7 +122,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.41"
+    plugin_version = "0.8.42"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -6555,15 +6555,30 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """原子认领 MP 通知；短时间内完全相同的后续广播返回 False。"""
         fingerprint = self._incoming_notification_fingerprint(notice)
         now = time.monotonic()
-        with self._notification_incoming_lock:
-            self._notification_incoming = {
+        # MoviePilot 热更新插件时可能保留旧运行实例，只替换类方法。新增的
+        # 实例属性不能假定已经由 __init__ 创建，否则更新后第一个通知会因
+        # AttributeError 在事件入口被吞掉，页面和渠道都看不到记录。
+        incoming_lock = getattr(self, "_notification_incoming_lock", None)
+        if incoming_lock is None:
+            incoming_lock = (
+                getattr(self, "_notification_recent_lock", None)
+                or threading.RLock()
+            )
+            self._notification_incoming_lock = incoming_lock
+        with incoming_lock:
+            incoming = getattr(self, "_notification_incoming", None)
+            if not isinstance(incoming, dict):
+                incoming = {}
+            incoming = {
                 key: deadline
-                for key, deadline in self._notification_incoming.items()
+                for key, deadline in incoming.items()
                 if deadline > now
             }
-            if self._notification_incoming.get(fingerprint, 0) > now:
+            if incoming.get(fingerprint, 0) > now:
+                self._notification_incoming = incoming
                 return False
-            self._notification_incoming[fingerprint] = now + max(ttl, 0.1)
+            incoming[fingerprint] = now + max(ttl, 0.1)
+            self._notification_incoming = incoming
             return True
 
     def _remember_transfer_notice_context(
