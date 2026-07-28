@@ -2,8 +2,12 @@
 
 import importlib.util
 import io
+import json
+import threading
+import time
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -286,6 +290,45 @@ def test_cached_result_survives_moved_source_file():
     assert result["source_size"] == 1024
     assert probe.capability()["cache_hits"] == 1
     assert probe.cached_result("/downloads/missing.mkv") is None
+
+
+def test_concurrent_probe_requests_share_one_ffprobe_process(tmp_path, monkeypatch):
+    module = _load_module()
+    probe = module.MediaFileProbe()
+    media = tmp_path / "episode.mkv"
+    media.write_bytes(b"media")
+    executable = tmp_path / "ffprobe"
+    executable.write_bytes(b"binary")
+    calls = []
+    entered = threading.Barrier(2)
+
+    def fake_run(*args, **kwargs):
+        calls.append(args)
+        time.sleep(0.1)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(_sample_payload()),
+            stderr="",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    results = []
+
+    def worker():
+        entered.wait()
+        results.append(probe.probe(media, executable_path=executable))
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert len(calls) == 1
+    assert len(results) == 2
+    assert all(item["success"] for item in results)
+    assert sum(bool(item.get("cached")) for item in results) == 1
 
 
 def test_composite_labels_match_atomic_rules_and_vice_versa():

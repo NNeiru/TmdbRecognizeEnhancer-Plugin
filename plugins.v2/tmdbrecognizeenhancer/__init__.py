@@ -10,7 +10,7 @@ import threading
 import time
 import unicodedata
 from calendar import monthrange
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
 from copy import deepcopy
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -82,8 +82,10 @@ except ImportError:  # pragma: no cover - 旧版 MP 可继续记录，但不能�
 
 from .emby_episode_group_sync import EmbyEpisodeGroupSynchronizer
 from .anime_cross_id import AnimeCrossIdDatabase
+from .api_routes import build_api_routes
 from .emby_media_info import build_sync_payload, is_acceptable as media_info_acceptable
 from .episode_normalizer import EpisodeNormalizer
+from .cache_utils import BoundedTTLCache
 from .media_probe import MediaFileProbe, StaticFfprobeProvisioner
 from .strm_media_info_sync import StrmMediaInfoSynchronizer
 from .metadata_tools import ReleaseGroupRegistry, RenameFieldRegistry
@@ -122,7 +124,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
     plugin_name = "媒体整理增强"
     plugin_desc = "增强媒体识别、媒体流字段、动漫集数偏移、命名规则及 Emby 剧集组联动。"
     plugin_icon = "tmdbrecognizeenhancer.svg"
-    plugin_version = "0.8.47"
+    plugin_version = "0.8.48"
     plugin_author = "NNeiru"
     author_url = "https://github.com/NNeiru"
     plugin_config_prefix = "tmdbrecognizeenhancer_"
@@ -146,6 +148,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
     CATALOG_QUERY_LIMIT = 8
     CATALOG_RESULT_LIMIT = 8
     CATALOG_SCHEMA_VERSION = 3
+    CATALOG_PERSIST_BATCH_SIZE = 8
+    CATALOG_PERSIST_INTERVAL_SECONDS = 1.0
     NOTIFICATION_CANDIDATE_PAGE_SIZE = 1
     NOTIFICATION_COLLAGE_LIMIT = 9
     DEFAULT_CONFIG: Dict[str, Any] = {
@@ -394,7 +398,12 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._config_lock = threading.RLock()
         self._history_lock = threading.RLock()
         self._web_cache_lock = threading.RLock()
-        self._web_cache: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
+        self._web_cache: BoundedTTLCache[
+            Tuple[str, str], List[Dict[str, str]]
+        ] = BoundedTTLCache(max_size=256, ttl_seconds=6 * 3600)
+        self._background_timer_lock = threading.RLock()
+        self._background_timers: set[threading.Timer] = set()
+        self._background_stopped = threading.Event()
         self._catalog_lock = threading.RLock()
         self._catalog_scans: set = set()
         self._memory_lock = threading.RLock()
@@ -428,6 +437,7 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def init_plugin(self, config: Optional[Dict[str, Any]] = None):
         """加载配置并启停名称识别事件处理器。"""
+        self._background_stopped.clear()
         with self._config_lock:
             self._config = self._normalize_config(config or {})
         if self._tmdb_api:
@@ -471,16 +481,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def _sync_anime_cross_id_state(self) -> None:
         """加载本地跨站 ID 快照，并按配置在后台维护最新版。"""
-        if self._anime_cross_id is None:
-            self._anime_cross_id = AnimeCrossIdDatabase(
-                self._plugin_data_dir(), self._download_github_asset,
-            )
-            self._anime_cross_id.load()
         if (
                 not self.get_state()
                 or not self._config.get("anime_cross_id_enabled", True)
         ):
             return
+        if self._anime_cross_id is None:
+            self._anime_cross_id = AnimeCrossIdDatabase(
+                self._plugin_data_dir(), self._download_github_asset,
+            )
+            self._anime_cross_id.load()
         interval = self._safe_int(
             self._config.get("anime_cross_id_update_interval_hours"), 24,
         )
@@ -585,403 +595,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
 
     def get_api(self) -> List[Dict[str, Any]]:
         """注册联邦界面所需的状态、配置、试跑和历史接口。"""
-        return [
-            {
-                "path": "/status",
-                "endpoint": self.get_status,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "获取媒体整理增强状态",
-            },
-            {
-                "path": "/config",
-                "endpoint": self.save_config_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "保存媒体整理增强配置",
-            },
-            {
-                "path": "/preview",
-                "endpoint": self.preview_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "试跑一次候选识别",
-            },
-            {
-                "path": "/history/clear",
-                "endpoint": self.clear_history_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "清空识别历史",
-            },
-            {
-                "path": "/recognition-memory/clear",
-                "endpoint": self.clear_recognition_memory_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "清空近期识别记忆",
-            },
-            {
-                "path": "/anime-cross-id/status",
-                "endpoint": self.get_anime_cross_id_status_api,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "获取动画跨站 ID 数据库状态",
-            },
-            {
-                "path": "/anime-cross-id/refresh",
-                "endpoint": self.refresh_anime_cross_id_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "后台更新动画跨站 ID 数据库",
-            },
-            {
-                "path": "/episode-normalizer",
-                "endpoint": self.get_episode_normalizer_api,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "获取集数归一化规则和季度条目",
-            },
-            {
-                "path": "/episode-normalizer/rule",
-                "endpoint": self.save_episode_rule_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "保存目标编集规则",
-            },
-            {
-                "path": "/episode-normalizer/rule/delete",
-                "endpoint": self.delete_episode_rule_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "删除目标编集规则",
-            },
-            {
-                "path": "/episode-normalizer/rule/batch-delete",
-                "endpoint": self.batch_delete_episode_rules_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "批量删除目标编集规则",
-            },
-            {
-                "path": "/episode-normalizer/manual-add",
-                "endpoint": self.manual_add_episode_rule_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "使用 TMDBID 手动建立目标编集规则",
-            },
-            {
-                "path": "/episode-normalizer/inspect",
-                "endpoint": self.inspect_episode_target_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "查看 TMDB 默认编集和剧集组",
-            },
-            {
-                "path": "/episode-normalizer/preview",
-                "endpoint": self.preview_episode_normalizer_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "试跑集数归一化",
-            },
-            {
-                "path": "/episode-normalizer/catalog/query",
-                "endpoint": self.query_season_catalog_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "按季度查询动画看板",
-            },
-            {
-                "path": "/episode-normalizer/catalog/add",
-                "endpoint": self.add_season_catalog_rule_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "从季度看板直接加入维护规则",
-            },
-            {
-                "path": "/episode-normalizer/catalog/batch-add",
-                "endpoint": self.batch_add_season_catalog_rules_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "批量匹配季度动画并加入维护规则",
-            },
-            {
-                "path": "/episode-normalizer/emby-sync",
-                "endpoint": self.get_emby_sync_api,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "获取 Emby 剧集组联动状态",
-            },
-            {
-                "path": "/episode-normalizer/emby-sync/config",
-                "endpoint": self.save_emby_sync_config_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "保存 Emby 剧集组联动设置",
-            },
-            {
-                "path": "/episode-normalizer/emby-sync/preview",
-                "endpoint": self.preview_emby_sync_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "只读试跑 Emby Series 定位",
-            },
-            {
-                "path": "/episode-normalizer/emby-sync/apply-all",
-                "endpoint": self.apply_all_emby_sync_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "将剧集组写入全部同 TMDBID Series",
-            },
-            {
-                "path": "/episode-normalizer/emby-sync/retry",
-                "endpoint": self.retry_emby_sync_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "重试 Emby 剧集组联动任务",
-            },
-            {
-                "path": "/episode-normalizer/emby-sync/delete",
-                "endpoint": self.delete_emby_sync_job_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "删除 Emby 剧集组联动任务",
-            },
-            {
-                "path": "/metadata-tools/strm-sync",
-                "endpoint": self.get_strm_sync_api,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "获取神医媒体信息推送设置与任务",
-            },
-            {
-                "path": "/metadata-tools/strm-sync/config",
-                "endpoint": self.save_strm_sync_config_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "保存神医媒体信息推送设置",
-            },
-            {
-                "path": "/metadata-tools/strm-sync/preview",
-                "endpoint": self.preview_strm_sync_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "对单个文件试推神医媒体信息",
-            },
-            {
-                "path": "/metadata-tools/strm-sync/retry",
-                "endpoint": self.retry_strm_sync_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "重试神医媒体信息推送任务",
-            },
-            {
-                "path": "/metadata-tools/strm-sync/delete",
-                "endpoint": self.delete_strm_sync_job_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "删除神医媒体信息推送任务",
-            },
-            {
-                "path": "/metadata-tools",
-                "endpoint": self.get_metadata_tools_api,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "获取制作组和重命名字段目录",
-            },
-            {
-                "path": "/metadata-tools/release-group",
-                "endpoint": self.save_release_group_profile_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "设置制作组类型",
-            },
-            {
-                "path": "/metadata-tools/media-probe/preview",
-                "endpoint": self.preview_media_probe_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "读取实际媒体流并预览命名字段",
-            },
-            {
-                "path": "/metadata-tools/media-probe/cache/clear",
-                "endpoint": self.clear_media_probe_cache_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "清除媒体流扫描缓存",
-            },
-            {
-                "path": "/metadata-tools/media-probe/static-ffprobe/install",
-                "endpoint": self.install_static_ffprobe_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "下载并安装 ISO 探测用静态 ffprobe",
-            },
-            {
-                "path": "/metadata-tools/recognition-rule",
-                "endpoint": self.save_recognition_rule_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "保存内置识别字段覆盖规则",
-            },
-            {
-                "path": "/metadata-tools/recognition-rule/delete",
-                "endpoint": self.delete_recognition_rule_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "删除内置识别字段覆盖规则",
-            },
-            {
-                "path": "/metadata-tools/recognition-rule/priority/bulk",
-                "endpoint": self.bulk_recognition_rule_priority_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "批量修改当前筛选识别规则的插件优先级",
-            },
-            {
-                "path": "/metadata-tools/recognition-rule/preview",
-                "endpoint": self.preview_recognition_rule_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "试算内置识别字段覆盖规则",
-            },
-            {
-                "path": "/metadata-tools/rename-field",
-                "endpoint": self.save_custom_rename_field_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "保存自定义重命名字段",
-            },
-            {
-                "path": "/metadata-tools/rename-field/delete",
-                "endpoint": self.delete_custom_rename_field_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "删除自定义重命名字段",
-            },
-            {
-                "path": "/metadata-tools/rename-field/preview",
-                "endpoint": self.preview_custom_rename_fields_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "试算自定义重命名字段",
-            },
-            {
-                "path": "/metadata-tools/release-group-arrangement",
-                "endpoint": self.save_release_group_arrangement_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "保存制作组名称、顺序和连接符规则",
-            },
-            {
-                "path": "/metadata-tools/release-group-arrangement/delete",
-                "endpoint": self.delete_release_group_arrangement_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "删除制作组编排规则",
-            },
-            {
-                "path": "/metadata-tools/release-group-arrangement/preview",
-                "endpoint": self.preview_release_group_arrangement_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "试算制作组名称、顺序和连接符",
-            },
-            {
-                "path": "/metadata-tools/rename-mapping",
-                "endpoint": self.save_rename_mapping_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "保存命名阶段映射规则",
-            },
-            {
-                "path": "/metadata-tools/rename-mapping/delete",
-                "endpoint": self.delete_rename_mapping_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "删除命名阶段映射规则",
-            },
-            {
-                "path": "/metadata-tools/rename-mapping/preview",
-                "endpoint": self.preview_rename_mapping_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "试算命名阶段映射规则",
-            },
-            {
-                "path": "/notification-enhancer",
-                "endpoint": self.get_notification_enhancer_api,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "获取通知接管状态、路由、记录与候选审批",
-            },
-            {
-                "path": "/notification-enhancer/config",
-                "endpoint": self.save_notification_enhancer_config_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "保存通知接管设置",
-            },
-            {
-                "path": "/notification-enhancer/test",
-                "endpoint": self.test_notification_enhancer_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "发送通知接管测试消息",
-            },
-            {
-                "path": "/notification-enhancer/records/clear",
-                "endpoint": self.clear_notification_records_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "清空入库通知记录",
-            },
-            {
-                "path": "/notification-enhancer/digest/send",
-                "endpoint": self.send_notification_digest_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "立即发送待汇总的入库失败摘要",
-            },
-            {
-                "path": "/notification-enhancer/candidates",
-                "endpoint": self.query_notification_candidates_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "查询季度集数规则审批候选",
-            },
-            {
-                "path": "/notification-enhancer/candidates/action",
-                "endpoint": self.action_notification_candidates_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "加入或忽略季度集数规则候选",
-            },
-            {
-                "path": "/notification-enhancer/candidates/batch/send",
-                "endpoint": self.send_notification_candidate_batch_api,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "立即生成并发送集数偏移候选批次",
-            },
-            {
-                "path": "/notification-enhancer/candidates/collage/{batch_id}",
-                "endpoint": self.get_notification_candidate_collage_api,
-                "methods": ["GET"],
-                "auth": "apikey",
-                "summary": "获取集数偏移候选海报拼图",
-            },
-            {
-                "path": "/diagnostics",
-                "endpoint": self.get_diagnostics_api,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "按需采样 MoviePilot 和插件性能",
-            },
-        ]
+        return build_api_routes(self)
 
     def stop_service(self):
         """禁用事件处理器并释放 TMDB 客户端。"""
+        self._cancel_background_timers()
         self._stop_emby_worker()
         self._stop_strm_worker()
         self._sync_event_handler_state(enabled=False)
@@ -991,9 +609,46 @@ class TmdbRecognizeEnhancer(_PluginBase):
         self._customization_separator_adapter.uninstall()
         self._close_tmdb_client()
 
+    def _start_background_timer(
+            self,
+            delay: float,
+            callback: Any,
+            *args: Any,
+    ) -> Optional[threading.Timer]:
+        """启动随插件生命周期取消的短延时任务。"""
+        timer: Optional[threading.Timer] = None
+
+        def run() -> None:
+            try:
+                if not self._background_stopped.is_set():
+                    callback(*args)
+            finally:
+                with self._background_timer_lock:
+                    if timer is not None:
+                        self._background_timers.discard(timer)
+
+        timer = threading.Timer(delay, run)
+        timer.daemon = True
+        with self._background_timer_lock:
+            if self._background_stopped.is_set():
+                return None
+            self._background_timers.add(timer)
+            timer.start()
+        return timer
+
+    def _cancel_background_timers(self) -> None:
+        """取消旧插件实例尚未执行的回调，避免热更新后重复发送。"""
+        self._background_stopped.set()
+        with self._background_timer_lock:
+            timers = tuple(self._background_timers)
+            self._background_timers.clear()
+        for timer in timers:
+            timer.cancel()
+
     def get_status(self) -> schemas.Response:
         """返回当前配置、运行摘要和最近识别记录。"""
         history = self._read_history()
+        anime_cross_id_status = self._anime_cross_id_status()
         recognition_history = [
             item for item in history if item.get("kind", "recognition") == "recognition"
         ]
@@ -1025,11 +680,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
                         "enabled": bool(self._config.get("anime_cross_id_enabled")),
                         "status": (
                             "已停用" if not self._config.get("anime_cross_id_enabled")
-                            else "更新中" if self._anime_cross_id_status().get("updating")
-                            else "运行中" if self._anime_cross_id_status().get("ready")
+                            else "更新中" if anime_cross_id_status.get("updating")
+                            else "运行中" if anime_cross_id_status.get("ready")
                             else "等待首次同步"
                         ),
-                        **self._anime_cross_id_status(),
+                        **anime_cross_id_status,
                     },
                     "episode_offset": {
                         "enabled": bool(self._config.get("episode_normalizer_enabled")),
@@ -2699,7 +2354,50 @@ class TmdbRecognizeEnhancer(_PluginBase):
             self.save_data(self.DATA_KEY_SEASON_CATALOG, cache)
 
     def _scan_catalog_worker(self, quarter: str, items: List[Dict[str, Any]]) -> None:
-        """并发扫描 TMDB，逐条合并结果，避免覆盖用户同期写入的看板数据。"""
+        """并发扫描 TMDB，并按小批次合并结果，避免高频重写整个季度缓存。"""
+        buffered_updates: List[Dict[str, Any]] = []
+        last_flush = time.monotonic()
+        client_local = threading.local()
+        clients: List[TmdbApi] = []
+        clients_lock = threading.Lock()
+
+        def register_client(language: Optional[str] = None) -> TmdbApi:
+            client = TmdbApi(language=language) if language else TmdbApi()
+            with clients_lock:
+                clients.append(client)
+            return client
+
+        def scan_item(
+                item: Dict[str, Any],
+                rules: List[Dict[str, Any]],
+        ) -> Dict[str, Any]:
+            if not hasattr(client_local, "search_api"):
+                client_local.search_api = register_client("en-US")
+            if not hasattr(client_local, "detail_api"):
+                client_local.detail_api = register_client()
+            return self._scan_catalog_item(
+                item,
+                rules=rules,
+                search_api=client_local.search_api,
+                detail_api=client_local.detail_api,
+            )
+
+        def flush_updates(force: bool = False) -> None:
+            nonlocal last_flush
+            if not buffered_updates:
+                return
+            elapsed = time.monotonic() - last_flush
+            if (
+                    not force
+                    and len(buffered_updates) < self.CATALOG_PERSIST_BATCH_SIZE
+                    and elapsed < self.CATALOG_PERSIST_INTERVAL_SECONDS
+            ):
+                return
+            batch = list(buffered_updates)
+            self._merge_catalog_scan_items(quarter, batch)
+            del buffered_updates[:len(batch)]
+            last_flush = time.monotonic()
+
         try:
             match = re.fullmatch(r"(\d{4})-Q([1-4])", quarter)
             if match:
@@ -2735,30 +2433,70 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 except Exception as err:
                     logger.warning(f"[TMDB识别增强] TMDB 国漫/欧美动画目录补充失败：{err}")
                 self._merge_catalog_source_items(quarter, items)
-            with ThreadPoolExecutor(max_workers=min(6, len(items)), thread_name_prefix="tmdb-scan") as executor:
-                futures = {executor.submit(self._scan_catalog_item, item): item for item in items}
-                for future in as_completed(futures):
-                    item = futures[future]
-                    try:
-                        updated = future.result()
-                    except Exception as err:
-                        item["scan_status"] = "failed"
-                        item["scan_error"] = str(err)
-                        updated = item
-                    self._merge_catalog_scan_item(quarter, updated)
+            # 维护规则在一轮扫描内使用同一快照。用户在扫描期间手工修正看板时，
+            # flush 仍会重新读取最新缓存，并由合并逻辑保留用户锁定结果。
+            episode_rules = self._read_episode_rules()
+            with ThreadPoolExecutor(
+                    max_workers=max(1, min(6, len(items))),
+                    thread_name_prefix="tmdb-scan",
+            ) as executor:
+                futures = {
+                    executor.submit(scan_item, item, episode_rules): item
+                    for item in items
+                }
+                pending = set(futures)
+                while pending:
+                    done, pending = wait(
+                        pending,
+                        timeout=self.CATALOG_PERSIST_INTERVAL_SECONDS,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    if not done:
+                        # 即便后续 TMDB 请求耗时较长，已经完成的少量结果也会
+                        # 在约一秒内出现在 UI，而不是一直等待凑满一批。
+                        flush_updates(force=True)
+                        continue
+                    for future in done:
+                        item = futures[future]
+                        try:
+                            updated = future.result()
+                        except Exception as err:
+                            item["scan_status"] = "failed"
+                            item["scan_error"] = str(err)
+                            updated = item
+                        buffered_updates.append(updated)
+                        flush_updates()
+                    flush_updates()
+            flush_updates(force=True)
             # 季度扫描只负责刷新缓存。存量候选由计划批次汇总，只有基线之后
             # 新增或由失败转为成功的条目才走实时单条通知。
             self._monitor_notification_candidates(quarter)
         finally:
+            if buffered_updates:
+                try:
+                    flush_updates(force=True)
+                except Exception as err:
+                    logger.error(f"[TMDB识别增强] 季度扫描最终结果写入失败：{err}")
+            for client in clients:
+                try:
+                    client.close()
+                except Exception:
+                    pass
             with self._catalog_lock:
                 self._catalog_scans.discard(quarter)
 
-    def _scan_catalog_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def _scan_catalog_item(
+            self,
+            item: Dict[str, Any],
+            rules: Optional[List[Dict[str, Any]]] = None,
+            search_api: Optional[TmdbApi] = None,
+            detail_api: Optional[TmdbApi] = None,
+    ) -> Dict[str, Any]:
         """完成单条快速匹配及本地化详情补充。"""
         match = item.get("tmdb_match") or {}
         locked_tmdb_id = (
             self._safe_int(item.get("manual_tmdb_id"), 0)
-            or self._catalog_maintained_tmdb_id(item)
+            or self._catalog_maintained_tmdb_id(item, rules)
         )
         if locked_tmdb_id:
             match = {
@@ -2780,20 +2518,33 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     "source": "user-maintained",
                 },
             }
+        matched_detail: Dict[str, Any] = {}
         if not match.get("accepted"):
-            match = self._fast_catalog_tmdb_match(item)
+            match = self._fast_catalog_tmdb_match(
+                item,
+                tmdb_api=search_api,
+                detail_api=detail_api,
+                detail_out=matched_detail,
+            )
         tmdb_id = self._safe_int((match.get("best") or {}).get("tmdb_id"), 0)
         if not tmdb_id:
             raise ValueError("未获得有效 TMDBID")
         media_type = self._normalize_media_type((match.get("best") or {}).get("media_type")) or MediaType.TV
-        api = TmdbApi()
-        try:
-            info = api.get_info(mtype=media_type, tmdbid=tmdb_id) or {}
-        finally:
+        info = matched_detail.get("detail") or {}
+        owns_detail_api = False
+        if not info:
+            api = detail_api
+            if api is None:
+                api = TmdbApi()
+                owns_detail_api = True
             try:
-                api.close()
-            except Exception:
-                pass
+                info = api.get_info(mtype=media_type, tmdbid=tmdb_id) or {}
+            finally:
+                if owns_detail_api:
+                    try:
+                        api.close()
+                    except Exception:
+                        pass
         if not info:
             raise ValueError(f"TMDB {tmdb_id} 不存在或媒体类型不匹配")
         localized = self._clean_title(info.get("name") or info.get("title"))
@@ -2818,30 +2569,51 @@ class TmdbRecognizeEnhancer(_PluginBase):
         return item
 
     def _merge_catalog_scan_item(self, quarter: str, updated: Dict[str, Any]) -> None:
-        """只合并扫描字段，保留用户同时执行的规则添加和其它缓存变化。"""
+        """兼容单条调用；实际写入使用与后台批次相同的合并规则。"""
+        self._merge_catalog_scan_items(quarter, [updated])
+
+    def _merge_catalog_scan_items(
+            self,
+            quarter: str,
+            updates: List[Dict[str, Any]],
+    ) -> None:
+        """批量合并扫描字段，保留用户同时执行的规则添加和其它缓存变化。"""
+        if not updates:
+            return
         with self._catalog_lock:
             cache = self._read_season_catalog_cache()
             data = cache.get(quarter) or {}
             items = data.get("items") if isinstance(data, dict) else []
-            current = next((item for item in items or [] if item.get("id") == updated.get("id")), None)
-            if not current:
-                return
-            current_match = current.get("tmdb_match") or {}
-            user_locked = (
-                str(current_match.get("reason") or "").startswith("用户")
-                or str((current_match.get("best") or {}).get("source") or "") == "user-corrected"
-            )
-            for key in (
-                    "tmdb_match", "scan_status", "scan_error", "is_multi_season",
-                    "display_name", "name_cn", "aliases", "rule_eligible",
-                    "matched_media_type", "manual_tmdb_id",
-            ):
-                if user_locked and key in ("tmdb_match", "display_name", "name_cn", "aliases"):
+            index = {
+                str(item.get("id")): item
+                for item in items or []
+                if isinstance(item, dict) and item.get("id") is not None
+            }
+            changed = False
+            for updated in updates:
+                current = index.get(str(updated.get("id")))
+                if not current:
                     continue
-                if key in updated:
-                    current[key] = deepcopy(updated[key])
-                elif key == "scan_error":
-                    current.pop(key, None)
+                current_match = current.get("tmdb_match") or {}
+                user_locked = (
+                    str(current_match.get("reason") or "").startswith("用户")
+                    or str((current_match.get("best") or {}).get("source") or "") == "user-corrected"
+                )
+                for key in (
+                        "tmdb_match", "scan_status", "scan_error", "is_multi_season",
+                        "display_name", "name_cn", "aliases", "rule_eligible",
+                        "matched_media_type", "manual_tmdb_id",
+                ):
+                    if user_locked and key in ("tmdb_match", "display_name", "name_cn", "aliases"):
+                        continue
+                    if key in updated:
+                        current[key] = deepcopy(updated[key])
+                        changed = True
+                    elif key == "scan_error" and key in current:
+                        current.pop(key, None)
+                        changed = True
+            if not changed:
+                return
             data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             cache[quarter] = data
             self.save_data(self.DATA_KEY_SEASON_CATALOG, cache)
@@ -3169,12 +2941,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
         }
 
     def get_notification_enhancer_api(self) -> schemas.Response:
-        """获取完整通知接管配置、运行记录和当前季度候选。"""
-        data = self._notification_status_data()
-        data["candidates"] = self._notification_candidate_snapshot(
-            self._current_quarter_key()
-        )
-        return schemas.Response(success=True, data=data)
+        """获取通知配置与运行记录；季度候选由对应子页按需加载。"""
+        return schemas.Response(success=True, data=self._notification_status_data())
 
     def save_notification_enhancer_config_api(
             self, payload: dict = Body(...),
@@ -3491,14 +3259,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     matches.add(tmdb_id)
         return next(iter(matches)) if len(matches) == 1 else 0
 
-    def _notification_candidates(
-            self,
-            quarter: str,
-            options: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
-        """兼容旧调用：只返回已经匹配成功、可直接加入规则的候选。"""
-        return self._notification_candidate_snapshot(quarter, options)["ready"]
-
     def _notification_service_target(
             self, configured_service: Any,
     ) -> Optional[Tuple[Any, str]]:
@@ -3596,11 +3356,6 @@ class TmdbRecognizeEnhancer(_PluginBase):
             {"channel": target[0], "service": target[1]}
             if target else {}
         )
-
-    def _notification_candidate_channel(self) -> Any:
-        """兼容旧内部调用，仅返回已选实例对应的渠道枚举。"""
-        target = self._notification_candidate_target()
-        return target[0] if target else None
 
     def _notification_test_target(
             self, scene: str = "success",
@@ -3767,7 +3522,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 with self._notification_rich_intent_lock:
                     self._notification_rich_intent_sequence += 1
                     intent_sequence = self._notification_rich_intent_sequence
+                    self._notification_rich_intents.pop(message_key, None)
                     self._notification_rich_intents[message_key] = intent_sequence
+                    self._prune_notification_rich_state_locked()
                 # 同一 Rich Message 的媒体替换必须串行提交。快速连续翻页时，
                 # 后一次点击会登记为更新意图；尚未开始的旧请求直接丢弃，已经
                 # 开始的请求完成后再由新请求覆盖，避免旧海报晚到反压新页面。
@@ -3807,6 +3564,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
                     )
                     if rich_result.get("success"):
                         with self._notification_rich_intent_lock:
+                            self._notification_rich_message_state.pop(
+                                message_key, None,
+                            )
                             self._notification_rich_message_state[message_key] = {
                                 "photo_unique_id": str(
                                     rich_result.get("photo_unique_id") or ""
@@ -3815,6 +3575,13 @@ class TmdbRecognizeEnhancer(_PluginBase):
                                     rich_result.get("image_digest") or ""
                                 ),
                             }
+                            self._prune_notification_rich_state_locked()
+                    with self._notification_rich_intent_lock:
+                        if (
+                                self._notification_rich_intents.get(message_key)
+                                == intent_sequence
+                        ):
+                            self._notification_rich_intents.pop(message_key, None)
                 if rich_result.get("success"):
                     return rich_result
                 logger.warning(
@@ -3928,6 +3695,17 @@ class TmdbRecognizeEnhancer(_PluginBase):
         except Exception as err:  # noqa: BLE001 - 渠道异常不能中断候选扫描。
             logger.error(f"[媒体整理增强] 通知实例 {service} 发送候选失败：{err}")
             return {"success": False, "error": str(err)}
+
+    def _prune_notification_rich_state_locked(self, limit: int = 256) -> None:
+        """限制 Telegram 交互状态，避免长期运行后随消息数无限增长。"""
+        while len(self._notification_rich_intents) > limit:
+            key = next(iter(self._notification_rich_intents))
+            self._notification_rich_intents.pop(key, None)
+            self._notification_rich_message_state.pop(key, None)
+        while len(self._notification_rich_message_state) > limit:
+            key = next(iter(self._notification_rich_message_state))
+            self._notification_rich_message_state.pop(key, None)
+            self._notification_rich_intents.pop(key, None)
 
     @staticmethod
     def _rich_markdown_escape(value: Any) -> str:
@@ -6855,13 +6633,11 @@ class TmdbRecognizeEnhancer(_PluginBase):
         """等待 MP 原生渲染通知；缺席时再使用结构化事件，避免重复发送。"""
         if not context or not self._notification_active():
             return
-        timer = threading.Timer(
+        self._start_background_timer(
             6.0,
             self._send_transfer_event_notification_fallback,
-            args=(deepcopy(context),),
+            deepcopy(context),
         )
-        timer.daemon = True
-        timer.start()
 
     def _recent_transfer_context(
             self, scene: str, notice_title: str = "",
@@ -12093,8 +11869,16 @@ class TmdbRecognizeEnhancer(_PluginBase):
         item.pop("scan_error", None)
         return item["tmdb_match"]
 
-    def _fast_catalog_tmdb_match(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def _fast_catalog_tmdb_match(
+            self,
+            item: Dict[str, Any],
+            tmdb_api: Optional[TmdbApi] = None,
+            detail_api: Optional[TmdbApi] = None,
+            detail_out: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """使用季度目录专用的多别名策略，不受整理识别参数影响。"""
+        if detail_out is not None:
+            detail_out.clear()
         titles = self._catalog_search_titles(item)[: self.CATALOG_QUERY_LIMIT]
         if not titles:
             raise ValueError("没有可用于搜索的标题")
@@ -12103,7 +11887,9 @@ class TmdbRecognizeEnhancer(_PluginBase):
         allowed_types = {preferred_type}
         if platform in ("ONA", "OVA", "SPECIAL"):
             allowed_types = {MediaType.TV, MediaType.MOVIE}
-        api = TmdbApi(language="en-US")
+        api = tmdb_api or TmdbApi(language="en-US")
+        owns_api = tmdb_api is None
+        catalog_detail_api = detail_api or api
         collected: Dict[str, Dict[str, Any]] = {}
         try:
             for query_index, title in enumerate(titles):
@@ -12131,17 +11917,18 @@ class TmdbRecognizeEnhancer(_PluginBase):
                 for candidate in detail_candidates:
                     media_type = self._normalize_media_type(candidate.get("media_type"))
                     try:
-                        candidate["_catalog_detail"] = api.get_info(
+                        candidate["_catalog_detail"] = catalog_detail_api.get_info(
                             mtype=media_type or preferred_type,
                             tmdbid=self._safe_int(candidate.get("id"), 0),
                         ) or {}
                     except Exception:
                         candidate["_catalog_detail"] = {}
         finally:
-            try:
-                api.close()
-            except Exception:
-                pass
+            if owns_api:
+                try:
+                    api.close()
+                except Exception:
+                    pass
 
         scored: List[Dict[str, Any]] = []
         for candidate in collected.values():
@@ -12229,6 +12016,8 @@ class TmdbRecognizeEnhancer(_PluginBase):
             }
             raise ValueError(reason)
         raw = best["raw"]
+        if detail_out is not None and isinstance(raw.get("_catalog_detail"), dict):
+            detail_out["detail"] = raw["_catalog_detail"]
         runner_score = scored[1]["score"] if len(scored) > 1 else 0.0
         match = {
             "accepted": True,

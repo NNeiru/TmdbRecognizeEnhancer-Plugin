@@ -10,6 +10,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.schemas.types import MediaType
 
+try:
+    from .cache_utils import BoundedTTLCache
+except ImportError:  # pragma: no cover - direct module loading in compatibility tests
+    from cache_utils import BoundedTTLCache
+
 
 class EpisodeNormalizer:
     """基于 TMDB Episode ID、目标坐标和全局顺序进行安全的季集归一化。"""
@@ -25,7 +30,12 @@ class EpisodeNormalizer:
 
     def __init__(self, tmdb_api: Any):
         self._tmdb = tmdb_api
-        self._cache: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
+        # TMDB episode layouts change over time while a series is airing. Keep
+        # snapshots long enough to avoid repeated API calls, but never retain
+        # every inspected series for the entire MoviePilot process lifetime.
+        self._cache: BoundedTTLCache[
+            Tuple[str, int, str], Dict[str, Any]
+        ] = BoundedTTLCache(max_size=384, ttl_seconds=3600)
         self._lock = threading.RLock()
 
     def clear_cache(self) -> None:

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sys
 import threading
+import time
 from io import BytesIO
 from enum import Enum
 from pathlib import Path
@@ -112,6 +113,43 @@ def _plugin_with_runtime(module, runtime_meta):
     return plugin
 
 
+def test_managed_timer_is_cancelled_when_plugin_stops(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    called = threading.Event()
+    plugin._stop_emby_worker = Mock()
+    plugin._stop_strm_worker = Mock()
+    plugin._sync_event_handler_state = Mock()
+    plugin._runtime_adapter.uninstall = Mock()
+    plugin._episode_transfer_adapter.uninstall = Mock()
+    plugin._subtitle_rename_adapter.uninstall = Mock()
+    plugin._customization_separator_adapter.uninstall = Mock()
+    plugin._close_tmdb_client = Mock()
+
+    plugin._start_background_timer(0.05, called.set)
+    plugin.stop_service()
+    time.sleep(0.08)
+
+    assert called.is_set() is False
+    assert plugin._background_timers == set()
+
+
+def test_rich_message_state_is_bounded(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    for index in range(300):
+        key = ("telegram", "chat", str(index))
+        plugin._notification_rich_intents[key] = index
+        plugin._notification_rich_message_state[key] = {"image_digest": str(index)}
+
+    with plugin._notification_rich_intent_lock:
+        plugin._prune_notification_rich_state_locked(limit=64)
+
+    assert len(plugin._notification_rich_intents) == 64
+    assert len(plugin._notification_rich_message_state) == 64
+    assert ("telegram", "chat", "299") in plugin._notification_rich_message_state
+
+
 def test_event_searches_post_word_meta_name(monkeypatch):
     module = _load_plugin(monkeypatch)
     runtime_meta = SimpleNamespace(
@@ -152,6 +190,40 @@ def test_federation_path_is_versioned(monkeypatch):
     assert render_mode == "vue"
     assert module.TmdbRecognizeEnhancer.plugin_version in dist_path
     assert dist_path.endswith("/assets")
+
+
+def test_api_routes_match_legacy_registration_contract(monkeypatch):
+    import hashlib
+
+    module = _load_plugin(monkeypatch)
+    routes = module.TmdbRecognizeEnhancer().get_api()
+    route_snapshot = [
+        (
+            route["path"],
+            route["endpoint"].__name__,
+            tuple(route["methods"]),
+            route["auth"],
+            route["summary"],
+        )
+        for route in routes
+    ]
+    serialized = json.dumps(
+        route_snapshot,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert len(routes) == 56
+    assert len({route["path"] for route in routes}) == 56
+    assert all(callable(route["endpoint"]) for route in routes)
+    assert all(
+        set(route) == {"path", "endpoint", "methods", "auth", "summary"}
+        for route in routes
+    )
+    # Snapshot of the 56 routes registered before api_routes.py was extracted.
+    assert hashlib.sha256(serialized).hexdigest() == (
+        "7557b06d0496cf394243f6a07b66933eb1c843fbee7ecd0adbedf55febc5d1a8"
+    )
 
 
 def test_transfer_complete_queues_only_the_applied_episode_group(monkeypatch):
@@ -2508,6 +2580,129 @@ def test_scan_result_does_not_overwrite_user_corrected_match(monkeypatch):
     item = plugin._data[plugin.DATA_KEY_SEASON_CATALOG]["2026-Q3"]["items"][0]
     assert item["tmdb_match"]["best"]["tmdb_id"] == 456
     assert item["display_name"] == "用户选择"
+
+
+def test_catalog_worker_batches_persistence_without_losing_results(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    quarter = "batch-test"
+    item_count = 25
+    source_items = [
+        {
+            "id": f"anilist:{index}",
+            "name": f"Anime {index}",
+            "scan_status": "scanning",
+        }
+        for index in range(item_count)
+    ]
+    plugin._data[plugin.DATA_KEY_SEASON_CATALOG] = {
+        quarter: {
+            "items": [dict(item) for item in source_items],
+            "updated_at": "",
+        },
+    }
+    rules = [{
+        "tmdb_id": 999,
+        "title": "Unrelated",
+        "enabled": True,
+        "installments": [],
+    }]
+    plugin._read_episode_rules = Mock(return_value=rules)
+
+    def scan_item(item, **kwargs):
+        assert kwargs["rules"] is rules
+        if item["id"] == "anilist:7":
+            raise RuntimeError("expected scan failure")
+        return {
+            **item,
+            "scan_status": "matched",
+            "display_name": f"已匹配 {item['id']}",
+        }
+
+    plugin._scan_catalog_item = Mock(side_effect=scan_item)
+    plugin._monitor_notification_candidates = Mock()
+
+    created_clients = []
+
+    class FakeTmdb:
+        def __init__(self, language=None):
+            self.language = language
+            self.closed = False
+            created_clients.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(module, "TmdbApi", FakeTmdb)
+    original_save_data = plugin.save_data
+    catalog_writes = []
+
+    def counted_save(key, value):
+        if key == plugin.DATA_KEY_SEASON_CATALOG:
+            catalog_writes.append(value)
+        original_save_data(key, value)
+
+    plugin.save_data = counted_save
+
+    plugin._scan_catalog_worker(quarter, [dict(item) for item in source_items])
+
+    stored = plugin._data[plugin.DATA_KEY_SEASON_CATALOG][quarter]["items"]
+    assert len(stored) == item_count
+    assert {item["id"] for item in stored} == {
+        f"anilist:{index}" for index in range(item_count)
+    }
+    assert next(item for item in stored if item["id"] == "anilist:7")["scan_status"] == "failed"
+    assert all(
+        item["scan_status"] == "matched"
+        for item in stored
+        if item["id"] != "anilist:7"
+    )
+    assert plugin._read_episode_rules.call_count == 1
+    assert len(catalog_writes) <= 4
+    assert len(catalog_writes) < item_count
+    assert created_clients
+    assert len(created_clients) <= 12
+    assert all(client.closed for client in created_clients)
+
+
+def test_catalog_scan_reuses_fast_match_detail(monkeypatch):
+    module = _load_plugin(monkeypatch)
+    plugin = _plugin_with_runtime(module, SimpleNamespace())
+    plugin._read_episode_rules = Mock(side_effect=AssertionError("rules should be preloaded"))
+    detail_api = Mock()
+
+    def fast_match(item, **kwargs):
+        kwargs["detail_out"]["detail"] = {
+            "name": "中文动画名",
+            "seasons": [{"season_number": 1}, {"season_number": 2}],
+        }
+        return {
+            "accepted": True,
+            "best": {
+                "tmdb_id": 789,
+                "name": "Anime",
+                "media_type": module.MediaType.TV.value,
+            },
+        }
+
+    plugin._fast_catalog_tmdb_match = Mock(side_effect=fast_match)
+
+    updated = plugin._scan_catalog_item(
+        {
+            "id": "anilist:1",
+            "name": "Anime",
+            "aliases": ["Anime"],
+            "tmdb_match": {},
+        },
+        rules=[],
+        search_api=Mock(),
+        detail_api=detail_api,
+    )
+
+    assert updated["scan_status"] == "matched"
+    assert updated["display_name"] == "中文动画名"
+    assert updated["is_multi_season"] is True
+    detail_api.get_info.assert_not_called()
 
 
 def test_title_only_episode_preview_uses_saved_rule(monkeypatch):

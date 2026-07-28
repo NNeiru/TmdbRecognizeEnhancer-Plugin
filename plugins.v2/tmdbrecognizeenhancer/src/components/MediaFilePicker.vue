@@ -2,6 +2,41 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { unwrapResponse } from '../utils'
 
+const STORAGE_CACHE_TTL_MS = 30000
+const storageOptionsCache = new WeakMap()
+
+function normalizeStorageOptions(response) {
+  const unwrapped = unwrapResponse(response)
+  const value = response?.data?.value ?? unwrapped?.value ?? unwrapped
+  if (!Array.isArray(value)) return []
+  return value
+    .filter(item => item?.type)
+    .map(item => ({ title: item.name || item.type, value: item.type }))
+}
+
+async function fetchStorageOptions(api) {
+  if (!api || typeof api.get !== 'function') return []
+  const cached = storageOptionsCache.get(api)
+  const now = Date.now()
+  if (cached?.items && cached.expiresAt > now) return cached.items
+  if (cached?.promise) return cached.promise
+
+  const promise = api.get('system/setting/public/Storages').then(normalizeStorageOptions)
+  storageOptionsCache.set(api, { items: null, expiresAt: 0, promise })
+  try {
+    const items = await promise
+    storageOptionsCache.set(api, {
+      items,
+      expiresAt: Date.now() + STORAGE_CACHE_TTL_MS,
+      promise: null,
+    })
+    return items
+  } catch (error) {
+    if (storageOptionsCache.get(api)?.promise === promise) storageOptionsCache.delete(api)
+    throw error
+  }
+}
+
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
   modelValue: { type: String, default: '' },
@@ -66,10 +101,9 @@ async function fetchChildren(item) {
 
 async function loadStorages() {
   try {
-    const response = await props.api.get('system/setting/public/Storages')
-    const value = response?.data?.value || unwrapResponse(response)?.value || unwrapResponse(response)
-    if (Array.isArray(value) && value.length) {
-      storages.value = value.map(item => ({ title: item.name || item.type, value: item.type }))
+    const options = await fetchStorageOptions(props.api)
+    if (options.length) {
+      storages.value = options.map(item => ({ ...item }))
       if (!storages.value.some(item => item.value === storage.value)) storage.value = storages.value[0].value
     }
   } catch (_) { /* 保留本地存储兜底 */ }

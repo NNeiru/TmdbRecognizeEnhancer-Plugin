@@ -29,7 +29,7 @@ export default defineConfig({
     // 会继续返回当前页面内存中的旧模块。
     outDir: `dist/ui/${uiVersionDir}`,
     target: 'esnext',
-    minify: false,
+    minify: 'esbuild',
     cssCodeSplit: true,
   },
   define: {

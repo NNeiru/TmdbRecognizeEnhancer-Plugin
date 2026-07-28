@@ -206,10 +206,12 @@ class MediaFileProbe:
     _LANGUAGE_ORDER = {"简体": 0, "繁体": 1, "中文": 2, "日语": 3, "英语": 4, "韩语": 5}
     _PROFILE_TOKEN = {"简体": "简", "繁体": "繁", "中文": "中", "日语": "日", "英语": "英", "韩语": "韩"}
 
-    def __init__(self, cache_size: int = 128) -> None:
+    def __init__(self, cache_size: int = 128, max_concurrent: int = 2) -> None:
         self._lock = threading.RLock()
         self._cache: "OrderedDict[Tuple[str, int, int], Dict[str, Any]]" = OrderedDict()
         self._cache_size = max(8, int(cache_size))
+        self._probe_slots = threading.BoundedSemaphore(max(1, int(max_concurrent)))
+        self._inflight: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
         self._scans = 0
         self._cache_hits = 0
         self._errors = 0
@@ -513,6 +515,7 @@ class MediaFileProbe:
                     "当前 MoviePilot 进程未找到 ffprobe；官方新版 Docker 镜像已内置"
                 ),
                 "cache_entries": len(self._cache),
+                "active_scans": len(self._inflight),
                 "scans": self._scans,
                 "cache_hits": self._cache_hits,
                 "errors": self._errors,
@@ -575,20 +578,50 @@ class MediaFileProbe:
                 self._cache.move_to_end(cache_key)
                 self._cache_hits += 1
                 return deepcopy({**cached, "cached": True})
+            flight = self._inflight.get(cache_key)
+            is_owner = flight is None
+            if is_owner:
+                flight = {"event": threading.Event(), "result": None}
+                self._inflight[cache_key] = flight
+        if not is_owner:
+            # A preview and an actual transfer can request the same file at the
+            # same time. Reuse the in-progress scan instead of spawning another
+            # ffprobe process.
+            completed = flight["event"].wait(effective_timeout + 2)
+            result = deepcopy(flight.get("result"))
+            if completed and isinstance(result, dict):
+                with self._lock:
+                    self._cache_hits += 1
+                return {**result, "cached": True}
+            return {
+                "success": False,
+                "reason": "等待同一文件的 ffprobe 扫描超时",
+                "fields": {},
+                "context": {},
+                "source_path": str(path),
+            }
+        result: Dict[str, Any] = {
+            "success": False,
+            "reason": "ffprobe 扫描未返回结果",
+            "fields": {},
+            "context": {},
+            "source_path": str(path),
+        }
         try:
-            completed = subprocess.run(
-                [
-                    executable, "-v", "error", "-print_format", "json",
-                    "-show_streams", "-show_format", "-show_chapters", input_arg,
-                ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=effective_timeout,
-                check=False,
-                shell=False,
-            )
+            with self._probe_slots:
+                completed = subprocess.run(
+                    [
+                        executable, "-v", "error", "-print_format", "json",
+                        "-show_streams", "-show_format", "-show_chapters", input_arg,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=effective_timeout,
+                    check=False,
+                    shell=False,
+                )
             if completed.returncode != 0:
                 raise RuntimeError((completed.stderr or "ffprobe 执行失败").strip()[-500:])
             raw_payload = json.loads(completed.stdout or "{}")
@@ -605,15 +638,27 @@ class MediaFileProbe:
                 self._cache.move_to_end(cache_key)
                 while len(self._cache) > self._cache_size:
                     self._cache.popitem(last=False)
-            return result
         except subprocess.TimeoutExpired:
             reason = f"ffprobe 超过 {effective_timeout} 秒未完成"
+            result = {
+                "success": False, "reason": reason, "fields": {}, "context": {},
+                "source_path": str(path),
+            }
         except Exception as err:
             reason = str(err) or err.__class__.__name__
-        with self._lock:
-            self._errors += 1
-            self._last_error = reason
-        return {"success": False, "reason": reason, "fields": {}, "context": {}, "source_path": str(path)}
+            result = {
+                "success": False, "reason": reason, "fields": {}, "context": {},
+                "source_path": str(path),
+            }
+        finally:
+            with self._lock:
+                if not result.get("success"):
+                    self._errors += 1
+                    self._last_error = str(result.get("reason") or "")
+                active_flight = self._inflight.pop(cache_key, None) or flight
+                active_flight["result"] = deepcopy(result)
+                active_flight["event"].set()
+        return result
 
     @staticmethod
     def parse_subtitle_rules(value: Any) -> List[Dict[str, Any]]:

@@ -216,6 +216,12 @@ async function queryCandidates(options = {}) {
 function switchWorkspace(value) {
   activeWorkspace.value = value
   if (value === 'records') showRecords.value = true
+  if (value === 'candidates') {
+    queryCandidates()
+    startCandidateRefresh()
+  } else {
+    stopCandidateRefresh()
+  }
 }
 
 async function candidateAction(action, candidateType = 'ready') {
@@ -386,9 +392,21 @@ async function sendDigest() {
 
 let candidateRefreshTimer = null
 
+function stopCandidateRefresh() {
+  if (candidateRefreshTimer) window.clearInterval(candidateRefreshTimer)
+  candidateRefreshTimer = null
+}
+
+function startCandidateRefresh() {
+  stopCandidateRefresh()
+  if (activeWorkspace.value !== 'candidates') return
+  candidateRefreshTimer = window.setInterval(refreshCandidatesWhenVisible, 60000)
+}
+
 function refreshCandidatesWhenVisible() {
   if (
-    document.visibilityState === 'visible'
+    activeWorkspace.value === 'candidates'
+    && document.visibilityState === 'visible'
     && !actionLoading.value
     && !manualCandidateDialog.value
   ) {
@@ -398,14 +416,12 @@ function refreshCandidatesWhenVisible() {
 
 onMounted(async () => {
   await load()
-  await queryCandidates()
-  candidateRefreshTimer = window.setInterval(refreshCandidatesWhenVisible, 15000)
   document.addEventListener('visibilitychange', refreshCandidatesWhenVisible)
   window.addEventListener('focus', refreshCandidatesWhenVisible)
 })
 
 onBeforeUnmount(() => {
-  if (candidateRefreshTimer) window.clearInterval(candidateRefreshTimer)
+  stopCandidateRefresh()
   document.removeEventListener('visibilitychange', refreshCandidatesWhenVisible)
   window.removeEventListener('focus', refreshCandidatesWhenVisible)
 })

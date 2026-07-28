@@ -19,7 +19,9 @@ sys.modules.setdefault("app", app_module)
 sys.modules.setdefault("app.schemas", schemas_module)
 sys.modules.setdefault("app.schemas.types", types_module)
 
-module_path = Path(__file__).parents[1] / "plugins.v2" / "tmdbrecognizeenhancer" / "episode_normalizer.py"
+plugin_path = Path(__file__).parents[1] / "plugins.v2" / "tmdbrecognizeenhancer"
+sys.path.insert(0, str(plugin_path))
+module_path = plugin_path / "episode_normalizer.py"
 spec = importlib.util.spec_from_file_location("episode_normalizer_under_test", module_path)
 normalizer_module = importlib.util.module_from_spec(spec)
 assert spec and spec.loader

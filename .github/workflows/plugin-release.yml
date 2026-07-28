@@ -11,7 +11,6 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: write
   contents: write
 
 concurrency:
@@ -27,14 +26,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Remove pre-sanitization workflow runs
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Python tests
         shell: bash
         run: |
-          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/29434486724" || true
-          gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/runs/29434961298" || true
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check pytest
+          python -m pytest -q
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: plugins.v2/tmdbrecognizeenhancer/package-lock.json
 
       - name: Validate current version
         shell: bash
@@ -64,6 +73,28 @@ jobs:
           jq -e --arg version "v${package_version}" \
             '.TmdbRecognizeEnhancer.history[$version] | type == "string" and length > 0' \
             package.v2.json >/dev/null
+
+      - name: Build and verify frontend
+        working-directory: plugins.v2/tmdbrecognizeenhancer
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+
+      - name: Verify committed frontend is current
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(jq -r '.TmdbRecognizeEnhancer.version' package.v2.json)"
+          dist_dir="plugins.v2/tmdbrecognizeenhancer/dist/ui/v${package_version}"
+          test -f "${dist_dir}/assets/remoteEntry.js"
+          if [ -n "$(git status --porcelain --untracked-files=all -- "${dist_dir}")" ]; then
+            echo "::error::Committed frontend assets are stale. Run npm ci && npm run build, then commit the generated current-version dist."
+            git status --short --untracked-files=all -- "${dist_dir}"
+            git diff -- "${dist_dir}"
+            exit 1
+          fi
 
       - name: Create installable releases
         env:
@@ -121,16 +152,6 @@ jobs:
               --title "$tag" \
               --notes "$notes"
           }
-
-          # 这两个提交分别是仓库中可准确还原的 0.2.2 与 0.2.3 源码。
-          create_release \
-            "0.2.2" \
-            "25fc6b8edad49c3cfc6d3e093238e305c293935e" \
-            "修复管理页标题对比度与试跑提示字段布局；运行记录改为稳定静态列表。"
-          create_release \
-            "0.2.3" \
-            "74dda1836f357ffb16c520030aa180e49f307247" \
-            "统一插件作者信息为 NNeiru，并更新作者主页。"
 
           current_version="$(jq -r '.TmdbRecognizeEnhancer.version' package.v2.json)"
           current_notes="$(jq -r --arg version "v${current_version}" '.TmdbRecognizeEnhancer.history[$version] // "Automated plugin release"' package.v2.json)"

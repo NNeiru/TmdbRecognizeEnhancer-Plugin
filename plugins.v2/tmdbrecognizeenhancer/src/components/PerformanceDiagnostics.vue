@@ -84,14 +84,25 @@ function stopTimer() {
 }
 function syncTimer() {
   stopTimer()
-  if (!autoRefresh.value) return
+  if (!autoRefresh.value || (typeof document !== 'undefined' && document.hidden)) return
   sample()
   timer = setInterval(sample, Math.max(2, Number(intervalSeconds.value) || 3) * 1000)
 }
 
+function handleVisibilityChange() {
+  if (document.hidden) stopTimer()
+  else syncTimer()
+}
+
 watch([autoRefresh, intervalSeconds], syncTimer)
-onMounted(syncTimer)
-onBeforeUnmount(stopTimer)
+onMounted(() => {
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+  syncTimer()
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  stopTimer()
+})
 
 function sparkline(key) {
   const values = samples.value.map(item => Number(item[key])).filter(Number.isFinite)
